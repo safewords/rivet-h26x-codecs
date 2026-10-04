@@ -9,6 +9,14 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job runs on the safewords org's self-hosted runners
+# (`safewords-runners`), pull requests from forks included: an outside
+# contributor's workflow runs only once a maintainer approves it. arm64 is
+# covered on the same x86-64 runners: cross-compiled for
+# aarch64-unknown-linux-gnu and run under QEMU's user-mode emulator, so the
+# NEON kernels are still checked against the scalar ones. No Windows or macOS
+# CI: the code stays portable, but nothing here tests it there.
+
 jobs:
   test:
     name: tests (${{ matrix.name }})
@@ -22,13 +30,29 @@ jobs:
           # `require` names a SIMD rung the host is expected to have, so the
           # tests for it fail rather than skip if a runner ever loses it —
           # a skipped kernel test is indistinguishable from a passing one.
-          - { name: linux x86-64 (AVX2), os: ubuntu-latest }
-          - { name: linux arm64 (NEON),  os: ubuntu-24.04-arm, require: dotprod }
-          - { name: windows x86-64,      os: windows-latest }
-          - { name: macos arm64 (NEON),  os: macos-latest,     require: dotprod }
+          - { name: linux x86-64 (AVX2), os: safewords-runners }
+          - { name: linux arm64 (NEON) under QEMU,  os: safewords-runners, target: aarch64-unknown-linux-gnu, require: dotprod }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: aarch64 cross toolchain and QEMU
+        # The arm64 entry: cargo builds for aarch64-unknown-linux-gnu and runs
+        # every test binary under qemu-aarch64. The runner image has these;
+        # the install is a fallback for an image that predates them.
+        if: matrix.target
+        run: |
+          if ! command -v qemu-aarch64 >/dev/null || ! command -v aarch64-linux-gnu-gcc >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+          fi
+          {
+            echo "CARGO_BUILD_TARGET=${{ matrix.target }}"
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=qemu-aarch64 -L /usr/aarch64-linux-gnu"
+            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+          } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: Build (lib + examples)
         run: cargo build --release --examples
@@ -47,7 +71,7 @@ jobs:
 
   msrv:
     name: MSRV (1.99)
-    runs-on: ubuntu-latest
+    runs-on: safewords-runners
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99
@@ -56,7 +80,7 @@ jobs:
 
   docs:
     name: rustdoc
-    runs-on: ubuntu-latest
+    runs-on: safewords-runners
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,7 +96,7 @@ jobs:
     # compared with this crate's decoder picture for picture. The tests'
     # expected hashes were computed from these decoders' output; this job
     # re-checks that on every push. No FFmpeg anywhere.
-    runs-on: ubuntu-latest
+    runs-on: safewords-runners
     env:
       JM_REF: master
       HM_REF: HM-18.0
