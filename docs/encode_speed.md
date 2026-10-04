@@ -627,3 +627,47 @@ Every stream is byte for byte what it was:
 - the same 966 cells against the previous encoder;
 - every rung of `verify_enc_ladder.sh`;
 - every rung of the decoder fixtures against `baseline.txt`.
+
+## The pipeline SIMD pass (`perf/simd-pass`, 2026-10-04)
+
+Profiled with samply on clips made by rivet's own `bench_corpus --yuv`
+(motion, 60 frames, 720p and 1080p, QP 27, GOP 30, two B frames, one
+thread). The decoders had no scalar hot spot left: an H.264 1080p decode's
+largest self-time entries are CABAC and the harness's MD5. The encoders had
+three, and this pass took them:
+
+- **H.265 angular intra prediction on 8-bit tables** (12.5% of an H.265
+  encode): the 8-bit table ran the 16-bit-lane kernel. `hevc_avx2_u8` now
+  packs the references to bytes and runs `(32 - f, f)` through
+  `pmaddubsw` + `pmulhrsw` (exact), 32 samples a vector; a 4x4 block is one
+  vector built by `pshufb` from the broadcast references. NEON gets the
+  byte-lane form (`umull`/`umlal`, `rshrn #5`). `predict_prepared` builds
+  `ref[]` once per mode family instead of once per mode: a fresh build right
+  before the kernel's wide loads failed store forwarding (4x4: 3.5 ns a
+  call with settled references, 9.7 with rewritten ones).
+- **The weighted-prediction fit** (6.8% of rivet's H.264 transcode):
+  `plane_sums` (f64, sample by sample) and `weighted_sad` are now
+  `DistortionDsp` entries `wp_moments` / `weighted_sad`, AVX2 and NEON,
+  integer, converted to the same `f64` sums while they stay below 2^53.
+- **H.264 4x4 / 8x8 intra** (6% of an H.264 encode) was tried as an
+  edge-pool table form and measured slower than the existing per-sample
+  code (13.4 against 6.1 ns a 4x4 call); not kept.
+
+| kernel (ns a call) | scalar | before (AVX-128) | AVX2 |
+|---|---:|---:|---:|
+| `intra_angular` 4x4 | 20.3 | 9.4 | 3.5 |
+| `intra_angular` 16x16 | 191 | 35.9 | 20.4 |
+| `intra_angular` 32x32 | 584 | 132 | 37.0 (noisy: 82) |
+| `wp_moments`, 1080p plane (ms) | 1.52 | — | 0.060 |
+| `weighted_sad`, 1080p plane (ms) | 1.76 | — | 0.197 |
+
+End to end, develop's binary against this branch's, minimum of three
+alternated runs, machine shared: H.265 encode 1080p 13.87 -> 12.20 s (4.32
+-> 4.92 fps), 720p 5.68 -> 5.41 s; H.264 `--wpred` 720p 2.16 -> 2.00 s,
+1080p 5.17 -> 4.95 s; H.264 without weighting and both decoders unchanged
+within noise.
+
+Identity: `identity_encode.sh`, develop's encoder against this branch's,
+**1127 identical, 0 moved**; `verify.sh --baseline`: fixtures 53/53, every
+rung identical, h264 204, h264_pp 27, hevc 147, hevc_rext 49 pass, every
+stream decodes to develop's bytes.
