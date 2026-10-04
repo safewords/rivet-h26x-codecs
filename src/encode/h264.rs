@@ -38,18 +38,18 @@
 //! records the measurement that decided it.
 
 use super::gop::{Coded, Kind, Scheduler};
-use super::rc::{Insensitivity, PicKind, RateController};
+use super::h264_me::BWeights;
 use super::h264_syntax as syn;
 use super::h265_wp;
+use super::rc::{Insensitivity, PicKind, RateController};
+use super::{Access, BWeighting, Config, Entropy, FieldCoding, FieldOrder, RateControl};
+use crate::bitwriter::BitWriter;
 use crate::dsp::Cpu;
 use crate::dsp::distortion::DistortionDsp;
-use crate::h264::slice::{PredWeightTable, WeightEntry};
-use super::h264_me::BWeights;
-use super::{Access, BWeighting, Config, Entropy, FieldCoding, FieldOrder, RateControl};
-use crate::h264::recon::implicit_pair;
-use crate::bitwriter::BitWriter;
 use crate::h264::dpb::{DecodedPic, Dpb, PocState, RefMark};
 use crate::h264::frame::{BlockMotion, Frame, PARITY_FRAME, SharedFrame};
+use crate::h264::recon::implicit_pair;
+use crate::h264::slice::{PredWeightTable, WeightEntry};
 use crate::sample::Sample;
 use crate::{Error, Result};
 use std::sync::Arc;
@@ -238,7 +238,11 @@ impl RefModel {
         dpb.num_reorder = d.num_reorder;
         dpb.max_long_term_frame_idx = d.max_long_term_frame_idx;
         dpb.crop = d.crop;
-        RefModel { dpb, poc: self.poc.clone(), next_id: self.next_id }
+        RefModel {
+            dpb,
+            poc: self.poc.clone(),
+            next_id: self.next_id,
+        }
     }
 }
 
@@ -264,19 +268,28 @@ struct StoredFrame<S: Sample> {
 /// macroblocks, the frame marked field-coded with its fields' POCs — built
 /// with the decoder's own `take_field_motion_row`, which is how the decoder
 /// lays out the colocated frame its direct derivation reads.
-fn field_pair_motion<S: Sample>(frame: &StoredFrame<S>, g: &syn::Geometry, field_poc: [i32; 2]) -> Frame<u8> {
+fn field_pair_motion<S: Sample>(
+    frame: &StoredFrame<S>,
+    g: &syn::Geometry,
+    field_poc: [i32; 2],
+) -> Frame<u8> {
     let (mbw, mbh) = (g.mbs_wide as usize, g.mbs_high as usize);
     let n = mbw * mbh;
     let mut col = Frame::<u8>::empty();
     col.mb_width = mbw;
     col.mb_height = mbh;
-    col.motion = [vec![BlockMotion::default(); n * 16], vec![BlockMotion::default(); n * 16]];
+    col.motion = [
+        vec![BlockMotion::default(); n * 16],
+        vec![BlockMotion::default(); n * 16],
+    ];
     col.mb_intra = vec![false; n];
     col.mb_field = vec![false; n];
     col.field_coded = true;
     col.field_poc = field_poc;
     for (p, field) in frame.fields.iter().enumerate() {
-        let field = field.as_ref().expect("both fields are coded before the frame's motion is laid out");
+        let field = field
+            .as_ref()
+            .expect("both fields are coded before the frame's motion is laid out");
         for r in 0..mbh / 2 {
             col.take_field_motion_row(&field.motion.frame, r, p);
         }
@@ -309,8 +322,14 @@ struct FieldsOut<S: Sample> {
 /// from.
 fn stored_fields<S: Sample>(r: &StoredFrame<S>) -> [&[syn::Recon<S>]; 2] {
     [
-        &r.fields[0].as_ref().expect("a stored frame carries both fields").planes[..],
-        &r.fields[1].as_ref().expect("a stored frame carries both fields").planes[..],
+        &r.fields[0]
+            .as_ref()
+            .expect("a stored frame carries both fields")
+            .planes[..],
+        &r.fields[1]
+            .as_ref()
+            .expect("a stored frame carries both fields")
+            .planes[..],
     ]
 }
 
@@ -318,16 +337,27 @@ impl<S: Sample> Fields<S> {
     /// A slice header as the decoder reads it: written alone, closed, and
     /// parsed by the production parser against this stream's own parameter
     /// sets.
-    fn read_back(&self, header: &syn::SliceHeader, pps_qp: u8, nal_type: u8, nal_ref_idc: u8) -> Result<crate::h264::SliceHeader> {
+    fn read_back(
+        &self,
+        header: &syn::SliceHeader,
+        pps_qp: u8,
+        nal_type: u8,
+        nal_ref_idc: u8,
+    ) -> Result<crate::h264::SliceHeader> {
         let mut hw = BitWriter::new();
         syn::write_slice_header(header, pps_qp, &mut hw);
         hw.rbsp_trailing_bits();
         let nal = syn::annexb(nal_type, nal_ref_idc, &hw.into_nal());
-        let nh = crate::nal::H264NalHeader::parse(&nal[4..])
-            .ok_or_else(|| Error::bitstream("H.264 encode: a picture's own NAL header does not parse"))?;
+        let nh = crate::nal::H264NalHeader::parse(&nal[4..]).ok_or_else(|| {
+            Error::bitstream("H.264 encode: a picture's own NAL header does not parse")
+        })?;
         let rbsp = crate::nal::unescape_rbsp(&nal[4..]);
-        let (h, _, _) =
-            crate::h264::SliceHeader::parse(&rbsp, nh, &|_id: u32| Some(self.pps.clone()), &|_id: u32| Some(self.sps.clone()))?;
+        let (h, _, _) = crate::h264::SliceHeader::parse(
+            &rbsp,
+            nh,
+            &|_id: u32| Some(self.pps.clone()),
+            &|_id: u32| Some(self.sps.clone()),
+        )?;
         Ok(h)
     }
 }
@@ -358,7 +388,11 @@ fn model_store(
         frame: shared.clone(),
         poc,
         field_poc,
-        fields: if parity == PARITY_FRAME { 3 } else { 1 << parity },
+        fields: if parity == PARITY_FRAME {
+            3
+        } else {
+            1 << parity
+        },
         frame_num,
         frame_num_wrap: frame_num as i32,
         long_term_frame_idx: 0,
@@ -422,7 +456,11 @@ fn ssd_packed<S: Sample>(src: &[S], rec: &[u8]) -> u64 {
     src.iter()
         .enumerate()
         .map(|(i, s)| {
-            let r = if S::BYTES == 1 { i64::from(rec[i]) } else { i64::from(u16::from_le_bytes([rec[2 * i], rec[2 * i + 1]])) };
+            let r = if S::BYTES == 1 {
+                i64::from(rec[i])
+            } else {
+                i64::from(u16::from_le_bytes([rec[2 * i], rec[2 * i + 1]]))
+            };
             let d = i64::from(s.to_i32()) - r;
             (d * d) as u64
         })
@@ -546,14 +584,32 @@ impl ShapeCensus {
     /// Every macroblock kind, in the order `counts` is indexed.
     pub const KINDS: [crate::h264::mb::MbKind; 11] = {
         use crate::h264::mb::MbKind::*;
-        [I4x4, I8x8, I16x16, IPcm, Inter16x16, Inter16x8, Inter8x16, Inter8x8, PSkip, BSkip, BDirect16x16]
+        [
+            I4x4,
+            I8x8,
+            I16x16,
+            IPcm,
+            Inter16x16,
+            Inter16x8,
+            Inter8x16,
+            Inter8x8,
+            PSkip,
+            BSkip,
+            BDirect16x16,
+        ]
     };
 
     /// Count one coded picture's macroblocks, coded at picture quantiser
     /// `pic_qp`: their kinds, and — read off the same committed `MbInfo`
     /// the loop filter reads — how many left that quantiser and how many
     /// coded a delta to do it.
-    fn add(&mut self, kind: Kind, mbs: &[crate::h264::mb::MbInfo], pic_qp: u8, weighting: super::h264_pic::WeightCensus) {
+    fn add(
+        &mut self,
+        kind: Kind,
+        mbs: &[crate::h264::mb::MbInfo],
+        pic_qp: u8,
+        weighting: super::h264_pic::WeightCensus,
+    ) {
         let pic = match kind {
             Kind::Idr | Kind::I => 0,
             Kind::P => 1,
@@ -562,7 +618,10 @@ impl ShapeCensus {
         self.pictures[pic] += 1;
         let mut deltas = 0u64;
         for m in mbs {
-            let k = Self::KINDS.iter().position(|&k| k == m.kind).expect("every kind is listed");
+            let k = Self::KINDS
+                .iter()
+                .position(|&k| k == m.kind)
+                .expect("every kind is listed");
             self.counts[pic][k] += 1;
             self.qp_moved[pic] += u64::from(i32::from(m.qp) != i32::from(pic_qp));
             deltas += u64::from(m.qp_delta_nonzero);
@@ -605,7 +664,11 @@ impl H264Encoder {
     /// the 8..=14 both decoders admit.
     pub fn new(cfg: Config) -> Result<Self> {
         cfg.validate()?;
-        let inner = if cfg.bit_depth > 8 { Inner::Wide(Core::new(cfg)?) } else { Inner::Eight(Core::new(cfg)?) };
+        let inner = if cfg.bit_depth > 8 {
+            Inner::Wide(Core::new(cfg)?)
+        } else {
+            Inner::Eight(Core::new(cfg)?)
+        };
         Ok(H264Encoder { inner })
     }
 
@@ -806,7 +869,11 @@ impl<S: Sample> Core<S> {
             2 * (cfg.width as usize).div_ceil(sw as usize)
                 * (cfg.height as usize).div_ceil(sh as usize)
         };
-        debug_assert_eq!(S::BYTES, if cfg.bit_depth > 8 { 2 } else { 1 }, "the face picks the width");
+        debug_assert_eq!(
+            S::BYTES,
+            if cfg.bit_depth > 8 { 2 } else { 1 },
+            "the face picks the width"
+        );
         let sched = Scheduler::new(cfg.gop, cfg.bframes);
         let mut cfg = cfg;
         // A stream with B pictures keeps two marked references — the two
@@ -831,7 +898,9 @@ impl<S: Sample> Core<S> {
             plane_dims.push((cw, chh));
             plane_dims.push((cw, chh));
         }
-        let tools = super::h264_pic::IntraTools::new(cfg.transform_8x8, cfg.subparts, cfg.bit_depth).with_aq(cfg.aq_strength);
+        let tools =
+            super::h264_pic::IntraTools::new(cfg.transform_8x8, cfg.subparts, cfg.bit_depth)
+                .with_aq(cfg.aq_strength);
         // The buffer to declare, snapped to what the syntax can carry —
         // the same rules, and the same refusals, as the H.265 side.
         let cpb = match (cfg.cpb_ms, cfg.rate) {
@@ -853,7 +922,9 @@ impl<S: Sample> Core<S> {
         // Declared at a constant rate where the caller asked for one
         // (`Config::validate` has refused it without a buffer).
         let cpb = cpb.map(|c| c.with_cbr(cfg.cbr));
-        let cbr = cpb.filter(|c| c.cbr).map(|c| super::hrd::ConstantRate::new(&c, cfg.frame_rate()));
+        let cbr = cpb
+            .filter(|c| c.cbr)
+            .map(|c| super::hrd::ConstantRate::new(&c, cfg.frame_rate()));
         // The level the SPS will claim: refused here, before any header
         // exists, when no level admits the stream (`encode::level`). The
         // motion search is then held to what that level allows.
@@ -864,13 +935,32 @@ impl<S: Sample> Core<S> {
             // was declared, so the two cannot disagree by the rounding.
             RateControl::Bitrate { bps } => Some(match cpb {
                 Some(c) if c.cbr => RateController::with_cpb(
-                    c.bit_rate as u32, cfg.frame_rate_f64(), cfg.width, cfg.height, cfg.gop, cfg.bframes, Some(c.size),
+                    c.bit_rate as u32,
+                    cfg.frame_rate_f64(),
+                    cfg.width,
+                    cfg.height,
+                    cfg.gop,
+                    cfg.bframes,
+                    Some(c.size),
                 )
                 .constant_rate(),
                 Some(c) => RateController::with_cpb(
-                    c.bit_rate as u32, cfg.frame_rate_f64(), cfg.width, cfg.height, cfg.gop, cfg.bframes, Some(c.size),
+                    c.bit_rate as u32,
+                    cfg.frame_rate_f64(),
+                    cfg.width,
+                    cfg.height,
+                    cfg.gop,
+                    cfg.bframes,
+                    Some(c.size),
                 ),
-                None => RateController::new(bps, cfg.frame_rate_f64(), cfg.width, cfg.height, cfg.gop, cfg.bframes),
+                None => RateController::new(
+                    bps,
+                    cfg.frame_rate_f64(),
+                    cfg.width,
+                    cfg.height,
+                    cfg.gop,
+                    cfg.bframes,
+                ),
             }),
             _ => None,
         };
@@ -888,15 +978,28 @@ impl<S: Sample> Core<S> {
         let fields = match cfg.interlace {
             None => None,
             Some(order) => {
-                let sps_nal = syn::write_sps(&cfg, &geom, LOG2_MAX_FRAME_NUM, LOG2_MAX_POC_LSB, cpb.as_ref());
+                let sps_nal = syn::write_sps(
+                    &cfg,
+                    &geom,
+                    LOG2_MAX_FRAME_NUM,
+                    LOG2_MAX_POC_LSB,
+                    cpb.as_ref(),
+                );
                 let sps = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&sps_nal))?;
                 let look = |_id: u32| Some(sps.clone());
-                let pps = crate::h264::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(&cfg, pps_qp)), &look)?;
+                let pps = crate::h264::Pps::parse(
+                    &crate::nal::unescape_rbsp(&syn::write_pps(&cfg, pps_qp)),
+                    &look,
+                )?;
                 Some(Fields {
                     order,
                     sps,
                     pps,
-                    model: RefModel { dpb: Dpb::new(), poc: PocState::default(), next_id: 1 },
+                    model: RefModel {
+                        dpb: Dpb::new(),
+                        poc: PocState::default(),
+                        next_id: 1,
+                    },
                     stored: Vec::new(),
                 })
             }
@@ -957,10 +1060,9 @@ impl<S: Sample> Core<S> {
     fn code(&mut self, ready: Vec<Coded>) -> Result<Vec<Access>> {
         let mut out = Vec::with_capacity(ready.len());
         for c in ready {
-            let src = self
-                .held
-                .remove(&c.display)
-                .ok_or_else(|| Error::bitstream("H.264 encode: scheduler released an absent picture"))?;
+            let src = self.held.remove(&c.display).ok_or_else(|| {
+                Error::bitstream("H.264 encode: scheduler released an absent picture")
+            })?;
             let mut access = self.code_picture(c, &src)?;
             let filler = self.stuff(&mut access);
             // The ledger closes here, at the one place every picture of
@@ -991,9 +1093,15 @@ impl<S: Sample> Core<S> {
     /// buffer. Returns the filler's bytes: none at a variable rate, and
     /// none for a picture that spent what the buffer had room for.
     fn stuff(&mut self, access: &mut Access) -> usize {
-        let Some(buffer) = self.cbr.as_mut() else { return 0 };
+        let Some(buffer) = self.cbr.as_mut() else {
+            return 0;
+        };
         let over = buffer.filler_bits(access.data.len() as u64 * 8);
-        let filler = if over > 0 { syn::filler_nal(over) } else { Vec::new() };
+        let filler = if over > 0 {
+            syn::filler_nal(over)
+        } else {
+            Vec::new()
+        };
         access.data.extend_from_slice(&filler);
         buffer.remove(access.data.len() as u64 * 8);
         filler.len()
@@ -1028,7 +1136,10 @@ impl<S: Sample> Core<S> {
             };
             // Under a constant rate the buffer is walked exactly as well,
             // and the exact figure is the one the stream is held to.
-            let afford = self.cbr.as_ref().map_or(afford, |b| afford.min(b.available()));
+            let afford = self
+                .cbr
+                .as_ref()
+                .map_or(afford, |b| afford.min(b.available()));
             let starving = self.rc.as_ref().is_some_and(|rc| rc.starving(qp, bits));
             if bits <= afford && !starving {
                 if let Some(rc) = self.rc.as_mut() {
@@ -1086,7 +1197,10 @@ impl<S: Sample> Core<S> {
                     Kind::P => PicKind::Inter,
                     Kind::B => PicKind::B,
                 };
-                self.rc.as_mut().expect("a bitrate configuration builds a controller").pick_qp(kind)
+                self.rc
+                    .as_mut()
+                    .expect("a bitrate configuration builds a controller")
+                    .pick_qp(kind)
             }
             _ => self.picture_qp(c.kind),
         }
@@ -1108,7 +1222,8 @@ impl<S: Sample> Core<S> {
             // attempt ran, and the reconstruction kept while the model
             // still marks it — the frame counters exactly as a frame's.
             for (kind, mbs) in &out.census {
-                self.census.add(*kind, mbs, qp, super::h264_pic::WeightCensus::default());
+                self.census
+                    .add(*kind, mbs, qp, super::h264_pic::WeightCensus::default());
                 if out.frame_coded {
                     self.census.frame_pictures += 1;
                 } else {
@@ -1122,17 +1237,27 @@ impl<S: Sample> Core<S> {
                 self.idr_pic_id ^= 1;
                 self.last_bp_encode = c.encode;
             }
-            let f = self.fields.as_mut().expect("a field attempt comes from an interlaced encoder");
+            let f = self
+                .fields
+                .as_mut()
+                .expect("a field attempt comes from an interlaced encoder");
             f.model = out.model;
             if c.reference {
                 self.frame_num = (self.frame_num + 1) & ((1 << LOG2_MAX_FRAME_NUM) - 1);
                 f.stored.push(out.frame);
             }
             let model = &f.model;
-            f.stored.retain(|s| model.dpb.pics.iter().any(|p| p.frame.id == s.id && p.is_ref()));
+            f.stored.retain(|s| {
+                model
+                    .dpb
+                    .pics
+                    .iter()
+                    .any(|p| p.frame.id == s.id && p.is_ref())
+            });
             return a.access;
         }
-        self.census.add(c.kind, &a.motion.info.mbs, qp, a.motion.weighting);
+        self.census
+            .add(c.kind, &a.motion.info.mbs, qp, a.motion.weighting);
         if idr {
             // The attempt wrote `frame_num` 0 for an IDR; the count
             // restarts from there.
@@ -1169,7 +1294,13 @@ impl<S: Sample> Core<S> {
     /// The stream's SPS and PPS payloads as they stand.
     fn current_sets(&self) -> (Vec<u8>, Vec<u8>) {
         (
-            syn::write_sps(&self.cfg, &self.geom, LOG2_MAX_FRAME_NUM, LOG2_MAX_POC_LSB, self.cpb.as_ref()),
+            syn::write_sps(
+                &self.cfg,
+                &self.geom,
+                LOG2_MAX_FRAME_NUM,
+                LOG2_MAX_POC_LSB,
+                self.cpb.as_ref(),
+            ),
             syn::write_pps(&self.cfg, self.pps_qp),
         )
     }
@@ -1258,7 +1389,9 @@ impl<S: Sample> Core<S> {
         let mut plain = self.code_attempt_weighted(c, src, qp, false, false)?;
         let scale = f64::from(1u32 << (2 * (self.cfg.bit_depth - 8)));
         let lam = f64::from(super::h264_intra::lambda(i32::from(qp))) * scale;
-        let cost = |a: &Attempt<S>| ssd_packed(src, &a.rec) as f64 + lam * (a.access.data.len() * 8) as f64;
+        let cost = |a: &Attempt<S>| {
+            ssd_packed(src, &a.rec) as f64 + lam * (a.access.data.len() * 8) as f64
+        };
         if cost(&plain) < cost(&fitted) {
             plain.motion.weighting.priced = true;
             plain.motion.weighting.rd_default = true;
@@ -1277,10 +1410,15 @@ impl<S: Sample> Core<S> {
     /// `P_Skip` predicts through the table and the all-skip path, which
     /// copies the reference, would not be what a decoder makes of it.
     fn skip_fallback(&self, c: &Coded, src: &[S], qp: u8) -> Result<Option<Attempt<S>>> {
-        if c.kind != Kind::P || self.fields.is_some() || self.cfg.weighted_pred || matches!(self.cfg.rate, RateControl::Lossless) {
+        if c.kind != Kind::P
+            || self.fields.is_some()
+            || self.cfg.weighted_pred
+            || matches!(self.cfg.rate, RateControl::Lossless)
+        {
             return Ok(None);
         }
-        self.code_attempt_weighted(c, src, qp, false, true).map(Some)
+        self.code_attempt_weighted(c, src, qp, false, true)
+            .map(Some)
     }
 
     /// Code one picture at a given quantiser, keeping nothing: parameter
@@ -1294,7 +1432,14 @@ impl<S: Sample> Core<S> {
     ///
     /// `skip` codes a P picture as every macroblock `P_Skip` whatever the
     /// configuration: the buffer's last resort ([`Self::skip_fallback`]).
-    fn code_attempt_weighted(&self, c: &Coded, src: &[S], qp: u8, fit: bool, skip: bool) -> Result<Attempt<S>> {
+    fn code_attempt_weighted(
+        &self,
+        c: &Coded,
+        src: &[S],
+        qp: u8,
+        fit: bool,
+        skip: bool,
+    ) -> Result<Attempt<S>> {
         let g = self.geom;
         let idr = c.kind == Kind::Idr;
         // Reference lists, by picture order count: list0 runs backwards from
@@ -1332,8 +1477,11 @@ impl<S: Sample> Core<S> {
         // The same border the decoder gives its own frames, because these
         // planes are the decoder's type and its intra predictors read
         // neighbours out of that border.
-        let mut recon: Vec<syn::Recon<S>> =
-            vec![syn::recon_plane(g.coded_width, g.coded_height, crate::h264::frame::LUMA_PAD)];
+        let mut recon: Vec<syn::Recon<S>> = vec![syn::recon_plane(
+            g.coded_width,
+            g.coded_height,
+            crate::h264::frame::LUMA_PAD,
+        )];
         if cw != 0 {
             // 4:4:4 chroma is a luma-like plane: its motion compensation
             // runs the six-tap luma kernel, whose windows assume the luma
@@ -1412,15 +1560,21 @@ impl<S: Sample> Core<S> {
         let mut strong_fit = false;
         let wp = match c.kind {
             Kind::P if self.cfg.weighted_pred && transform_p => {
-                let (table, strong) = self.p_weights(&planes, &self.refs[past.expect("checked above")].1, fit);
+                let (table, strong) =
+                    self.p_weights(&planes, &self.refs[past.expect("checked above")].1, fit);
                 strong_fit = strong;
                 Some(table)
             }
-            Kind::B if transform_b && syn::b_weighting(&self.cfg) == BWeighting::Explicit => Some(self.b_weights(
-                &planes,
-                [&self.refs[past.expect("checked above")].1, &self.refs[future.expect("checked above")].1],
-                fit,
-            )),
+            Kind::B if transform_b && syn::b_weighting(&self.cfg) == BWeighting::Explicit => {
+                Some(self.b_weights(
+                    &planes,
+                    [
+                        &self.refs[past.expect("checked above")].1,
+                        &self.refs[future.expect("checked above")].1,
+                    ],
+                    fit,
+                ))
+            }
             _ => None,
         };
         let mut out = self.param_sets(idr);
@@ -1441,7 +1595,9 @@ impl<S: Sample> Core<S> {
             // long the buffer has actually been filling for this picture.
             if idr {
                 let bp = match self.cbr.as_ref() {
-                    Some(buffer) => syn::write_buffering_period_sei_at(cpb, buffer.initial_delay_90k()),
+                    Some(buffer) => {
+                        syn::write_buffering_period_sei_at(cpb, buffer.initial_delay_90k())
+                    }
                     None => syn::write_buffering_period_sei(cpb),
                 };
                 out.extend_from_slice(&syn::annexb(syn::NAL_SEI, 0, &bp));
@@ -1459,10 +1615,18 @@ impl<S: Sample> Core<S> {
         // any of them carries it.
         if idr {
             if let Some(m) = self.cfg.mastering_display.as_ref() {
-                out.extend_from_slice(&syn::annexb(syn::NAL_SEI, 0, &syn::write_mastering_display_sei(m)));
+                out.extend_from_slice(&syn::annexb(
+                    syn::NAL_SEI,
+                    0,
+                    &syn::write_mastering_display_sei(m),
+                ));
             }
             if let Some(c) = self.cfg.content_light.as_ref() {
-                out.extend_from_slice(&syn::annexb(syn::NAL_SEI, 0, &syn::write_content_light_level_sei(c)));
+                out.extend_from_slice(&syn::annexb(
+                    syn::NAL_SEI,
+                    0,
+                    &syn::write_content_light_level_sei(c),
+                ));
             }
         }
 
@@ -1503,10 +1667,7 @@ impl<S: Sample> Core<S> {
         // skip), because a later B picture reads it as colocated motion.
         let synth = |kind: crate::h264::mb::MbKind, l0: bool, l1: bool| {
             use crate::h264::frame::{BlockMotion, Mv, PARITY_FRAME};
-            let mut pm = super::h264_pic::PicMotion::new(
-                g.mbs_wide as usize,
-                g.mbs_high as usize,
-            );
+            let mut pm = super::h264_pic::PicMotion::new(g.mbs_wide as usize, g.mbs_high as usize);
             let mut mot = [[BlockMotion::default(); 16]; 2];
             for (l, used) in [(0usize, l0), (1usize, l1)] {
                 if used {
@@ -1531,7 +1692,11 @@ impl<S: Sample> Core<S> {
                         slice: 0,
                         qp: qp as i8,
                         qpc: [qpc; 2],
-                        nz_mask: if kind == crate::h264::mb::MbKind::IPcm { 0xffff } else { 0 },
+                        nz_mask: if kind == crate::h264::mb::MbKind::IPcm {
+                            0xffff
+                        } else {
+                            0
+                        },
                         ..crate::h264::mb::MbInfo::default()
                     },
                     &mot,
@@ -1547,11 +1712,21 @@ impl<S: Sample> Core<S> {
             // follows them (9.3.4.6) — on both the transform and PCM paths.
             if transform_intra && cabac {
                 motion = super::h264_cabac_mb::write_intra_picture_cabac(
-                    &mut w, &g, &self.tools, qp, &planes, &mut recon,
+                    &mut w,
+                    &g,
+                    &self.tools,
+                    qp,
+                    &planes,
+                    &mut recon,
                 );
             } else if transform_intra {
                 motion = super::h264_cavlc_mb::write_intra_picture(
-                    &mut w, &g, &self.tools, qp, &planes, &mut recon,
+                    &mut w,
+                    &g,
+                    &self.tools,
+                    qp,
+                    &planes,
+                    &mut recon,
                 );
                 w.rbsp_trailing_bits();
             } else if cabac {
@@ -1612,18 +1787,35 @@ impl<S: Sample> Core<S> {
             let weights = match (syn::b_weighting(&self.cfg), wp.as_ref()) {
                 (BWeighting::Explicit, Some(p)) => BWeights::Explicit(&p.table),
                 (BWeighting::Implicit, _) => {
-                    let (w0, w1) = implicit_pair(c.poc, self.refs[p0].0, self.refs[p1].0, false, false);
+                    let (w0, w1) =
+                        implicit_pair(c.poc, self.refs[p0].0, self.refs[p1].0, false, false);
                     BWeights::Implicit(w0, w1)
                 }
                 _ => BWeights::Default,
             };
             if cabac {
                 motion = super::h264_cabac_mb::write_b_picture_cabac(
-                    &mut w, &g, &self.tools, qp, &planes, &mut recon, refs2, &col, weights,
+                    &mut w,
+                    &g,
+                    &self.tools,
+                    qp,
+                    &planes,
+                    &mut recon,
+                    refs2,
+                    &col,
+                    weights,
                 );
             } else {
                 motion = super::h264_cavlc_mb::write_b_picture(
-                    &mut w, &g, &self.tools, qp, &planes, &mut recon, refs2, &col, weights,
+                    &mut w,
+                    &g,
+                    &self.tools,
+                    qp,
+                    &planes,
+                    &mut recon,
+                    refs2,
+                    &col,
+                    weights,
                 );
                 w.rbsp_trailing_bits();
             }
@@ -1736,7 +1928,10 @@ impl<S: Sample> Core<S> {
     /// decoder builds for it (see [`Fields`]), and a 4:2:0 field predicting
     /// from the other parity takes Table 8-10's chroma offset.
     fn code_attempt_fields(&self, c: &Coded, src: &[S], qp: u8) -> Result<Attempt<S>> {
-        let f = self.fields.as_ref().expect("an interlaced encoder carries its field state");
+        let f = self
+            .fields
+            .as_ref()
+            .expect("an interlaced encoder carries its field state");
         let g = self.geom;
         let idr = c.kind == Kind::Idr;
         let cabac = self.cfg.entropy == Entropy::Cabac;
@@ -1748,7 +1943,12 @@ impl<S: Sample> Core<S> {
         // The model's stand-in for this frame: both fields' entries are one
         // DPB entry, found by this shared frame.
         let shared = Arc::new(SharedFrame::new(Frame::<u8>::empty(), id, true));
-        let mut cur = StoredFrame::<S> { id, fields: [None, None], frame: Vec::new(), col: Frame::empty() };
+        let mut cur = StoredFrame::<S> {
+            id,
+            fields: [None, None],
+            frame: Vec::new(),
+            col: Frame::empty(),
+        };
         let mut census = Vec::with_capacity(2);
         let mut field_poc = [0i32; 2];
         for k in 0..2usize {
@@ -1760,7 +1960,11 @@ impl<S: Sample> Core<S> {
                 (1, Kind::Idr | Kind::I) => Kind::P,
                 (_, kind) => kind,
             };
-            let nal_type = if kind == Kind::Idr { syn::NAL_IDR } else { syn::NAL_SLICE };
+            let nal_type = if kind == Kind::Idr {
+                syn::NAL_IDR
+            } else {
+                syn::NAL_SLICE
+            };
             let nal_ref_idc = if c.reference { 3 } else { 0 };
             let header = syn::SliceHeader {
                 kind,
@@ -1794,9 +1998,22 @@ impl<S: Sample> Core<S> {
             // field parity).
             let mut ref0: [Option<(u64, usize)>; 2] = [None, None];
             if !kind.is_intra() {
-                let rl = crate::h264::dpb::build_ref_lists(&mut model.dpb, &f.sps, &hdr, poc, parity as u8)?;
-                for (l, r) in ref0.iter_mut().enumerate().take(if kind == Kind::B { 2 } else { 1 }) {
-                    let (i, par) = rl.lists[l].first().copied().unwrap_or(crate::h264::dpb::MISSING_REF);
+                let rl = crate::h264::dpb::build_ref_lists(
+                    &mut model.dpb,
+                    &f.sps,
+                    &hdr,
+                    poc,
+                    parity as u8,
+                )?;
+                for (l, r) in ref0
+                    .iter_mut()
+                    .enumerate()
+                    .take(if kind == Kind::B { 2 } else { 1 })
+                {
+                    let (i, par) = rl.lists[l]
+                        .first()
+                        .copied()
+                        .unwrap_or(crate::h264::dpb::MISSING_REF);
                     if i >= model.dpb.pics.len() {
                         return Err(Error::bitstream(format!(
                             "H.264 encode: field {k} of picture {} has no reference at index 0 of list {l}",
@@ -1807,8 +2024,13 @@ impl<S: Sample> Core<S> {
                 }
             }
             let field_of = |r: Option<(u64, usize)>| -> Result<&StoredField<S>> {
-                let (rid, par) = r.expect("an inter field has its list 0 (and a B field its list 1)");
-                let frame = if rid == cur.id { Some(&cur) } else { f.stored.iter().find(|s| s.id == rid) };
+                let (rid, par) =
+                    r.expect("an inter field has its list 0 (and a B field its list 1)");
+                let frame = if rid == cur.id {
+                    Some(&cur)
+                } else {
+                    f.stored.iter().find(|s| s.id == rid)
+                };
                 frame.and_then(|fr| fr.fields[par].as_ref()).ok_or_else(|| {
                     Error::bitstream("H.264 encode: the reference model names a field that was never reconstructed")
                 })
@@ -1817,23 +2039,38 @@ impl<S: Sample> Core<S> {
             // offsets its vertical chroma vector by a quarter chroma sample.
             let dy = |r: Option<(u64, usize)>| match r {
                 Some((_, rp)) if g.chroma == crate::ChromaFormat::Yuv420 && rp != parity => {
-                    if parity == 1 { 2 } else { -2 }
+                    if parity == 1 {
+                        2
+                    } else {
+                        -2
+                    }
                 }
                 _ => 0,
             };
-            let gf = syn::Geometry { chroma_mv_dy: [dy(ref0[0]), dy(ref0[1])], ..g.field() };
+            let gf = syn::Geometry {
+                chroma_mv_dy: [dy(ref0[0]), dy(ref0[1])],
+                ..g.field()
+            };
 
             let fsrc = self.field_source(src, parity);
             let mut planes = Vec::with_capacity(self.plane_dims.len());
             let mut off = 0usize;
             for &(w, h) in &self.plane_dims {
                 let n = (w * (h / 2)) as usize;
-                planes.push(syn::Plane { data: &fsrc[off..off + n], stride: w as usize, width: w, height: h / 2 });
+                planes.push(syn::Plane {
+                    data: &fsrc[off..off + n],
+                    stride: w as usize,
+                    width: w,
+                    height: h / 2,
+                });
                 off += n;
             }
             let (cw, ch) = gf.chroma_mb();
-            let mut recon: Vec<syn::Recon<S>> =
-                vec![syn::recon_plane(gf.coded_width, gf.coded_height, crate::h264::frame::LUMA_PAD)];
+            let mut recon: Vec<syn::Recon<S>> = vec![syn::recon_plane(
+                gf.coded_width,
+                gf.coded_height,
+                crate::h264::frame::LUMA_PAD,
+            )];
             if cw != 0 {
                 let pad = if self.cfg.chroma == crate::ChromaFormat::Yuv444 {
                     crate::h264::frame::LUMA_PAD
@@ -1849,9 +2086,23 @@ impl<S: Sample> Core<S> {
             let motion = match kind {
                 Kind::Idr | Kind::I => {
                     if cabac {
-                        super::h264_cabac_mb::write_intra_picture_cabac(&mut w, &gf, &self.tools, qp, &planes, &mut recon)
+                        super::h264_cabac_mb::write_intra_picture_cabac(
+                            &mut w,
+                            &gf,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                        )
                     } else {
-                        let m = super::h264_cavlc_mb::write_intra_picture(&mut w, &gf, &self.tools, qp, &planes, &mut recon);
+                        let m = super::h264_cavlc_mb::write_intra_picture(
+                            &mut w,
+                            &gf,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                        );
                         w.rbsp_trailing_bits();
                         m
                     }
@@ -1859,9 +2110,27 @@ impl<S: Sample> Core<S> {
                 Kind::P => {
                     let r = field_of(ref0[0])?;
                     if cabac {
-                        super::h264_cabac_mb::write_p_picture_cabac(&mut w, &gf, &self.tools, qp, &planes, &mut recon, &r.planes, None)
+                        super::h264_cabac_mb::write_p_picture_cabac(
+                            &mut w,
+                            &gf,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            &r.planes,
+                            None,
+                        )
                     } else {
-                        let m = super::h264_cavlc_mb::write_p_picture(&mut w, &gf, &self.tools, qp, &planes, &mut recon, &r.planes, None);
+                        let m = super::h264_cavlc_mb::write_p_picture(
+                            &mut w,
+                            &gf,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            &r.planes,
+                            None,
+                        );
                         w.rbsp_trailing_bits();
                         m
                     }
@@ -1874,7 +2143,9 @@ impl<S: Sample> Core<S> {
                     // decoder's colocated mapping for a field picture.
                     let (rid, rpar) = ref0[1].expect("a B field has list 1");
                     let colf = f.stored.iter().find(|s| s.id == rid).ok_or_else(|| {
-                        Error::bitstream("H.264 encode: a B field's list-1 reference is not a stored frame")
+                        Error::bitstream(
+                            "H.264 encode: a B field's list-1 reference is not a stored frame",
+                        )
                     })?;
                     let col = super::h264_pic::Colocated {
                         frame: &colf.col,
@@ -1887,9 +2158,29 @@ impl<S: Sample> Core<S> {
                         },
                     };
                     if cabac {
-                        super::h264_cabac_mb::write_b_picture_cabac(&mut w, &gf, &self.tools, qp, &planes, &mut recon, refs2, &col, super::h264_me::BWeights::Default)
+                        super::h264_cabac_mb::write_b_picture_cabac(
+                            &mut w,
+                            &gf,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            refs2,
+                            &col,
+                            super::h264_me::BWeights::Default,
+                        )
                     } else {
-                        let m = super::h264_cavlc_mb::write_b_picture(&mut w, &gf, &self.tools, qp, &planes, &mut recon, refs2, &col, super::h264_me::BWeights::Default);
+                        let m = super::h264_cavlc_mb::write_b_picture(
+                            &mut w,
+                            &gf,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            refs2,
+                            &col,
+                            super::h264_me::BWeights::Default,
+                        );
                         w.rbsp_trailing_bits();
                         m
                     }
@@ -1899,12 +2190,29 @@ impl<S: Sample> Core<S> {
 
             // The decoder's picture end: its frame_num bookkeeping, then the
             // field stored and marked into the entry it shares with its pair.
-            let recorded = if parity == 0 { [poc, i32::MAX] } else { [i32::MAX, poc] };
-            model_store(&mut model, &f.sps, &hdr, &shared, frame_num, parity as u8, poc, recorded, c.encode)?;
+            let recorded = if parity == 0 {
+                [poc, i32::MAX]
+            } else {
+                [i32::MAX, poc]
+            };
+            model_store(
+                &mut model,
+                &f.sps,
+                &hdr,
+                &shared,
+                frame_num,
+                parity as u8,
+                poc,
+                recorded,
+                c.encode,
+            )?;
 
             crate::encode::h264_me::prepare_reference(&mut recon);
             census.push((kind, motion.info.mbs.clone()));
-            cur.fields[parity] = Some(StoredField { planes: recon, motion });
+            cur.fields[parity] = Some(StoredField {
+                planes: recon,
+                motion,
+            });
         }
 
         cur.col = field_pair_motion(&cur, &g, field_poc);
@@ -1915,17 +2223,32 @@ impl<S: Sample> Core<S> {
         let mut rec = Vec::with_capacity(self.frame_bytes);
         for (i, &(dw, dh)) in self.plane_dims.iter().enumerate() {
             for y in 0..dh as usize {
-                let p = &cur.fields[y % 2].as_ref().expect("both fields were coded").planes[i];
+                let p = &cur.fields[y % 2]
+                    .as_ref()
+                    .expect("both fields were coded")
+                    .planes[i];
                 let row = (y / 2 + p.pad) * p.stride + p.pad;
                 crate::encode::pack_row(&p.data[row..row + dw as usize], &mut rec);
             }
         }
         Ok(Attempt {
-            access: Access { data: out, keyframe: idr, poc: c.poc, encode_index: c.encode, display: c.display },
+            access: Access {
+                data: out,
+                keyframe: idr,
+                poc: c.poc,
+                encode_index: c.encode,
+                display: c.display,
+            },
             rec,
             recon: Vec::new(),
             motion: super::h264_pic::PicMotion::new(0, 0),
-            fields: Some(FieldsOut { model, frame: cur, census, frame_coded: false, pairs: [0; 2] }),
+            fields: Some(FieldsOut {
+                model,
+                frame: cur,
+                census,
+                frame_coded: false,
+                pairs: [0; 2],
+            }),
             strong_fit: false,
         })
     }
@@ -1937,10 +2260,18 @@ impl<S: Sample> Core<S> {
         let mut out = self.param_sets(idr);
         if idr {
             if let Some(m) = self.cfg.mastering_display.as_ref() {
-                out.extend_from_slice(&syn::annexb(syn::NAL_SEI, 0, &syn::write_mastering_display_sei(m)));
+                out.extend_from_slice(&syn::annexb(
+                    syn::NAL_SEI,
+                    0,
+                    &syn::write_mastering_display_sei(m),
+                ));
             }
             if let Some(cl) = self.cfg.content_light.as_ref() {
-                out.extend_from_slice(&syn::annexb(syn::NAL_SEI, 0, &syn::write_content_light_level_sei(cl)));
+                out.extend_from_slice(&syn::annexb(
+                    syn::NAL_SEI,
+                    0,
+                    &syn::write_content_light_level_sei(cl),
+                ));
             }
         }
         out
@@ -1955,7 +2286,10 @@ impl<S: Sample> Core<S> {
     /// as — and a B frame reads colocated motion through the decoder's own
     /// frame-over-frame or frame-over-field-pair mapping.
     fn code_attempt_ilace_frame(&self, c: &Coded, src: &[S], qp: u8) -> Result<Attempt<S>> {
-        let f = self.fields.as_ref().expect("an interlaced encoder carries its field state");
+        let f = self
+            .fields
+            .as_ref()
+            .expect("an interlaced encoder carries its field state");
         let g = self.geom;
         let idr = c.kind == Kind::Idr;
         let cabac = self.cfg.entropy == Entropy::Cabac;
@@ -1997,9 +2331,17 @@ impl<S: Sample> Core<S> {
         let poc = top.min(bottom);
         let mut ref0: [Option<u64>; 2] = [None, None];
         if !kind.is_intra() {
-            let rl = crate::h264::dpb::build_ref_lists(&mut model.dpb, &f.sps, &hdr, poc, PARITY_FRAME)?;
-            for (l, r) in ref0.iter_mut().enumerate().take(if kind == Kind::B { 2 } else { 1 }) {
-                let (i, _) = rl.lists[l].first().copied().unwrap_or(crate::h264::dpb::MISSING_REF);
+            let rl =
+                crate::h264::dpb::build_ref_lists(&mut model.dpb, &f.sps, &hdr, poc, PARITY_FRAME)?;
+            for (l, r) in ref0
+                .iter_mut()
+                .enumerate()
+                .take(if kind == Kind::B { 2 } else { 1 })
+            {
+                let (i, _) = rl.lists[l]
+                    .first()
+                    .copied()
+                    .unwrap_or(crate::h264::dpb::MISSING_REF);
                 if i >= model.dpb.pics.len() {
                     return Err(Error::bitstream(format!(
                         "H.264 encode: frame picture {} has no reference at index 0 of list {l}",
@@ -2012,7 +2354,9 @@ impl<S: Sample> Core<S> {
         let frame_of = |r: Option<u64>| -> Result<&StoredFrame<S>> {
             let rid = r.expect("an inter frame has its list 0 (and a B frame its list 1)");
             f.stored.iter().find(|s| s.id == rid).ok_or_else(|| {
-                Error::bitstream("H.264 encode: the reference model names a frame that was never reconstructed")
+                Error::bitstream(
+                    "H.264 encode: the reference model names a frame that was never reconstructed",
+                )
             })
         };
 
@@ -2020,12 +2364,20 @@ impl<S: Sample> Core<S> {
         let mut off = 0usize;
         for &(pw, ph) in &self.plane_dims {
             let n = (pw * ph) as usize;
-            planes.push(syn::Plane { data: &src[off..off + n], stride: pw as usize, width: pw, height: ph });
+            planes.push(syn::Plane {
+                data: &src[off..off + n],
+                stride: pw as usize,
+                width: pw,
+                height: ph,
+            });
             off += n;
         }
         let (cw, ch) = g.chroma_mb();
-        let mut recon: Vec<syn::Recon<S>> =
-            vec![syn::recon_plane(g.coded_width, g.coded_height, crate::h264::frame::LUMA_PAD)];
+        let mut recon: Vec<syn::Recon<S>> = vec![syn::recon_plane(
+            g.coded_width,
+            g.coded_height,
+            crate::h264::frame::LUMA_PAD,
+        )];
         if cw != 0 {
             let pad = if self.cfg.chroma == crate::ChromaFormat::Yuv444 {
                 crate::h264::frame::LUMA_PAD
@@ -2046,7 +2398,10 @@ impl<S: Sample> Core<S> {
                 Kind::Idr | Kind::I => super::h264_pic::MbaffRefs::Intra,
                 Kind::P => {
                     let r = frame_of(ref0[0])?;
-                    super::h264_pic::MbaffRefs::P { frame: &r.frame, fields: stored_fields(r) }
+                    super::h264_pic::MbaffRefs::P {
+                        frame: &r.frame,
+                        fields: stored_fields(r),
+                    }
                 }
                 Kind::B => {
                     let (r0, r1) = (frame_of(ref0[0])?, frame_of(ref0[1])?);
@@ -2073,15 +2428,33 @@ impl<S: Sample> Core<S> {
             };
             if cabac {
                 let m = {
-                    let mut mw = super::h264_cabac_mb::MbaffCabac::new(&mut w, &g, &self.tools, qp, slice);
-                    super::h264_pic::code_mbaff_picture(&g, &self.tools, qp, &planes, &mut recon, mrefs, &mut mw)
+                    let mut mw =
+                        super::h264_cabac_mb::MbaffCabac::new(&mut w, &g, &self.tools, qp, slice);
+                    super::h264_pic::code_mbaff_picture(
+                        &g,
+                        &self.tools,
+                        qp,
+                        &planes,
+                        &mut recon,
+                        mrefs,
+                        &mut mw,
+                    )
                 };
                 w.align_zero();
                 m
             } else {
                 let m = {
-                    let mut mw = super::h264_cavlc_mb::MbaffCavlc::new(&mut w, &g, &self.tools, slice);
-                    let m = super::h264_pic::code_mbaff_picture(&g, &self.tools, qp, &planes, &mut recon, mrefs, &mut mw);
+                    let mut mw =
+                        super::h264_cavlc_mb::MbaffCavlc::new(&mut w, &g, &self.tools, slice);
+                    let m = super::h264_pic::code_mbaff_picture(
+                        &g,
+                        &self.tools,
+                        qp,
+                        &planes,
+                        &mut recon,
+                        mrefs,
+                        &mut mw,
+                    );
                     mw.finish();
                     m
                 };
@@ -2089,51 +2462,113 @@ impl<S: Sample> Core<S> {
                 m
             }
         } else {
-        match kind {
-            Kind::Idr | Kind::I => {
-                if cabac {
-                    super::h264_cabac_mb::write_intra_picture_cabac(&mut w, &g, &self.tools, qp, &planes, &mut recon)
-                } else {
-                    let m = super::h264_cavlc_mb::write_intra_picture(&mut w, &g, &self.tools, qp, &planes, &mut recon);
-                    w.rbsp_trailing_bits();
-                    m
+            match kind {
+                Kind::Idr | Kind::I => {
+                    if cabac {
+                        super::h264_cabac_mb::write_intra_picture_cabac(
+                            &mut w,
+                            &g,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                        )
+                    } else {
+                        let m = super::h264_cavlc_mb::write_intra_picture(
+                            &mut w,
+                            &g,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                        );
+                        w.rbsp_trailing_bits();
+                        m
+                    }
+                }
+                Kind::P => {
+                    let r = frame_of(ref0[0])?;
+                    if cabac {
+                        super::h264_cabac_mb::write_p_picture_cabac(
+                            &mut w,
+                            &g,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            &r.frame,
+                            None,
+                        )
+                    } else {
+                        let m = super::h264_cavlc_mb::write_p_picture(
+                            &mut w,
+                            &g,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            &r.frame,
+                            None,
+                        );
+                        w.rbsp_trailing_bits();
+                        m
+                    }
+                }
+                Kind::B => {
+                    let (r0, r1) = (frame_of(ref0[0])?, frame_of(ref0[1])?);
+                    let refs2 = [&r0.frame[..], &r1.frame[..]];
+                    let col = super::h264_pic::Colocated {
+                        frame: &r1.col,
+                        map: crate::h264::recon::ColMap {
+                            cur_parity: PARITY_FRAME,
+                            col_parity: PARITY_FRAME,
+                            cur_poc: poc,
+                            cur_mbaff: false,
+                            mb_width: g.mbs_wide as usize,
+                        },
+                    };
+                    if cabac {
+                        super::h264_cabac_mb::write_b_picture_cabac(
+                            &mut w,
+                            &g,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            refs2,
+                            &col,
+                            super::h264_me::BWeights::Default,
+                        )
+                    } else {
+                        let m = super::h264_cavlc_mb::write_b_picture(
+                            &mut w,
+                            &g,
+                            &self.tools,
+                            qp,
+                            &planes,
+                            &mut recon,
+                            refs2,
+                            &col,
+                            super::h264_me::BWeights::Default,
+                        );
+                        w.rbsp_trailing_bits();
+                        m
+                    }
                 }
             }
-            Kind::P => {
-                let r = frame_of(ref0[0])?;
-                if cabac {
-                    super::h264_cabac_mb::write_p_picture_cabac(&mut w, &g, &self.tools, qp, &planes, &mut recon, &r.frame, None)
-                } else {
-                    let m = super::h264_cavlc_mb::write_p_picture(&mut w, &g, &self.tools, qp, &planes, &mut recon, &r.frame, None);
-                    w.rbsp_trailing_bits();
-                    m
-                }
-            }
-            Kind::B => {
-                let (r0, r1) = (frame_of(ref0[0])?, frame_of(ref0[1])?);
-                let refs2 = [&r0.frame[..], &r1.frame[..]];
-                let col = super::h264_pic::Colocated {
-                    frame: &r1.col,
-                    map: crate::h264::recon::ColMap {
-                        cur_parity: PARITY_FRAME,
-                        col_parity: PARITY_FRAME,
-                        cur_poc: poc,
-                        cur_mbaff: false,
-                        mb_width: g.mbs_wide as usize,
-                    },
-                };
-                if cabac {
-                    super::h264_cabac_mb::write_b_picture_cabac(&mut w, &g, &self.tools, qp, &planes, &mut recon, refs2, &col, super::h264_me::BWeights::Default)
-                } else {
-                    let m = super::h264_cavlc_mb::write_b_picture(&mut w, &g, &self.tools, qp, &planes, &mut recon, refs2, &col, super::h264_me::BWeights::Default);
-                    w.rbsp_trailing_bits();
-                    m
-                }
-            }
-        }
         };
         out.extend_from_slice(&syn::annexb(nal_type, nal_ref_idc, &w.into_nal()));
-        model_store(&mut model, &f.sps, &hdr, &shared, frame_num, PARITY_FRAME, poc, [top, bottom], c.encode)?;
+        model_store(
+            &mut model,
+            &f.sps,
+            &hdr,
+            &shared,
+            frame_num,
+            PARITY_FRAME,
+            poc,
+            [top, bottom],
+            c.encode,
+        )?;
 
         let mut rec = Vec::with_capacity(self.frame_bytes);
         syn::crop_into(&recon[0], g.width, g.height, &mut rec);
@@ -2150,21 +2585,39 @@ impl<S: Sample> Core<S> {
         col.mb_height = g.mbs_high as usize;
         col.motion = motion.frame.motion.clone();
         col.mb_intra = motion.frame.mb_intra.clone();
-        col.mb_field = if g.mbaff { motion.frame.mb_field.clone() } else { vec![false; n] };
+        col.mb_field = if g.mbaff {
+            motion.frame.mb_field.clone()
+        } else {
+            vec![false; n]
+        };
         col.mbaff = g.mbaff;
         col.field_poc = [top, bottom];
         let fields = [0usize, 1].map(|p| {
-            Some(StoredField { planes: extract_field(&recon, p), motion: super::h264_pic::PicMotion::new(0, 0) })
+            Some(StoredField {
+                planes: extract_field(&recon, p),
+                motion: super::h264_pic::PicMotion::new(0, 0),
+            })
         });
         let census = vec![(kind, motion.info.mbs.clone())];
         Ok(Attempt {
-            access: Access { data: out, keyframe: idr, poc: c.poc, encode_index: c.encode, display: c.display },
+            access: Access {
+                data: out,
+                keyframe: idr,
+                poc: c.poc,
+                encode_index: c.encode,
+                display: c.display,
+            },
             rec,
             recon: Vec::new(),
             motion: super::h264_pic::PicMotion::new(0, 0),
             fields: Some(FieldsOut {
                 model,
-                frame: StoredFrame { id, fields, frame: recon, col },
+                frame: StoredFrame {
+                    id,
+                    fields,
+                    frame: recon,
+                    col,
+                },
                 census,
                 frame_coded: true,
                 pairs: motion.pairs,
@@ -2206,13 +2659,23 @@ impl<S: Sample> Core<S> {
         let frame = self.code_attempt_ilace_frame(c, src, qp)?;
         let scale = f64::from(1u32 << (2 * (self.cfg.bit_depth - 8)));
         let lam = f64::from(super::h264_intra::lambda(i32::from(qp))) * scale;
-        let cost = |a: &Attempt<S>| ssd_packed(src, &a.rec) as f64 + lam * (a.access.data.len() * 8) as f64;
-        Ok(if cost(&field) < cost(&frame) { field } else { frame })
+        let cost = |a: &Attempt<S>| {
+            ssd_packed(src, &a.rec) as f64 + lam * (a.access.data.len() * 8) as f64
+        };
+        Ok(if cost(&field) < cost(&frame) {
+            field
+        } else {
+            frame
+        })
     }
 
     /// Component `p` of reference `rf` as the fit reads it.
     fn fit_ref<'r>(rf: &'r [syn::Recon<S>], p: usize) -> h265_wp::RefSamples<'r, S> {
-        h265_wp::RefSamples { data: &rf[p].data, origin: rf[p].origin(), stride: rf[p].stride }
+        h265_wp::RefSamples {
+            data: &rf[p].data,
+            origin: rf[p].origin(),
+            stride: rf[p].stride,
+        }
     }
 
     /// A P picture's `pred_weight_table`: one entry, for list 0's one
@@ -2222,7 +2685,12 @@ impl<S: Sample> Core<S> {
     /// is priced against) or when no fit is worth pricing
     /// ([`h265_wp::PlaneFit::worth_pricing`]) — and whether any of the fits
     /// is [`h265_wp::PlaneFit::strong`].
-    fn p_weights(&self, planes: &[syn::Plane<'_, S>], rf: &[syn::Recon<S>], fit: bool) -> (syn::PredWeights, bool) {
+    fn p_weights(
+        &self,
+        planes: &[syn::Plane<'_, S>],
+        rf: &[syn::Recon<S>],
+        fit: bool,
+    ) -> (syn::PredWeights, bool) {
         let dist = DistortionDsp::<S>::new(Cpu::detect_honouring_env());
         let fits: Vec<h265_wp::PlaneFit> = (0..self.plane_dims.len())
             .map(|p| {
@@ -2231,7 +2699,16 @@ impl<S: Sample> Core<S> {
                 }
                 let (pw, ph) = self.plane_dims[p];
                 let refs = Self::fit_ref(rf, p);
-                h265_wp::fit_samples(&dist, planes[p].data, planes[p].stride, refs, pw as usize, ph as usize, self.cfg.bit_depth, h265_wp::H264_WEIGHTS)
+                h265_wp::fit_samples(
+                    &dist,
+                    planes[p].data,
+                    planes[p].stride,
+                    refs,
+                    pw as usize,
+                    ph as usize,
+                    self.cfg.bit_depth,
+                    h265_wp::H264_WEIGHTS,
+                )
             })
             .collect();
         // A fit that removes under a tenth of the zero-motion SAD is the
@@ -2244,17 +2721,48 @@ impl<S: Sample> Core<S> {
         // ones are kept unpriced (`code_attempt`).
         let strong = fits.iter().any(h265_wp::PlaneFit::strong);
         let kept = strong || fits.iter().any(h265_wp::PlaneFit::worth_pricing);
-        let fits: Vec<h265_wp::PlaneFit> = if kept { fits } else { vec![h265_wp::PlaneFit::identity(0); fits.len()] };
+        let fits: Vec<h265_wp::PlaneFit> = if kept {
+            fits
+        } else {
+            vec![h265_wp::PlaneFit::identity(0); fits.len()]
+        };
         // A component class the fit leaves at the defaults takes
         // denominator 0, the cheapest to write, as a B table's does.
-        let luma_d = if fits[0].used() { h265_wp::LOG2_DENOM } else { 0 };
-        let chroma_d = if fits[1..].iter().any(h265_wp::PlaneFit::used) { h265_wp::LOG2_DENOM } else { 0 };
-        let comp = |f: &h265_wp::PlaneFit, d: u32| if f.used() { (f.weight, f.offset) } else { (1i32 << d, 0i32) };
+        let luma_d = if fits[0].used() {
+            h265_wp::LOG2_DENOM
+        } else {
+            0
+        };
+        let chroma_d = if fits[1..].iter().any(h265_wp::PlaneFit::used) {
+            h265_wp::LOG2_DENOM
+        } else {
+            0
+        };
+        let comp = |f: &h265_wp::PlaneFit, d: u32| {
+            if f.used() {
+                (f.weight, f.offset)
+            } else {
+                (1i32 << d, 0i32)
+            }
+        };
         let luma = comp(&fits[0], luma_d);
-        let chroma = if fits.len() == 3 { [comp(&fits[1], chroma_d), comp(&fits[2], chroma_d)] } else { [(1i32 << chroma_d, 0i32); 2] };
-        let entry = WeightEntry { luma, chroma, luma_flag: luma != (1 << luma_d, 0), chroma_flag: chroma != [(1 << chroma_d, 0); 2] };
+        let chroma = if fits.len() == 3 {
+            [comp(&fits[1], chroma_d), comp(&fits[2], chroma_d)]
+        } else {
+            [(1i32 << chroma_d, 0i32); 2]
+        };
+        let entry = WeightEntry {
+            luma,
+            chroma,
+            luma_flag: luma != (1 << luma_d, 0),
+            chroma_flag: chroma != [(1 << chroma_d, 0); 2],
+        };
         let table = syn::PredWeights {
-            table: PredWeightTable { luma_log2_denom: luma_d, chroma_log2_denom: chroma_d, lists: [vec![entry], Vec::new()] },
+            table: PredWeightTable {
+                luma_log2_denom: luma_d,
+                chroma_log2_denom: chroma_d,
+                lists: [vec![entry], Vec::new()],
+            },
             chroma: self.cfg.chroma != crate::ChromaFormat::Monochrome,
         };
         (table, strong)
@@ -2281,18 +2789,35 @@ impl<S: Sample> Core<S> {
     /// denominator makes the pair legal — both gains near the top of what
     /// the syntax carries — the component keeps the defaults, which every
     /// denominator allows. Not `fit`: the table of defaults throughout.
-    fn b_weights(&self, planes: &[syn::Plane<'_, S>], anchors: [&[syn::Recon<S>]; 2], fit: bool) -> syn::PredWeights {
+    fn b_weights(
+        &self,
+        planes: &[syn::Plane<'_, S>],
+        anchors: [&[syn::Recon<S>]; 2],
+        fit: bool,
+    ) -> syn::PredWeights {
         let bd = self.cfg.bit_depth;
         let dist = DistortionDsp::<S>::new(Cpu::detect_honouring_env());
         let fit_pairs = |comps: &[usize]| -> (u32, Vec<[h265_wp::PlaneFit; 2]>) {
             if !fit {
-                return (h265_wp::LOG2_DENOM, vec![[h265_wp::PlaneFit::identity(0); 2]; comps.len()]);
+                return (
+                    h265_wp::LOG2_DENOM,
+                    vec![[h265_wp::PlaneFit::identity(0); 2]; comps.len()],
+                );
             }
             let sums: Vec<[h265_wp::PlaneSums; 2]> = comps
                 .iter()
                 .map(|&p| {
                     let (pw, ph) = self.plane_dims[p];
-                    anchors.map(|rf| h265_wp::plane_sums(&dist, planes[p].data, planes[p].stride, Self::fit_ref(rf, p), pw as usize, ph as usize))
+                    anchors.map(|rf| {
+                        h265_wp::plane_sums(
+                            &dist,
+                            planes[p].data,
+                            planes[p].stride,
+                            Self::fit_ref(rf, p),
+                            pw as usize,
+                            ph as usize,
+                        )
+                    })
                 })
                 .collect();
             for d in (0..=h265_wp::LOG2_DENOM).rev() {
@@ -2303,34 +2828,75 @@ impl<S: Sample> Core<S> {
                         let (pw, ph) = self.plane_dims[p];
                         [0usize, 1].map(|l| {
                             let refs = Self::fit_ref(anchors[l], p);
-                            h265_wp::fit_samples_at(&dist, &s[l], planes[p].data, planes[p].stride, refs, pw as usize, ph as usize, bd, h265_wp::H264_WEIGHTS, d)
+                            h265_wp::fit_samples_at(
+                                &dist,
+                                &s[l],
+                                planes[p].data,
+                                planes[p].stride,
+                                refs,
+                                pw as usize,
+                                ph as usize,
+                                bd,
+                                h265_wp::H264_WEIGHTS,
+                                d,
+                            )
                         })
                     })
                     .collect();
                 let weight = |f: &h265_wp::PlaneFit| if f.used() { f.weight } else { 1 << d };
-                if fits.iter().all(|[f0, f1]| bi_pair_legal(weight(f0), weight(f1), d)) {
+                if fits
+                    .iter()
+                    .all(|[f0, f1]| bi_pair_legal(weight(f0), weight(f1), d))
+                {
                     return (d, fits);
                 }
             }
-            (h265_wp::LOG2_DENOM, vec![[h265_wp::PlaneFit::identity(0); 2]; comps.len()])
+            (
+                h265_wp::LOG2_DENOM,
+                vec![[h265_wp::PlaneFit::identity(0); 2]; comps.len()],
+            )
         };
         let (luma_d, luma) = fit_pairs(&[0]);
-        let (chroma_d, chroma) = if planes.len() == 3 { fit_pairs(&[1, 2]) } else { (h265_wp::LOG2_DENOM, Vec::new()) };
+        let (chroma_d, chroma) = if planes.len() == 3 {
+            fit_pairs(&[1, 2])
+        } else {
+            (h265_wp::LOG2_DENOM, Vec::new())
+        };
         // A component class whose entries are all the defaults weights
         // nothing at any denominator — `(1 << d, 0)` is the identity at
         // every `d`, one list and two — so it takes the one that is
         // cheapest to write: `ue(0)` is one bit where `ue(6)` is five.
-        let weighted = |fits: &[[h265_wp::PlaneFit; 2]]| fits.iter().flatten().any(h265_wp::PlaneFit::used);
+        let weighted =
+            |fits: &[[h265_wp::PlaneFit; 2]]| fits.iter().flatten().any(h265_wp::PlaneFit::used);
         let luma_d = if weighted(&luma) { luma_d } else { 0 };
         let chroma_d = if weighted(&chroma) { chroma_d } else { 0 };
-        let comp = |f: &h265_wp::PlaneFit, d: u32| if f.used() { (f.weight, f.offset) } else { (1i32 << d, 0i32) };
+        let comp = |f: &h265_wp::PlaneFit, d: u32| {
+            if f.used() {
+                (f.weight, f.offset)
+            } else {
+                (1i32 << d, 0i32)
+            }
+        };
         let entry = |l: usize| {
             let y = comp(&luma[0][l], luma_d);
-            let c = if chroma.is_empty() { [(1i32 << chroma_d, 0i32); 2] } else { [comp(&chroma[0][l], chroma_d), comp(&chroma[1][l], chroma_d)] };
-            WeightEntry { luma: y, chroma: c, luma_flag: y != (1 << luma_d, 0), chroma_flag: c != [(1 << chroma_d, 0); 2] }
+            let c = if chroma.is_empty() {
+                [(1i32 << chroma_d, 0i32); 2]
+            } else {
+                [comp(&chroma[0][l], chroma_d), comp(&chroma[1][l], chroma_d)]
+            };
+            WeightEntry {
+                luma: y,
+                chroma: c,
+                luma_flag: y != (1 << luma_d, 0),
+                chroma_flag: c != [(1 << chroma_d, 0); 2],
+            }
         };
         syn::PredWeights {
-            table: PredWeightTable { luma_log2_denom: luma_d, chroma_log2_denom: chroma_d, lists: [vec![entry(0)], vec![entry(1)]] },
+            table: PredWeightTable {
+                luma_log2_denom: luma_d,
+                chroma_log2_denom: chroma_d,
+                lists: [vec![entry(0)], vec![entry(1)]],
+            },
             chroma: self.cfg.chroma != crate::ChromaFormat::Monochrome,
         }
     }
@@ -2399,7 +2965,13 @@ mod tests {
     use crate::encode::Config;
 
     fn cfg(w: u32, h: u32, chroma: ChromaFormat, depth: u32) -> Config {
-        Config { width: w, height: h, chroma, bit_depth: depth, ..Config::default() }
+        Config {
+            width: w,
+            height: h,
+            chroma,
+            bit_depth: depth,
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -2442,7 +3014,10 @@ mod tests {
         let Err(err) = H264Encoder::new(cfg(64, 64, ChromaFormat::Yuv420, 15)) else {
             panic!("15-bit was accepted")
         };
-        assert!(format!("{err}").contains("bit depth outside 8..=14"), "{err}");
+        assert!(
+            format!("{err}").contains("bit depth outside 8..=14"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2457,11 +3032,19 @@ mod tests {
     /// would be a desync far from its cause.
     #[test]
     fn a_sample_above_the_declared_depth_refuses() {
-        let mut e = H264Encoder::new(Config { gop: 0, ..cfg(64, 64, ChromaFormat::Yuv420, 10) }).unwrap();
+        let mut e = H264Encoder::new(Config {
+            gop: 0,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 10)
+        })
+        .unwrap();
         let mut frame = vec![0u8; e.frame_bytes()];
         frame[..2].copy_from_slice(&1024u16.to_le_bytes());
         let err = e.push(&frame).expect_err("1024 does not fit 10 bits");
-        assert!(format!("{err}").contains("H.264 encode: source sample 1024 exceeds the declared 10-bit depth"), "{err}");
+        assert!(
+            format!("{err}")
+                .contains("H.264 encode: source sample 1024 exceeds the declared 10-bit depth"),
+            "{err}"
+        );
     }
 
     /// Both entropy coders code whole GOPs now — all-intra and IP alike —
@@ -2478,7 +3061,11 @@ mod tests {
             })
             .unwrap();
             let out = e.push(&frame).unwrap();
-            assert_eq!(out.len(), 1, "{entropy:?}: an all-intra picture should code");
+            assert_eq!(
+                out.len(),
+                1,
+                "{entropy:?}: an all-intra picture should code"
+            );
             assert!(out[0].keyframe, "{entropy:?}: the first picture is an IDR");
 
             let mut e = H264Encoder::new(Config {
@@ -2518,39 +3105,76 @@ mod tests {
                 f
             })
             .collect();
-        let ilace = |coding| Config { interlace: Some(FieldOrder::TopFirst), field_coding: coding, ..cfg(64, 64, ChromaFormat::Yuv420, 8) };
+        let ilace = |coding| Config {
+            interlace: Some(FieldOrder::TopFirst),
+            field_coding: coding,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        };
         for (tag, config) in [
             ("progressive", cfg(64, 64, ChromaFormat::Yuv420, 8)),
-            ("progressive IPB", Config { bframes: 2, ..cfg(64, 64, ChromaFormat::Yuv420, 8) }),
+            (
+                "progressive IPB",
+                Config {
+                    bframes: 2,
+                    ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+                },
+            ),
             ("field pairs", ilace(FieldCoding::Field)),
             ("PAFF", ilace(FieldCoding::Paff)),
             ("MBAFF", ilace(FieldCoding::Mbaff)),
         ] {
-            let mut e = H264Encoder::new(Config { gop: 8, rate: RateControl::ConstantQp(28), ..config }).unwrap();
+            let mut e = H264Encoder::new(Config {
+                gop: 8,
+                rate: RateControl::ConstantQp(28),
+                ..config
+            })
+            .unwrap();
             let mut units = Vec::new();
             for f in &frames {
                 units.extend(e.push(f).unwrap());
             }
             units.extend(e.flush().unwrap());
             for u in &units {
-                let kinds: Vec<u8> = crate::nal::annexb_nals(&u.data).map(|n| n[0] & 0x1f).collect();
-                let sets = (kinds.iter().filter(|&&t| t == 7).count(), kinds.iter().filter(|&&t| t == 8).count());
+                let kinds: Vec<u8> = crate::nal::annexb_nals(&u.data)
+                    .map(|n| n[0] & 0x1f)
+                    .collect();
+                let sets = (
+                    kinds.iter().filter(|&&t| t == 7).count(),
+                    kinds.iter().filter(|&&t| t == 8).count(),
+                );
                 let want = if u.keyframe { (1, 1) } else { (0, 0) };
-                assert_eq!(sets, want, "{tag}: picture {} (keyframe {}) carries {sets:?} SPS/PPS", u.encode_index, u.keyframe);
+                assert_eq!(
+                    sets, want,
+                    "{tag}: picture {} (keyframe {}) carries {sets:?} SPS/PPS",
+                    u.encode_index, u.keyframe
+                );
             }
-            let cut = units.iter().position(|u| u.keyframe && u.encode_index > 0).expect("a second IDR");
+            let cut = units
+                .iter()
+                .position(|u| u.keyframe && u.encode_index > 0)
+                .expect("a second IDR");
             let mut dec = crate::h264::H264Decoder::new();
             for u in &units[cut..] {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: a stream cut at an IDR: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: a stream cut at an IDR: {err}"));
             }
             dec.flush().unwrap();
             let mut order: Vec<&Access> = units[cut..].iter().collect();
             order.sort_by_key(|u| u.display);
             for u in order {
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {} missing after the cut", u.display));
-                assert!(got.into_packed() == e.reconstructions()[u.encode_index as usize], "{tag}: picture {} after the cut", u.display);
+                let got = dec.next_picture().unwrap_or_else(|| {
+                    panic!("{tag}: picture {} missing after the cut", u.display)
+                });
+                assert!(
+                    got.into_packed() == e.reconstructions()[u.encode_index as usize],
+                    "{tag}: picture {} after the cut",
+                    u.display
+                );
             }
-            assert!(dec.next_picture().is_none(), "{tag}: more pictures out than in after the cut");
+            assert!(
+                dec.next_picture().is_none(),
+                "{tag}: more pictures out than in after the cut"
+            );
         }
     }
 
@@ -2586,7 +3210,10 @@ mod tests {
                 Ok(u) => units.extend(u),
                 Err(err) => {
                     let s = format!("{err}");
-                    assert!(!s.contains("absent picture"), "gop={gop} b={bframes} flush: {s}");
+                    assert!(
+                        !s.contains("absent picture"),
+                        "gop={gop} b={bframes} flush: {s}"
+                    );
                 }
             }
             // Every access unit names the picture it codes by stream-wide
@@ -2594,7 +3221,11 @@ mod tests {
             // B pictures — not in the order they were coded.
             let mut displays: Vec<u64> = units.iter().map(|u| u.display).collect();
             displays.sort_unstable();
-            assert_eq!(displays, (0..6).collect::<Vec<u64>>(), "gop={gop} b={bframes}");
+            assert_eq!(
+                displays,
+                (0..6).collect::<Vec<u64>>(),
+                "gop={gop} b={bframes}"
+            );
             if bframes > 0 {
                 assert!(
                     units.iter().any(|u| u.display != u.encode_index),
@@ -2627,7 +3258,13 @@ mod tests {
     /// range plus a few low bits of noise, translating a little per
     /// picture so the inter pictures have motion to find. The H.265 side's
     /// own generator, for the same reason it exists there.
-    fn deep_frames(w: usize, h: usize, chroma: ChromaFormat, bit_depth: u32, count: usize) -> Vec<Vec<u8>> {
+    fn deep_frames(
+        w: usize,
+        h: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        count: usize,
+    ) -> Vec<Vec<u8>> {
         let (sw, sh) = match chroma {
             ChromaFormat::Yuv420 => (2usize, 2usize),
             ChromaFormat::Yuv422 => (2, 1),
@@ -2655,7 +3292,8 @@ mod tests {
                         for x in 0..cw {
                             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                             let (sx, sy) = (x + dx / sw, y + dy / sh);
-                            let r2 = ((sx as i32 % 17 - 8).abs() * (sy as i32 % 19 - 9).abs()) as u32;
+                            let r2 =
+                                ((sx as i32 % 17 - 8).abs() * (sy as i32 % 19 - 9).abs()) as u32;
                             let base = if c == 0 { max / 3 } else { max * 2 / 3 };
                             push(base + (r2.min(90) * max / 255) + (seed >> 30));
                         }
@@ -2681,25 +3319,49 @@ mod tests {
     #[test]
     fn deep_pictures_round_trip_through_the_decoder() {
         for bit_depth in [10u32, 12, 14] {
-            for chroma in [ChromaFormat::Monochrome, ChromaFormat::Yuv420, ChromaFormat::Yuv422, ChromaFormat::Yuv444] {
+            for chroma in [
+                ChromaFormat::Monochrome,
+                ChromaFormat::Yuv420,
+                ChromaFormat::Yuv422,
+                ChromaFormat::Yuv444,
+            ] {
                 let frames = deep_frames(64, 64, chroma, bit_depth, 5);
                 let max = (1u32 << bit_depth) - 1;
-                let deep = |bytes: &[u8]| bytes.chunks_exact(2).any(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) > 255);
-                assert!(deep(&frames[0]), "{bit_depth}-bit {chroma:?}: the source never leaves 8 bits");
-                assert!(frames[0].chunks_exact(2).all(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) <= max));
+                let deep = |bytes: &[u8]| {
+                    bytes
+                        .chunks_exact(2)
+                        .any(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) > 255)
+                };
+                assert!(
+                    deep(&frames[0]),
+                    "{bit_depth}-bit {chroma:?}: the source never leaves 8 bits"
+                );
+                assert!(
+                    frames[0]
+                        .chunks_exact(2)
+                        .all(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) <= max)
+                );
 
                 // Lossless is all-IDR: PCM has no inter spelling, so the
                 // inter pictures of a lossless stream are all-skip copies
                 // of their reference, exact only over still content — the
                 // gate's `lossless-intra` row is `--gop 0` for that reason.
                 for (rate, gop, bframes, entropy, t8x8) in [
-                    (RateControl::ConstantQp(26), 8u32, 0u32, Entropy::Cabac, false),
+                    (
+                        RateControl::ConstantQp(26),
+                        8u32,
+                        0u32,
+                        Entropy::Cabac,
+                        false,
+                    ),
                     (RateControl::ConstantQp(40), 8, 2, Entropy::Cavlc, true),
                     (RateControl::ConstantQp(20), 8, 2, Entropy::Cabac, true),
                     (RateControl::Lossless, 0, 0, Entropy::Cavlc, false),
                     (RateControl::Lossless, 0, 0, Entropy::Cabac, false),
                 ] {
-                    let tag = format!("{bit_depth}-bit {chroma:?} {rate:?} gop={gop} bframes={bframes} {entropy:?} t8x8={t8x8}");
+                    let tag = format!(
+                        "{bit_depth}-bit {chroma:?} {rate:?} gop={gop} bframes={bframes} {entropy:?} t8x8={t8x8}"
+                    );
                     let mut e = H264Encoder::new(Config {
                         rate,
                         gop,
@@ -2710,28 +3372,57 @@ mod tests {
                         ..cfg(64, 64, chroma, bit_depth)
                     })
                     .unwrap_or_else(|err| panic!("{tag}: {err}"));
-                    assert_eq!(e.frame_bytes(), frames[0].len(), "{tag}: two bytes per sample");
+                    assert_eq!(
+                        e.frame_bytes(),
+                        frames[0].len(),
+                        "{tag}: two bytes per sample"
+                    );
                     let mut units = Vec::new();
                     for f in &frames {
                         units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
                     }
                     units.extend(e.flush().unwrap());
-                    assert_eq!(units.len(), frames.len(), "{tag}: one access unit per picture");
+                    assert_eq!(
+                        units.len(),
+                        frames.len(),
+                        "{tag}: one access unit per picture"
+                    );
                     if gop != 0 {
-                        assert!(units[1..].iter().any(|u| !u.keyframe), "{tag}: no inter picture was coded");
+                        assert!(
+                            units[1..].iter().any(|u| !u.keyframe),
+                            "{tag}: no inter picture was coded"
+                        );
                     }
                     if bframes > 0 {
-                        assert!(units.iter().any(|u| u.encode_index as usize != (u.poc / 2) as usize), "{tag}: no B picture was held back");
+                        assert!(
+                            units
+                                .iter()
+                                .any(|u| u.encode_index as usize != (u.poc / 2) as usize),
+                            "{tag}: no B picture was held back"
+                        );
                     }
                     let census = e.shape_census();
                     if rate == RateControl::Lossless {
-                        assert_eq!(census.counts[0][3], (64 / 16 * 64 / 16) * frames.len() as u64, "{tag}: lossless is all PCM");
+                        assert_eq!(
+                            census.counts[0][3],
+                            (64 / 16 * 64 / 16) * frames.len() as u64,
+                            "{tag}: lossless is all PCM"
+                        );
                     } else {
                         // The transform paths were taken, not PCM.
-                        assert_eq!(census.counts[0][3], 0, "{tag}: a lossy intra picture coded PCM");
-                        assert!(census.counts[1].iter().sum::<u64>() > 0, "{tag}: no P macroblock");
+                        assert_eq!(
+                            census.counts[0][3], 0,
+                            "{tag}: a lossy intra picture coded PCM"
+                        );
+                        assert!(
+                            census.counts[1].iter().sum::<u64>() > 0,
+                            "{tag}: no P macroblock"
+                        );
                         if bframes > 0 {
-                            assert!(census.counts[2].iter().sum::<u64>() > 0, "{tag}: no B macroblock");
+                            assert!(
+                                census.counts[2].iter().sum::<u64>() > 0,
+                                "{tag}: no B macroblock"
+                            );
                         }
                     }
 
@@ -2745,17 +3436,27 @@ mod tests {
                     // display order.
                     let mut dec = crate::h264::H264Decoder::new();
                     for u in &units {
-                        dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: decoder rejected the stream: {err}"));
+                        dec.push_annexb(&u.data).unwrap_or_else(|err| {
+                            panic!("{tag}: decoder rejected the stream: {err}")
+                        });
                     }
-                    dec.flush().unwrap_or_else(|err| panic!("{tag}: decoder failed to flush: {err}"));
+                    dec.flush()
+                        .unwrap_or_else(|err| panic!("{tag}: decoder failed to flush: {err}"));
                     let mut by_display = vec![None; units.len()];
                     for u in &units {
-                        let display = if gop == 0 { u.encode_index as usize } else { (u.poc / 2) as usize };
+                        let display = if gop == 0 {
+                            u.encode_index as usize
+                        } else {
+                            (u.poc / 2) as usize
+                        };
                         by_display[display] = Some(u.encode_index as usize);
                     }
                     for (i, coded) in by_display.iter().enumerate() {
-                        let want = &e.reconstructions()[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                        let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                        let want = &e.reconstructions()[coded
+                            .unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                        let got = dec
+                            .next_picture()
+                            .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
                         assert_eq!(got.bit_depth, bit_depth, "{tag}: decoded depth");
                         let got = got.into_packed();
                         if got != *want {
@@ -2769,7 +3470,10 @@ mod tests {
                             );
                         }
                     }
-                    assert!(deep(&e.reconstructions()[0]), "{tag}: the reconstruction never leaves 8 bits");
+                    assert!(
+                        deep(&e.reconstructions()[0]),
+                        "{tag}: the reconstruction never leaves 8 bits"
+                    );
                     if rate == RateControl::Lossless {
                         for (display, coded) in by_display.iter().enumerate() {
                             assert!(
@@ -2794,7 +3498,11 @@ mod tests {
             ChromaFormat::Yuv422 => (2, 1),
             _ => (1, 1),
         };
-        let (cw, ch) = if chroma == ChromaFormat::Monochrome { (0, 0) } else { (w / sw, h / sh) };
+        let (cw, ch) = if chroma == ChromaFormat::Monochrome {
+            (0, 0)
+        } else {
+            (w / sw, h / sh)
+        };
         let shift = bit_depth - 8;
         (0..count)
             .map(|i| {
@@ -2807,7 +3515,13 @@ mod tests {
                             (false, false) => 110 + i as i32,
                             (true, false) => ((x + y + i) % 96) as i32 + 60,
                             (false, true) => (seed >> 24) as i32,
-                            (true, true) => if ((x / 4) + (y / 4) + i) % 2 == 0 { 40 } else { 200 },
+                            (true, true) => {
+                                if ((x / 4) + (y / 4) + i) % 2 == 0 {
+                                    40
+                                } else {
+                                    200
+                                }
+                            }
                         };
                         samples.push((v.clamp(0, 255) as u32) << shift);
                     }
@@ -2822,7 +3536,10 @@ mod tests {
                 if shift == 0 {
                     samples.iter().map(|&v| v as u8).collect()
                 } else {
-                    samples.iter().flat_map(|&v| (v as u16).to_le_bytes()).collect()
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect()
                 }
             })
             .collect()
@@ -2852,23 +3569,54 @@ mod tests {
     #[test]
     fn every_gop_predicts_from_what_the_decoder_holds() {
         for bframes in 0u32..=3 {
-            let mut gops = vec![bframes + 1, bframes + 2, bframes + 3, bframes + 4, 2 * bframes + 3];
+            let mut gops = vec![
+                bframes + 1,
+                bframes + 2,
+                bframes + 3,
+                bframes + 4,
+                2 * bframes + 3,
+            ];
             gops.retain(|&g| g > 1);
             gops.sort_unstable();
             gops.dedup();
             let refs: &[u32] = if bframes == 0 { &[2, 3] } else { &[1, 3] };
             for gop in gops {
                 for (&max_refs, bit_depth) in refs.iter().flat_map(|r| [(r, 8u32), (r, 10)]) {
-                    let tag = format!("gop {gop} bframes {bframes} refs {max_refs} {bit_depth}-bit");
-                    let frames = woven_frames(64, 64, ChromaFormat::Yuv420, bit_depth, 3 * gop as usize + 2, 0);
-                    let config = Config { gop, bframes, max_refs, ..cfg(64, 64, ChromaFormat::Yuv420, bit_depth) };
+                    let tag =
+                        format!("gop {gop} bframes {bframes} refs {max_refs} {bit_depth}-bit");
+                    let frames = woven_frames(
+                        64,
+                        64,
+                        ChromaFormat::Yuv420,
+                        bit_depth,
+                        3 * gop as usize + 2,
+                        0,
+                    );
+                    let config = Config {
+                        gop,
+                        bframes,
+                        max_refs,
+                        ..cfg(64, 64, ChromaFormat::Yuv420, bit_depth)
+                    };
                     let (units, census) = encode_and_self_check(&tag, config, &frames);
-                    assert!(units.iter().filter(|u| u.keyframe).count() >= 3, "{tag}: fewer than three GOPs");
-                    assert!(census.pictures[1] > 0, "{tag}: no P picture was coded: {census:?}");
+                    assert!(
+                        units.iter().filter(|u| u.keyframe).count() >= 3,
+                        "{tag}: fewer than three GOPs"
+                    );
+                    assert!(
+                        census.pictures[1] > 0,
+                        "{tag}: no P picture was coded: {census:?}"
+                    );
                     if bframes == 0 || gop == bframes + 1 {
-                        assert_eq!(census.pictures[2], 0, "{tag}: a B picture where none can be: {census:?}");
+                        assert_eq!(
+                            census.pictures[2], 0,
+                            "{tag}: a B picture where none can be: {census:?}"
+                        );
                     } else {
-                        assert!(census.pictures[2] > 0, "{tag}: no B picture was coded: {census:?}");
+                        assert!(
+                            census.pictures[2] > 0,
+                            "{tag}: no B picture was coded: {census:?}"
+                        );
                     }
                 }
             }
@@ -2878,7 +3626,11 @@ mod tests {
     /// Encode `frames` under `config` and hold the stream to the encoder's
     /// reconstructions with [`self_check`], returning the access units and
     /// the census.
-    fn encode_and_self_check(tag: &str, config: Config, frames: &[Vec<u8>]) -> (Vec<Access>, ShapeCensus) {
+    fn encode_and_self_check(
+        tag: &str,
+        config: Config,
+        frames: &[Vec<u8>],
+    ) -> (Vec<Access>, ShapeCensus) {
         let gop = config.gop;
         let mut e = H264Encoder::new(config).unwrap_or_else(|err| panic!("{tag}: {err}"));
         let mut units = Vec::new();
@@ -2886,7 +3638,11 @@ mod tests {
             units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
         }
         units.extend(e.flush().unwrap_or_else(|err| panic!("{tag}: {err}")));
-        assert_eq!(units.len(), frames.len(), "{tag}: one access unit per picture");
+        assert_eq!(
+            units.len(),
+            frames.len(),
+            "{tag}: one access unit per picture"
+        );
         self_check(tag, gop, &units, e.reconstructions());
         (units, e.shape_census().clone())
     }
@@ -2903,21 +3659,44 @@ mod tests {
     fn self_check(tag: &str, gop: u32, units: &[Access], recons: &[Vec<u8>]) {
         let mut dec = crate::h264::H264Decoder::new();
         for u in units {
-            dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: decoder rejected the stream: {err}"));
+            dec.push_annexb(&u.data)
+                .unwrap_or_else(|err| panic!("{tag}: decoder rejected the stream: {err}"));
         }
-        dec.flush().unwrap_or_else(|err| panic!("{tag}: decoder failed to flush: {err}"));
-        assert_eq!(dec.warnings(), 0, "{tag}: the decoder concealed something in the stream");
+        dec.flush()
+            .unwrap_or_else(|err| panic!("{tag}: decoder failed to flush: {err}"));
+        assert_eq!(
+            dec.warnings(),
+            0,
+            "{tag}: the decoder concealed something in the stream"
+        );
         let first = units.iter().map(|u| u.display).min().unwrap_or(0);
         let mut by_display = vec![None; units.len()];
         for u in units {
-            let in_gop = if gop == 0 { 0 } else { u.display % u64::from(gop) };
-            assert_eq!(u.poc, 2 * in_gop as i32, "{tag}: display index {} has POC {}", u.display, u.poc);
+            let in_gop = if gop == 0 {
+                0
+            } else {
+                u.display % u64::from(gop)
+            };
+            assert_eq!(
+                u.poc,
+                2 * in_gop as i32,
+                "{tag}: display index {} has POC {}",
+                u.display,
+                u.poc
+            );
             by_display[(u.display - first) as usize] = Some(u.encode_index as usize);
         }
         for (i, coded) in by_display.iter().enumerate() {
-            let want = &recons[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-            let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing")).into_packed();
-            assert!(got == *want, "{tag}: picture {i} decoded differently than the encoder reconstructed it");
+            let want =
+                &recons[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+            let got = dec
+                .next_picture()
+                .unwrap_or_else(|| panic!("{tag}: picture {i} missing"))
+                .into_packed();
+            assert!(
+                got == *want,
+                "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+            );
         }
     }
 
@@ -2943,7 +3722,12 @@ mod tests {
             for level in [60u32, 180] {
                 let tag = format!("{chroma:?} {bit_depth}-bit {entropy:?} level {level}");
                 let shift = bit_depth - 8;
-                let config = Config { gop: 0, entropy, rate: RateControl::ConstantQp(40), ..cfg(64, 64, chroma, bit_depth) };
+                let config = Config {
+                    gop: 0,
+                    entropy,
+                    rate: RateControl::ConstantQp(40),
+                    ..cfg(64, 64, chroma, bit_depth)
+                };
                 let mut e = H264Encoder::new(config).unwrap_or_else(|err| panic!("{tag}: {err}"));
                 let planes = match chroma {
                     ChromaFormat::Yuv444 => [4096usize, 4096, 4096],
@@ -2953,7 +3737,10 @@ mod tests {
                 let frame: Vec<u8> = if shift == 0 {
                     samples.iter().map(|&v| v as u8).collect()
                 } else {
-                    samples.iter().flat_map(|&v| (v as u16).to_le_bytes()).collect()
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect()
                 };
                 let frames = vec![frame; 2];
                 let mut units = Vec::new();
@@ -2963,18 +3750,29 @@ mod tests {
                 units.extend(e.flush().unwrap_or_else(|err| panic!("{tag}: {err}")));
                 self_check(&tag, 0, &units, e.reconstructions());
                 let i16 = e.shape_census().counts[0][2];
-                assert!(i16 > 0, "{tag}: no macroblock took I_16x16, so the DC path went untested");
+                assert!(
+                    i16 > 0,
+                    "{tag}: no macroblock took I_16x16, so the DC path went untested"
+                );
                 for rec in e.reconstructions() {
                     let got: Vec<i64> = if shift == 0 {
                         rec.iter().map(|&v| v as i64).collect()
                     } else {
-                        rec.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]]) as i64).collect()
+                        rec.chunks_exact(2)
+                            .map(|p| u16::from_le_bytes([p[0], p[1]]) as i64)
+                            .collect()
                     };
                     let mut start = 0;
                     for (plane, &n) in planes.iter().enumerate() {
-                        let err: i64 = got[start..start + n].iter().map(|&v| (v - (level << shift) as i64).abs()).sum();
+                        let err: i64 = got[start..start + n]
+                            .iter()
+                            .map(|&v| (v - (level << shift) as i64).abs())
+                            .sum();
                         let mean = err as f64 / n as f64 / f64::from(1u32 << shift);
-                        assert!(mean < 3.0, "{tag}: plane {plane} is {mean:.1} levels off a flat {level} ({i16} I_16x16 macroblocks)");
+                        assert!(
+                            mean < 3.0,
+                            "{tag}: plane {plane} is {mean:.1} levels off a flat {level} ({i16} I_16x16 macroblocks)"
+                        );
                         start += n;
                     }
                 }
@@ -3011,7 +3809,9 @@ mod tests {
         ] {
             let frames = aq_frames(chroma, bit_depth, 6);
             for qp in [22u8, 40] {
-                let tag = format!("{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} t8x8+subparts={tools} qp {qp}");
+                let tag = format!(
+                    "{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} t8x8+subparts={tools} qp {qp}"
+                );
                 let (_, census) = encode_and_self_check(
                     &tag,
                     Config {
@@ -3027,8 +3827,14 @@ mod tests {
                     &frames,
                 );
                 for (pic, name) in [(0usize, "intra"), (1, "P")] {
-                    assert!(census.qp_moved[pic] > 0, "{tag}: no {name} macroblock left the picture quantiser: {census:?}");
-                    assert!(census.qp_delta[pic] > 0, "{tag}: no {name} macroblock coded a non-zero mb_qp_delta: {census:?}");
+                    assert!(
+                        census.qp_moved[pic] > 0,
+                        "{tag}: no {name} macroblock left the picture quantiser: {census:?}"
+                    );
+                    assert!(
+                        census.qp_delta[pic] > 0,
+                        "{tag}: no {name} macroblock coded a non-zero mb_qp_delta: {census:?}"
+                    );
                 }
                 if bframes > 0 {
                     assert!(census.pictures[2] > 0, "{tag}: no B picture was coded");
@@ -3041,7 +3847,13 @@ mod tests {
         let frames = aq_frames(ChromaFormat::Yuv420, 8, 3);
         for entropy in [Entropy::Cabac, Entropy::Cavlc] {
             let encode = |strength: f32| -> (Vec<u8>, ShapeCensus) {
-                let mut e = H264Encoder::new(Config { gop: 8, entropy, aq_strength: strength, ..cfg(64, 64, ChromaFormat::Yuv420, 8) }).unwrap();
+                let mut e = H264Encoder::new(Config {
+                    gop: 8,
+                    entropy,
+                    aq_strength: strength,
+                    ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+                })
+                .unwrap();
                 let mut out = Vec::new();
                 for f in &frames {
                     for u in e.push(f).unwrap() {
@@ -3055,15 +3867,26 @@ mod tests {
             };
             let (off, census) = encode(0.0);
             assert_eq!(off, encode(Config::default().aq_strength).0, "{entropy:?}");
-            assert_eq!(census.qp_moved, [0; 3], "{entropy:?}: nothing moves with the switch off");
+            assert_eq!(
+                census.qp_moved, [0; 3],
+                "{entropy:?}: nothing moves with the switch off"
+            );
             assert_eq!(census.qp_delta, [0; 3], "{entropy:?}");
-            assert_ne!(off, encode(1.0).0, "{entropy:?}: strength 1 must change the stream");
+            assert_ne!(
+                off,
+                encode(1.0).0,
+                "{entropy:?}: strength 1 must change the stream"
+            );
         }
 
         // Lossless has no quantiser to adapt: refused by name.
-        let err = H264Encoder::new(Config { rate: RateControl::Lossless, aq_strength: 1.0, ..cfg(64, 64, ChromaFormat::Yuv420, 8) })
-            .err()
-            .expect("adaptive quantisation on a lossless stream must refuse");
+        let err = H264Encoder::new(Config {
+            rate: RateControl::Lossless,
+            aq_strength: 1.0,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        })
+        .err()
+        .expect("adaptive quantisation on a lossless stream must refuse");
         assert!(format!("{err}").contains("adaptive quantisation"), "{err}");
     }
     /// A textured picture fading a step per frame — a gain and an offset
@@ -3077,7 +3900,11 @@ mod tests {
             ChromaFormat::Yuv422 => (2, 1),
             _ => (1, 1),
         };
-        let (cw, ch) = if chroma == ChromaFormat::Monochrome { (0, 0) } else { (w / sw, h / sh) };
+        let (cw, ch) = if chroma == ChromaFormat::Monochrome {
+            (0, 0)
+        } else {
+            (w / sw, h / sh)
+        };
         let shift = bit_depth - 8;
         (0..count)
             .map(|i| {
@@ -3087,8 +3914,12 @@ mod tests {
                 for y in 0..h {
                     for x in 0..w {
                         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                        let base = 60 + ((x * 3 + y * 5 + (x * y) / 7) % 150) as i32 + ((seed >> 28) as i32 - 8);
-                        let v = (f64::from(base) * gain - 2.0 * i as f64).round().clamp(0.0, 255.0) as u32;
+                        let base = 60
+                            + ((x * 3 + y * 5 + (x * y) / 7) % 150) as i32
+                            + ((seed >> 28) as i32 - 8);
+                        let v = (f64::from(base) * gain - 2.0 * i as f64)
+                            .round()
+                            .clamp(0.0, 255.0) as u32;
                         samples.push(v << shift);
                     }
                 }
@@ -3099,7 +3930,14 @@ mod tests {
                         }
                     }
                 }
-                if shift == 0 { samples.iter().map(|&v| v as u8).collect() } else { samples.iter().flat_map(|&v| (v as u16).to_le_bytes()).collect() }
+                if shift == 0 {
+                    samples.iter().map(|&v| v as u8).collect()
+                } else {
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect()
+                }
             })
             .collect()
     }
@@ -3124,7 +3962,9 @@ mod tests {
             (ChromaFormat::Yuv420, 10, 2, Entropy::Cabac, true),
             (ChromaFormat::Yuv444, 12, 0, Entropy::Cavlc, false),
         ] {
-            let tag = format!("{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} t8x8+subparts={tools}");
+            let tag = format!(
+                "{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} t8x8+subparts={tools}"
+            );
             let frames = fade_frames(chroma, bit_depth, 8);
             let run = |weighted_pred: bool| -> (Vec<Access>, Vec<Vec<u8>>, ShapeCensus) {
                 let mut e = H264Encoder::new(Config {
@@ -3142,18 +3982,38 @@ mod tests {
                     units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
                 }
                 units.extend(e.flush().unwrap_or_else(|err| panic!("{tag}: {err}")));
-                (units, e.reconstructions().to_vec(), e.shape_census().clone())
+                (
+                    units,
+                    e.reconstructions().to_vec(),
+                    e.shape_census().clone(),
+                )
             };
             let (with, recon, census) = run(true);
             let (without, _, plain) = run(false);
             let bytes = |u: &[Access]| u.iter().map(|a| a.data.len()).sum::<usize>();
-            assert!(census.wp_on[1] > 0, "{tag}: no P picture chose a weighting: {census:?}");
-            assert!(census.wp_won[1] > census.wp_lost[1], "{tag}: the fit lost more macroblocks than it won: {census:?}");
+            assert!(
+                census.wp_on[1] > 0,
+                "{tag}: no P picture chose a weighting: {census:?}"
+            );
+            assert!(
+                census.wp_won[1] > census.wp_lost[1],
+                "{tag}: the fit lost more macroblocks than it won: {census:?}"
+            );
             if bframes > 0 {
-                assert!(census.wp_on[2] > 0, "{tag}: no B picture chose a weighting: {census:?}");
-                assert!(census.wp_won[2] > census.wp_lost[2], "{tag}: the B fits lost more macroblocks than they won: {census:?}");
+                assert!(
+                    census.wp_on[2] > 0,
+                    "{tag}: no B picture chose a weighting: {census:?}"
+                );
+                assert!(
+                    census.wp_won[2] > census.wp_lost[2],
+                    "{tag}: the B fits lost more macroblocks than they won: {census:?}"
+                );
             }
-            assert_eq!((plain.wp_on, plain.wp_won, plain.wp_lost), ([0; 3], [0; 3], [0; 3]), "{tag}: the census counts nothing with the switch off");
+            assert_eq!(
+                (plain.wp_on, plain.wp_won, plain.wp_lost),
+                ([0; 3], [0; 3], [0; 3]),
+                "{tag}: the census counts nothing with the switch off"
+            );
             assert!(
                 (bytes(&with) as f64) < (bytes(&without) as f64) * 0.9,
                 "{tag}: weighting saved little on a fade: {} against {} bytes",
@@ -3165,24 +4025,50 @@ mod tests {
 
         // A held clip: nothing is chosen, and the table of defaults costs its
         // flags and its denominators, a byte or two per P slice.
-        let held: Vec<Vec<u8>> = std::iter::repeat_n(fade_frames(ChromaFormat::Yuv420, 8, 1).remove(0), 6).collect();
+        let held: Vec<Vec<u8>> =
+            std::iter::repeat_n(fade_frames(ChromaFormat::Yuv420, 8, 1).remove(0), 6).collect();
         let encode = |weighted_pred: bool| -> (usize, ShapeCensus) {
-            let mut e = H264Encoder::new(Config { gop: 8, weighted_pred, ..cfg(64, 64, ChromaFormat::Yuv420, 8) }).unwrap();
+            let mut e = H264Encoder::new(Config {
+                gop: 8,
+                weighted_pred,
+                ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+            })
+            .unwrap();
             let mut bytes = 0;
             for f in &held {
-                bytes += e.push(f).unwrap().iter().map(|a| a.data.len()).sum::<usize>();
+                bytes += e
+                    .push(f)
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.data.len())
+                    .sum::<usize>();
             }
-            bytes += e.flush().unwrap().iter().map(|a| a.data.len()).sum::<usize>();
+            bytes += e
+                .flush()
+                .unwrap()
+                .iter()
+                .map(|a| a.data.len())
+                .sum::<usize>();
             (bytes, e.shape_census().clone())
         };
         let (with, census) = encode(true);
         let (without, _) = encode(false);
-        assert_eq!(census.wp_on[1], 0, "a held clip chose a weighting: {census:?}");
-        assert!(with >= without && with <= without + 2 * held.len(), "the table of defaults should cost bits, not bytes: {with} against {without}");
+        assert_eq!(
+            census.wp_on[1], 0,
+            "a held clip chose a weighting: {census:?}"
+        );
+        assert!(
+            with >= without && with <= without + 2 * held.len(),
+            "the table of defaults should cost bits, not bytes: {with} against {without}"
+        );
 
-        let err = H264Encoder::new(Config { rate: RateControl::Lossless, weighted_pred: true, ..cfg(64, 64, ChromaFormat::Yuv420, 8) })
-            .err()
-            .expect("weighted prediction on a lossless stream must refuse");
+        let err = H264Encoder::new(Config {
+            rate: RateControl::Lossless,
+            weighted_pred: true,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        })
+        .err()
+        .expect("weighted prediction on a lossless stream must refuse");
         assert!(format!("{err}").contains("weighted prediction"), "{err}");
     }
     /// The picture-level check between a B picture's fitted table and a
@@ -3217,11 +4103,23 @@ mod tests {
             e.shape_census().clone()
         };
         let kept = census(26, 2);
-        assert!(kept.wp_on[2] > 0, "bframes=2 QP 26: no B picture took a fitted table: {kept:?}");
-        assert_eq!(kept.wp_priced[2], kept.wp_on[2], "bframes=2 QP 26: every B table is priced: {kept:?}");
-        assert_eq!(kept.wp_rd_default[2], 0, "bframes=2 QP 26: a fitted table lost to the defaults: {kept:?}");
+        assert!(
+            kept.wp_on[2] > 0,
+            "bframes=2 QP 26: no B picture took a fitted table: {kept:?}"
+        );
+        assert_eq!(
+            kept.wp_priced[2], kept.wp_on[2],
+            "bframes=2 QP 26: every B table is priced: {kept:?}"
+        );
+        assert_eq!(
+            kept.wp_rd_default[2], 0,
+            "bframes=2 QP 26: a fitted table lost to the defaults: {kept:?}"
+        );
         let mid = census(40, 1);
-        assert!(mid.wp_rd_default[2] > 0, "bframes=1 QP 40: every fitted table was kept: {mid:?}");
+        assert!(
+            mid.wp_rd_default[2] > 0,
+            "bframes=1 QP 40: every fitted table was kept: {mid:?}"
+        );
     }
 
     /// A P picture's table follows how much of the zero-motion SAD its fit
@@ -3233,13 +4131,22 @@ mod tests {
     /// and 20 remove about 6%, 20% and 50%.
     #[test]
     fn a_p_table_follows_how_much_its_fit_removes() {
-        let core = Core::<u8>::new(Config { gop: 8, weighted_pred: true, ..cfg(64, 64, ChromaFormat::Yuv420, 8) }).unwrap();
+        let core = Core::<u8>::new(Config {
+            gop: 8,
+            weighted_pred: true,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        })
+        .unwrap();
         let dims = [(64usize, 64usize), (32, 32), (32, 32)];
         let reference: Vec<syn::Recon<u8>> = dims
             .iter()
             .enumerate()
             .map(|(c, &(w, h))| {
-                let pad = if c == 0 { crate::h264::frame::LUMA_PAD } else { crate::h264::frame::CHROMA_PAD };
+                let pad = if c == 0 {
+                    crate::h264::frame::LUMA_PAD
+                } else {
+                    crate::h264::frame::CHROMA_PAD
+                };
                 let mut p = syn::recon_plane(w as u32, h as u32, pad);
                 for y in 0..h {
                     for x in 0..w {
@@ -3259,7 +4166,10 @@ mod tests {
                 .map(|(c, &(w, h))| {
                     (0..w * h)
                         .map(|i| {
-                            let r = i32::from(reference[c].data[reference[c].offset((i % w) as isize, (i / w) as isize)]);
+                            let r = i32::from(
+                                reference[c].data
+                                    [reference[c].offset((i % w) as isize, (i / w) as isize)],
+                            );
                             if c > 0 {
                                 return r as u8;
                             }
@@ -3269,14 +4179,34 @@ mod tests {
                         .collect()
                 })
                 .collect();
-            let planes: Vec<syn::Plane<'_, u8>> =
-                cur.iter().zip(dims).map(|(s, (w, h))| syn::Plane { data: &s[..], stride: w, width: w as u32, height: h as u32 }).collect();
+            let planes: Vec<syn::Plane<'_, u8>> = cur
+                .iter()
+                .zip(dims)
+                .map(|(s, (w, h))| syn::Plane {
+                    data: &s[..],
+                    stride: w,
+                    width: w as u32,
+                    height: h as u32,
+                })
+                .collect();
             let (t, strong) = core.p_weights(&planes, &reference, true);
             (t.table.lists[0][0].luma_flag, strong)
         };
-        assert_eq!(table(5), (false, false), "a fit removing about 6% is written as the defaults");
-        assert_eq!(table(10), (true, false), "a fit removing about 20% is kept, to be priced");
-        assert_eq!(table(20), (true, true), "a fit removing about half is strong");
+        assert_eq!(
+            table(5),
+            (false, false),
+            "a fit removing about 6% is written as the defaults"
+        );
+        assert_eq!(
+            table(10),
+            (true, false),
+            "a fit removing about 20% is kept, to be priced"
+        );
+        assert_eq!(
+            table(20),
+            (true, true),
+            "a fit removing about half is strong"
+        );
     }
 
     /// A P picture's fitted table is priced against the defaults only when
@@ -3310,12 +4240,24 @@ mod tests {
         let fade = fade_frames(ChromaFormat::Yuv420, 8, 12);
         for qp in [26u8, 40] {
             let c = census(&fade, qp);
-            assert!(c.wp_on[1] > 0, "fade QP {qp}: no P picture took its table: {c:?}");
-            assert_eq!(c.wp_priced[1], 0, "fade QP {qp}: a strong fit was priced: {c:?}");
+            assert!(
+                c.wp_on[1] > 0,
+                "fade QP {qp}: no P picture took its table: {c:?}"
+            );
+            assert_eq!(
+                c.wp_priced[1], 0,
+                "fade QP {qp}: a strong fit was priced: {c:?}"
+            );
         }
         let moving = census(&woven_frames(64, 64, ChromaFormat::Yuv420, 8, 12, 0), 26);
-        assert!(moving.wp_priced[1] > 0, "moving texture: no weak fit was priced: {moving:?}");
-        assert!(moving.wp_rd_default[1] > 0, "moving texture: every weak fit beat the defaults: {moving:?}");
+        assert!(
+            moving.wp_priced[1] > 0,
+            "moving texture: no weak fit was priced: {moving:?}"
+        );
+        assert!(
+            moving.wp_rd_default[1] > 0,
+            "moving texture: every weak fit beat the defaults: {moving:?}"
+        );
     }
 
     /// Implicit B weighting (`weighted_bipred_idc` 2) round-trips through
@@ -3329,11 +4271,26 @@ mod tests {
     #[test]
     fn implicit_b_weighting_round_trips_and_weighs_by_distance() {
         use crate::encode::BWeighting;
-        assert_eq!(implicit_pair(2, 0, 6, false, false), (43, 21), "a third of the way along");
-        assert_eq!(implicit_pair(4, 0, 6, false, false), (22, 42), "two thirds (the spec rounds DistScaleFactor, not the weights)");
+        assert_eq!(
+            implicit_pair(2, 0, 6, false, false),
+            (43, 21),
+            "a third of the way along"
+        );
+        assert_eq!(
+            implicit_pair(4, 0, 6, false, false),
+            (22, 42),
+            "two thirds (the spec rounds DistScaleFactor, not the weights)"
+        );
         assert_eq!(implicit_pair(2, 0, 4, false, false), (32, 32), "halfway");
         for (chroma, bit_depth, bframes, entropy, tools, wpred) in [
-            (ChromaFormat::Yuv420, 8u32, 2u32, Entropy::Cabac, false, false),
+            (
+                ChromaFormat::Yuv420,
+                8u32,
+                2u32,
+                Entropy::Cabac,
+                false,
+                false,
+            ),
             (ChromaFormat::Yuv420, 8, 3, Entropy::Cavlc, true, false),
             (ChromaFormat::Yuv422, 8, 1, Entropy::Cabac, true, false),
             (ChromaFormat::Yuv444, 8, 2, Entropy::Cavlc, false, true),
@@ -3341,7 +4298,9 @@ mod tests {
             (ChromaFormat::Yuv420, 10, 2, Entropy::Cabac, true, true),
             (ChromaFormat::Yuv444, 10, 3, Entropy::Cabac, false, false),
         ] {
-            let tag = format!("{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} t8x8+subparts={tools} wpred={wpred}");
+            let tag = format!(
+                "{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} t8x8+subparts={tools} wpred={wpred}"
+            );
             let frames: Vec<Vec<u8>> = woven_frames(64, 64, chroma, bit_depth, 8, 0)
                 .into_iter()
                 .zip(fade_frames(chroma, bit_depth, 8))
@@ -3385,25 +4344,82 @@ mod tests {
     #[test]
     fn b_weighting_is_refused_where_it_cannot_be_honoured() {
         use crate::encode::{BWeighting, FieldOrder};
-        let base = Config { gop: 8, bframes: 2, ..cfg(64, 64, ChromaFormat::Yuv420, 8) };
+        let base = Config {
+            gop: 8,
+            bframes: 2,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        };
         let refuse = |c: Config, what: &str| {
-            let err = H264Encoder::new(c).err().unwrap_or_else(|| panic!("{what}: accepted"));
+            let err = H264Encoder::new(c)
+                .err()
+                .unwrap_or_else(|| panic!("{what}: accepted"));
             assert!(format!("{err}").contains("B weighting"), "{what}: {err}");
         };
-        refuse(Config { b_weighting: Some(BWeighting::Explicit), ..base.clone() }, "explicit without weighted prediction");
-        refuse(Config { b_weighting: Some(BWeighting::Implicit), interlace: Some(FieldOrder::TopFirst), ..base.clone() }, "implicit interlaced");
-        refuse(Config { b_weighting: Some(BWeighting::Implicit), rate: RateControl::Lossless, ..base.clone() }, "implicit lossless");
-        for (wp, bw) in [(false, BWeighting::Default), (true, BWeighting::Default), (false, BWeighting::Implicit), (true, BWeighting::Implicit), (true, BWeighting::Explicit)] {
-            H264Encoder::new(Config { weighted_pred: wp, b_weighting: Some(bw), ..base.clone() })
-                .unwrap_or_else(|err| panic!("H.264 weighted_pred {wp} {bw:?}: {err}"));
+        refuse(
+            Config {
+                b_weighting: Some(BWeighting::Explicit),
+                ..base.clone()
+            },
+            "explicit without weighted prediction",
+        );
+        refuse(
+            Config {
+                b_weighting: Some(BWeighting::Implicit),
+                interlace: Some(FieldOrder::TopFirst),
+                ..base.clone()
+            },
+            "implicit interlaced",
+        );
+        refuse(
+            Config {
+                b_weighting: Some(BWeighting::Implicit),
+                rate: RateControl::Lossless,
+                ..base.clone()
+            },
+            "implicit lossless",
+        );
+        for (wp, bw) in [
+            (false, BWeighting::Default),
+            (true, BWeighting::Default),
+            (false, BWeighting::Implicit),
+            (true, BWeighting::Implicit),
+            (true, BWeighting::Explicit),
+        ] {
+            H264Encoder::new(Config {
+                weighted_pred: wp,
+                b_weighting: Some(bw),
+                ..base.clone()
+            })
+            .unwrap_or_else(|err| panic!("H.264 weighted_pred {wp} {bw:?}: {err}"));
         }
-        let h265 = |wp: bool, bw: Option<BWeighting>| crate::encode::h265::H265Encoder::new(Config { weighted_pred: wp, b_weighting: bw, ..base.clone() });
-        for (wp, bw) in [(false, None), (true, None), (true, Some(BWeighting::Explicit)), (false, Some(BWeighting::Default))] {
+        let h265 = |wp: bool, bw: Option<BWeighting>| {
+            crate::encode::h265::H265Encoder::new(Config {
+                weighted_pred: wp,
+                b_weighting: bw,
+                ..base.clone()
+            })
+        };
+        for (wp, bw) in [
+            (false, None),
+            (true, None),
+            (true, Some(BWeighting::Explicit)),
+            (false, Some(BWeighting::Default)),
+        ] {
             h265(wp, bw).unwrap_or_else(|err| panic!("H.265 weighted_pred {wp} {bw:?}: {err}"));
         }
-        for (wp, bw) in [(false, BWeighting::Implicit), (true, BWeighting::Implicit), (true, BWeighting::Default), (false, BWeighting::Explicit)] {
-            let err = h265(wp, Some(bw)).err().unwrap_or_else(|| panic!("H.265 weighted_pred {wp} {bw:?}: accepted"));
-            assert!(format!("{err}").contains("B weighting"), "H.265 {bw:?}: {err}");
+        for (wp, bw) in [
+            (false, BWeighting::Implicit),
+            (true, BWeighting::Implicit),
+            (true, BWeighting::Default),
+            (false, BWeighting::Explicit),
+        ] {
+            let err = h265(wp, Some(bw))
+                .err()
+                .unwrap_or_else(|| panic!("H.265 weighted_pred {wp} {bw:?}: accepted"));
+            assert!(
+                format!("{err}").contains("B weighting"),
+                "H.265 {bw:?}: {err}"
+            );
         }
     }
 
@@ -3413,10 +4429,18 @@ mod tests {
     #[test]
     fn the_bound_on_a_bi_predicted_pair_is_the_standards() {
         for d in 0..=6u32 {
-            assert!(bi_pair_legal(64, 64, d) && bi_pair_legal(127, 1, d) && bi_pair_legal(-128, 0, d), "denominator {d}");
-            assert!(!bi_pair_legal(64, 65, d) && !bi_pair_legal(-64, -65, d), "denominator {d}");
+            assert!(
+                bi_pair_legal(64, 64, d) && bi_pair_legal(127, 1, d) && bi_pair_legal(-128, 0, d),
+                "denominator {d}"
+            );
+            assert!(
+                !bi_pair_legal(64, 65, d) && !bi_pair_legal(-64, -65, d),
+                "denominator {d}"
+            );
         }
-        assert!(bi_pair_legal(100, 27, 7) && !bi_pair_legal(64, 64, 7) && bi_pair_legal(-100, -28, 7));
+        assert!(
+            bi_pair_legal(100, 27, 7) && !bi_pair_legal(64, 64, 7) && bi_pair_legal(-100, -28, 7)
+        );
     }
 
     /// A B picture whose two fits break the bound on a bi-predicted pair
@@ -3432,36 +4456,58 @@ mod tests {
     /// testing what it says.
     #[test]
     fn a_b_pair_the_bound_refuses_takes_a_coarser_denominator() {
-        let core = Core::<u8>::new(Config { gop: 8, bframes: 2, weighted_pred: true, ..cfg(64, 64, ChromaFormat::Yuv420, 8) }).unwrap();
-        let tex = |x: usize, y: usize, c: usize| f64::from(60 + ((x * 3 + y * 5 + c * 11 + (x * y) / 7) % 150) as i32);
+        let core = Core::<u8>::new(Config {
+            gop: 8,
+            bframes: 2,
+            weighted_pred: true,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        })
+        .unwrap();
+        let tex = |x: usize, y: usize, c: usize| {
+            f64::from(60 + ((x * 3 + y * 5 + c * 11 + (x * y) / 7) % 150) as i32)
+        };
         let dims = [(64usize, 64usize), (32, 32), (32, 32)];
         let samples = |gain: f64, base: &dyn Fn(usize, usize, usize) -> f64| -> Vec<Vec<u8>> {
             dims.iter()
                 .enumerate()
-                .map(|(c, &(w, h))| (0..w * h).map(|i| (base(i % w, i / w, c) * gain).round().clamp(0.0, 255.0) as u8).collect())
-                .collect()
-        };
-        let anchor = |gain: f64, base: &dyn Fn(usize, usize, usize) -> f64| -> Vec<syn::Recon<u8>> {
-            samples(gain, base)
-                .iter()
-                .zip(dims)
-                .map(|(s, (w, h))| {
-                    let pad = if w == 64 { crate::h264::frame::LUMA_PAD } else { crate::h264::frame::CHROMA_PAD };
-                    let mut p = syn::recon_plane(w as u32, h as u32, pad);
-                    for y in 0..h {
-                        let o = p.offset(0, y as isize);
-                        p.data[o..o + w].copy_from_slice(&s[y * w..(y + 1) * w]);
-                    }
-                    p.extend_edges(false);
-                    p
+                .map(|(c, &(w, h))| {
+                    (0..w * h)
+                        .map(|i| (base(i % w, i / w, c) * gain).round().clamp(0.0, 255.0) as u8)
+                        .collect()
                 })
                 .collect()
         };
+        let anchor =
+            |gain: f64, base: &dyn Fn(usize, usize, usize) -> f64| -> Vec<syn::Recon<u8>> {
+                samples(gain, base)
+                    .iter()
+                    .zip(dims)
+                    .map(|(s, (w, h))| {
+                        let pad = if w == 64 {
+                            crate::h264::frame::LUMA_PAD
+                        } else {
+                            crate::h264::frame::CHROMA_PAD
+                        };
+                        let mut p = syn::recon_plane(w as u32, h as u32, pad);
+                        for y in 0..h {
+                            let o = p.offset(0, y as isize);
+                            p.data[o..o + w].copy_from_slice(&s[y * w..(y + 1) * w]);
+                        }
+                        p.extend_edges(false);
+                        p
+                    })
+                    .collect()
+            };
         let table_for = |cur: &[Vec<u8>], past: &[syn::Recon<u8>], future: &[syn::Recon<u8>]| {
             let planes: Vec<syn::Plane<'_, u8>> = cur
                 .iter()
                 .zip(dims)
-                .map(|(s, (w, h))| syn::Plane { data: &s[..], stride: w, width: w as u32, height: h as u32 })
+                .map(|(s, (w, h))| syn::Plane {
+                    data: &s[..],
+                    stride: w,
+                    width: w as u32,
+                    height: h as u32,
+                })
                 .collect();
             core.b_weights(&planes, [past, future], true).table
         };
@@ -3472,23 +4518,52 @@ mod tests {
         for c in 0..3 {
             let (w, h) = dims[c];
             let fit = |rf: &[syn::Recon<u8>]| {
-                h265_wp::fit_samples(&DistortionDsp::new(Cpu::detect()), &cur[c], w, Core::<u8>::fit_ref(rf, c), w, h, 8, h265_wp::H264_WEIGHTS)
+                h265_wp::fit_samples(
+                    &DistortionDsp::new(Cpu::detect()),
+                    &cur[c],
+                    w,
+                    Core::<u8>::fit_ref(rf, c),
+                    w,
+                    h,
+                    8,
+                    h265_wp::H264_WEIGHTS,
+                )
             };
             let (f0, f1) = (fit(&past), fit(&future));
             assert!(f0.used() && f1.used(), "component {c}: {f0:?} {f1:?}");
-            assert!(!bi_pair_legal(f0.weight, f1.weight, 6), "component {c}: the fixture no longer breaks the bound: {} + {}", f0.weight, f1.weight);
+            assert!(
+                !bi_pair_legal(f0.weight, f1.weight, 6),
+                "component {c}: the fixture no longer breaks the bound: {} + {}",
+                f0.weight,
+                f1.weight
+            );
         }
         let t = table_for(&cur, &past, &future);
         let (e0, e1) = (t.lists[0][0], t.lists[1][0]);
         assert!(t.luma_log2_denom < 6 && t.chroma_log2_denom < 6, "{t:?}");
-        assert!(e0.luma_flag && e1.luma_flag && e0.chroma_flag && e1.chroma_flag, "both gains kept in every component: {t:?}");
-        assert!(bi_pair_legal(e0.luma.0, e1.luma.0, t.luma_log2_denom), "luma: {t:?}");
+        assert!(
+            e0.luma_flag && e1.luma_flag && e0.chroma_flag && e1.chroma_flag,
+            "both gains kept in every component: {t:?}"
+        );
+        assert!(
+            bi_pair_legal(e0.luma.0, e1.luma.0, t.luma_log2_denom),
+            "luma: {t:?}"
+        );
         for c in 0..2 {
-            assert!(bi_pair_legal(e0.chroma[c].0, e1.chroma[c].0, t.chroma_log2_denom), "chroma {c}: {t:?}");
+            assert!(
+                bi_pair_legal(e0.chroma[c].0, e1.chroma[c].0, t.chroma_log2_denom),
+                "chroma {c}: {t:?}"
+            );
         }
         // The gains are the fade's, to the precision the denominator has.
-        let near = |w: i32, d: u32, gain: f64| (f64::from(w) / f64::from(1u32 << d) - gain).abs() <= 1.0 / f64::from(1u32 << d);
-        assert!(near(e0.luma.0, t.luma_log2_denom, 15.0 / 16.0) && near(e1.luma.0, t.luma_log2_denom, 15.0 / 13.0), "{t:?}");
+        let near = |w: i32, d: u32, gain: f64| {
+            (f64::from(w) / f64::from(1u32 << d) - gain).abs() <= 1.0 / f64::from(1u32 << d)
+        };
+        assert!(
+            near(e0.luma.0, t.luma_log2_denom, 15.0 / 16.0)
+                && near(e1.luma.0, t.luma_log2_denom, 15.0 / 13.0),
+            "{t:?}"
+        );
 
         // Anchors near black under a picture eighty times brighter: the
         // gains cannot be carried together at any denominator, so the
@@ -3499,8 +4574,14 @@ mod tests {
         let t = table_for(&cur, &past, &future);
         let (e0, e1) = (t.lists[0][0], t.lists[1][0]);
         let unit = 1i32 << t.luma_log2_denom;
-        assert!(!e0.luma_flag && !e1.luma_flag && e0.luma == (unit, 0) && e1.luma == (unit, 0), "{t:?}");
-        assert!(bi_pair_legal(e0.luma.0, e1.luma.0, t.luma_log2_denom), "{t:?}");
+        assert!(
+            !e0.luma_flag && !e1.luma_flag && e0.luma == (unit, 0) && e1.luma == (unit, 0),
+            "{t:?}"
+        );
+        assert!(
+            bi_pair_legal(e0.luma.0, e1.luma.0, t.luma_log2_denom),
+            "{t:?}"
+        );
     }
 
     /// `count` interlaced frames of `w` by `h` at `bit_depth`, packed as the
@@ -3510,20 +4591,37 @@ mod tests {
     /// two fields of a frame disagree the way captured interlaced video's
     /// do. Chroma rows alternate fields as luma rows do. Deeper than 8 bits
     /// the low bits carry a ramp, so the depth is really used.
-    fn interlaced_frames(w: usize, h: usize, chroma: ChromaFormat, bit_depth: u32, count: usize) -> Vec<Vec<u8>> {
+    fn interlaced_frames(
+        w: usize,
+        h: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        count: usize,
+    ) -> Vec<Vec<u8>> {
         woven_frames(w, h, chroma, bit_depth, count, 1)
     }
 
     /// [`interlaced_frames`] with the two fields `field_gap` instants apart:
     /// 1 is interlaced capture, 0 a progressive frame merely stored as
     /// fields — the same motion, but each frame one instant.
-    fn woven_frames(w: usize, h: usize, chroma: ChromaFormat, bit_depth: u32, count: usize, field_gap: usize) -> Vec<Vec<u8>> {
+    fn woven_frames(
+        w: usize,
+        h: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        count: usize,
+        field_gap: usize,
+    ) -> Vec<Vec<u8>> {
         let (sw, sh) = match chroma {
             ChromaFormat::Yuv420 => (2usize, 2usize),
             ChromaFormat::Yuv422 => (2, 1),
             _ => (1, 1),
         };
-        let (cw, ch) = if chroma == ChromaFormat::Monochrome { (0, 0) } else { (w / sw, h / sh) };
+        let (cw, ch) = if chroma == ChromaFormat::Monochrome {
+            (0, 0)
+        } else {
+            (w / sw, h / sh)
+        };
         let shift = bit_depth - 8;
         let at = |x: usize, y: usize, t: usize, c: usize| -> u32 {
             let (x, y) = (x + 3 * t, y + t);
@@ -3549,7 +4647,9 @@ mod tests {
                 } else {
                     s.iter()
                         .enumerate()
-                        .flat_map(|(i, &v)| (((v << shift) | (i as u32 & ((1 << shift) - 1))) as u16).to_le_bytes())
+                        .flat_map(|(i, &v)| {
+                            (((v << shift) | (i as u32 & ((1 << shift) - 1))) as u16).to_le_bytes()
+                        })
                         .collect()
                 }
             })
@@ -3567,16 +4667,82 @@ mod tests {
     fn field_pictures_round_trip_through_the_decoder() {
         use crate::encode::{FieldCoding, FieldOrder};
         for (chroma, bit_depth, bframes, entropy, tools, order, max_refs) in [
-            (ChromaFormat::Yuv420, 8u32, 0u32, Entropy::Cabac, false, FieldOrder::TopFirst, 1u32),
-            (ChromaFormat::Yuv420, 8, 0, Entropy::Cavlc, true, FieldOrder::BottomFirst, 1),
-            (ChromaFormat::Yuv420, 8, 2, Entropy::Cabac, true, FieldOrder::TopFirst, 1),
-            (ChromaFormat::Yuv420, 8, 2, Entropy::Cavlc, false, FieldOrder::BottomFirst, 2),
-            (ChromaFormat::Yuv422, 8, 0, Entropy::Cavlc, true, FieldOrder::TopFirst, 2),
-            (ChromaFormat::Yuv444, 8, 2, Entropy::Cabac, false, FieldOrder::BottomFirst, 1),
-            (ChromaFormat::Monochrome, 8, 0, Entropy::Cabac, true, FieldOrder::TopFirst, 1),
-            (ChromaFormat::Yuv420, 10, 2, Entropy::Cabac, true, FieldOrder::BottomFirst, 1),
+            (
+                ChromaFormat::Yuv420,
+                8u32,
+                0u32,
+                Entropy::Cabac,
+                false,
+                FieldOrder::TopFirst,
+                1u32,
+            ),
+            (
+                ChromaFormat::Yuv420,
+                8,
+                0,
+                Entropy::Cavlc,
+                true,
+                FieldOrder::BottomFirst,
+                1,
+            ),
+            (
+                ChromaFormat::Yuv420,
+                8,
+                2,
+                Entropy::Cabac,
+                true,
+                FieldOrder::TopFirst,
+                1,
+            ),
+            (
+                ChromaFormat::Yuv420,
+                8,
+                2,
+                Entropy::Cavlc,
+                false,
+                FieldOrder::BottomFirst,
+                2,
+            ),
+            (
+                ChromaFormat::Yuv422,
+                8,
+                0,
+                Entropy::Cavlc,
+                true,
+                FieldOrder::TopFirst,
+                2,
+            ),
+            (
+                ChromaFormat::Yuv444,
+                8,
+                2,
+                Entropy::Cabac,
+                false,
+                FieldOrder::BottomFirst,
+                1,
+            ),
+            (
+                ChromaFormat::Monochrome,
+                8,
+                0,
+                Entropy::Cabac,
+                true,
+                FieldOrder::TopFirst,
+                1,
+            ),
+            (
+                ChromaFormat::Yuv420,
+                10,
+                2,
+                Entropy::Cabac,
+                true,
+                FieldOrder::BottomFirst,
+                1,
+            ),
         ] {
-            let tag = format!("{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} tools={tools} {order:?} refs={max_refs}");
+            let tag = format!(
+                "{chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} tools={tools} {order:?} refs={max_refs}"
+            );
             let frames = interlaced_frames(64, 64, chroma, bit_depth, 7);
             let (_, census) = encode_and_self_check(
                 &tag,
@@ -3593,10 +4759,20 @@ mod tests {
                 },
                 &frames,
             );
-            assert_eq!(census.field_pictures, 2 * frames.len() as u64, "{tag}: two field pictures per frame: {census:?}");
-            assert!(census.counts[1].iter().sum::<u64>() > 0, "{tag}: no P field macroblock: {census:?}");
+            assert_eq!(
+                census.field_pictures,
+                2 * frames.len() as u64,
+                "{tag}: two field pictures per frame: {census:?}"
+            );
+            assert!(
+                census.counts[1].iter().sum::<u64>() > 0,
+                "{tag}: no P field macroblock: {census:?}"
+            );
             if bframes > 0 {
-                assert!(census.pictures[2] > 0, "{tag}: no B field was coded: {census:?}");
+                assert!(
+                    census.pictures[2] > 0,
+                    "{tag}: no B field was coded: {census:?}"
+                );
             }
         }
     }
@@ -3620,7 +4796,10 @@ mod tests {
                 let got = if bit_depth == 8 {
                     combed(&frame[..64 * 64], 64, 64)
                 } else {
-                    let luma: Vec<u16> = frame[..2 * 64 * 64].chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+                    let luma: Vec<u16> = frame[..2 * 64 * 64]
+                        .chunks(2)
+                        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                        .collect();
                     combed(&luma, 64, 64)
                 };
                 assert_eq!(got, want, "{bit_depth}-bit field gap {gap}");
@@ -3634,12 +4813,42 @@ mod tests {
         let mut totals = [[0u64; 2]; 2]; // [content][field, frame]
         for (content, gap) in [(0usize, 1usize), (1, 0)] {
             for (chroma, bit_depth, bframes, entropy, tools, order) in [
-                (ChromaFormat::Yuv420, 8u32, 2u32, Entropy::Cabac, false, FieldOrder::TopFirst),
-                (ChromaFormat::Yuv420, 8, 2, Entropy::Cavlc, true, FieldOrder::BottomFirst),
-                (ChromaFormat::Yuv420, 8, 0, Entropy::Cabac, true, FieldOrder::BottomFirst),
-                (ChromaFormat::Yuv422, 10, 2, Entropy::Cabac, false, FieldOrder::TopFirst),
+                (
+                    ChromaFormat::Yuv420,
+                    8u32,
+                    2u32,
+                    Entropy::Cabac,
+                    false,
+                    FieldOrder::TopFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    8,
+                    2,
+                    Entropy::Cavlc,
+                    true,
+                    FieldOrder::BottomFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    8,
+                    0,
+                    Entropy::Cabac,
+                    true,
+                    FieldOrder::BottomFirst,
+                ),
+                (
+                    ChromaFormat::Yuv422,
+                    10,
+                    2,
+                    Entropy::Cabac,
+                    false,
+                    FieldOrder::TopFirst,
+                ),
             ] {
-                let tag = format!("gap {gap} {chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} tools={tools} {order:?}");
+                let tag = format!(
+                    "gap {gap} {chroma:?} {bit_depth}-bit bframes={bframes} {entropy:?} tools={tools} {order:?}"
+                );
                 let frames = woven_frames(64, 64, chroma, bit_depth, 7, gap);
                 let (_, census) = encode_and_self_check(
                     &tag,
@@ -3655,13 +4864,23 @@ mod tests {
                     },
                     &frames,
                 );
-                assert_eq!(census.field_pictures + 2 * census.frame_pictures, 2 * frames.len() as u64, "{tag}: every frame coded once: {census:?}");
+                assert_eq!(
+                    census.field_pictures + 2 * census.frame_pictures,
+                    2 * frames.len() as u64,
+                    "{tag}: every frame coded once: {census:?}"
+                );
                 totals[content][0] += census.field_pictures;
                 totals[content][1] += census.frame_pictures;
             }
         }
-        assert!(totals[0][0] > 0, "no field picture chosen on interlaced content: {totals:?}");
-        assert!(totals[1][1] > 0, "no frame picture chosen on progressive content: {totals:?}");
+        assert!(
+            totals[0][0] > 0,
+            "no field picture chosen on interlaced content: {totals:?}"
+        );
+        assert!(
+            totals[1][1] > 0,
+            "no frame picture chosen on progressive content: {totals:?}"
+        );
     }
 
     /// MBAFF frames round-trip through the production decoder — I, P and B
@@ -3676,17 +4895,91 @@ mod tests {
         let mut totals = [[0u64; 2]; 2]; // [content][frame pairs, field pairs]
         for (content, gap) in [(0usize, 1usize), (1, 0)] {
             for (chroma, bit_depth, gop, bframes, entropy, tools, order) in [
-                (ChromaFormat::Yuv420, 8u32, 0u32, 0u32, Entropy::Cabac, false, FieldOrder::TopFirst),
-                (ChromaFormat::Yuv420, 8, 0, 0, Entropy::Cavlc, true, FieldOrder::BottomFirst),
-                (ChromaFormat::Yuv420, 8, 8, 0, Entropy::Cabac, true, FieldOrder::TopFirst),
-                (ChromaFormat::Yuv420, 8, 8, 0, Entropy::Cavlc, false, FieldOrder::BottomFirst),
-                (ChromaFormat::Yuv420, 8, 8, 2, Entropy::Cabac, true, FieldOrder::BottomFirst),
-                (ChromaFormat::Yuv420, 8, 8, 2, Entropy::Cavlc, true, FieldOrder::TopFirst),
-                (ChromaFormat::Yuv422, 8, 8, 2, Entropy::Cabac, false, FieldOrder::TopFirst),
-                (ChromaFormat::Monochrome, 8, 8, 0, Entropy::Cavlc, true, FieldOrder::BottomFirst),
-                (ChromaFormat::Yuv420, 10, 8, 2, Entropy::Cabac, true, FieldOrder::TopFirst),
+                (
+                    ChromaFormat::Yuv420,
+                    8u32,
+                    0u32,
+                    0u32,
+                    Entropy::Cabac,
+                    false,
+                    FieldOrder::TopFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    8,
+                    0,
+                    0,
+                    Entropy::Cavlc,
+                    true,
+                    FieldOrder::BottomFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    8,
+                    8,
+                    0,
+                    Entropy::Cabac,
+                    true,
+                    FieldOrder::TopFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    8,
+                    8,
+                    0,
+                    Entropy::Cavlc,
+                    false,
+                    FieldOrder::BottomFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    8,
+                    8,
+                    2,
+                    Entropy::Cabac,
+                    true,
+                    FieldOrder::BottomFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    8,
+                    8,
+                    2,
+                    Entropy::Cavlc,
+                    true,
+                    FieldOrder::TopFirst,
+                ),
+                (
+                    ChromaFormat::Yuv422,
+                    8,
+                    8,
+                    2,
+                    Entropy::Cabac,
+                    false,
+                    FieldOrder::TopFirst,
+                ),
+                (
+                    ChromaFormat::Monochrome,
+                    8,
+                    8,
+                    0,
+                    Entropy::Cavlc,
+                    true,
+                    FieldOrder::BottomFirst,
+                ),
+                (
+                    ChromaFormat::Yuv420,
+                    10,
+                    8,
+                    2,
+                    Entropy::Cabac,
+                    true,
+                    FieldOrder::TopFirst,
+                ),
             ] {
-                let tag = format!("gap {gap} {chroma:?} {bit_depth}-bit gop {gop} bframes={bframes} {entropy:?} tools={tools} {order:?}");
+                let tag = format!(
+                    "gap {gap} {chroma:?} {bit_depth}-bit gop {gop} bframes={bframes} {entropy:?} tools={tools} {order:?}"
+                );
                 let frames = woven_frames(64, 64, chroma, bit_depth, 6, gap);
                 let (_, census) = encode_and_self_check(
                     &tag,
@@ -3702,14 +4995,28 @@ mod tests {
                     },
                     &frames,
                 );
-                assert_eq!(census.frame_pictures, frames.len() as u64, "{tag}: every frame an MBAFF frame: {census:?}");
-                assert_eq!(census.frame_pairs + census.field_pairs, 8 * frames.len() as u64, "{tag}: eight pairs per frame: {census:?}");
+                assert_eq!(
+                    census.frame_pictures,
+                    frames.len() as u64,
+                    "{tag}: every frame an MBAFF frame: {census:?}"
+                );
+                assert_eq!(
+                    census.frame_pairs + census.field_pairs,
+                    8 * frames.len() as u64,
+                    "{tag}: eight pairs per frame: {census:?}"
+                );
                 totals[content][0] += census.frame_pairs;
                 totals[content][1] += census.field_pairs;
             }
         }
-        assert!(totals[0][1] > 0, "no field pair chosen on interlaced content: {totals:?}");
-        assert!(totals[1][0] > 0, "no frame pair chosen on progressive content: {totals:?}");
+        assert!(
+            totals[0][1] > 0,
+            "no field pair chosen on interlaced content: {totals:?}"
+        );
+        assert!(
+            totals[1][0] > 0,
+            "no frame pair chosen on progressive content: {totals:?}"
+        );
         let err = H264Encoder::new(Config {
             interlace: Some(FieldOrder::TopFirst),
             field_coding: FieldCoding::Mbaff,
@@ -3736,14 +5043,31 @@ mod tests {
             (ChromaFormat::Yuv420, 60, true),
             (ChromaFormat::Yuv444, 62, true),
         ] {
-            let c = Config { interlace: Some(FieldOrder::TopFirst), field_coding: FieldCoding::Field, ..cfg(64, height, chroma, 8) };
-            let err = H264Encoder::new(c).err().map(|e| format!("{e}")).unwrap_or_default();
-            assert_eq!(!err.contains("crops in units of"), ok, "{chroma:?} height {height}: {err}");
+            let c = Config {
+                interlace: Some(FieldOrder::TopFirst),
+                field_coding: FieldCoding::Field,
+                ..cfg(64, height, chroma, 8)
+            };
+            let err = H264Encoder::new(c)
+                .err()
+                .map(|e| format!("{e}"))
+                .unwrap_or_default();
+            assert_eq!(
+                !err.contains("crops in units of"),
+                ok,
+                "{chroma:?} height {height}: {err}"
+            );
         }
-        let err = crate::encode::h265::H265Encoder::new(Config { interlace: Some(FieldOrder::BottomFirst), ..cfg(64, 64, ChromaFormat::Yuv420, 8) })
-            .err()
-            .expect("H.265 has no interlaced tools");
-        assert!(format!("{err}").contains("H.265 encode: interlaced coding"), "{err}");
+        let err = crate::encode::h265::H265Encoder::new(Config {
+            interlace: Some(FieldOrder::BottomFirst),
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        })
+        .err()
+        .expect("H.265 has no interlaced tools");
+        assert!(
+            format!("{err}").contains("H.265 encode: interlaced coding"),
+            "{err}"
+        );
         assert_eq!(Config::default().interlace, None, "progressive by default");
     }
 
@@ -3759,10 +5083,16 @@ mod tests {
         })
         .err()
         .expect("an H.264 lookahead must refuse");
-        assert!(format!("{err}").contains("rate lookahead is not calibrated for H.264"), "{err}");
-        let err = H264Encoder::new(Config { lookahead: 4, ..cfg(64, 64, ChromaFormat::Yuv420, 8) })
-            .err()
-            .expect("a lookahead at a constant quantiser must refuse");
+        assert!(
+            format!("{err}").contains("rate lookahead is not calibrated for H.264"),
+            "{err}"
+        );
+        let err = H264Encoder::new(Config {
+            lookahead: 4,
+            ..cfg(64, 64, ChromaFormat::Yuv420, 8)
+        })
+        .err()
+        .expect("a lookahead at a constant quantiser must refuse");
         assert!(format!("{err}").contains("lookahead"), "{err}");
     }
 }

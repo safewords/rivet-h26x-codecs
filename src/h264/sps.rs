@@ -20,7 +20,10 @@ pub struct ScalingLists {
 impl ScalingLists {
     /// Flat_4x4_16 / Flat_8x8_16 everywhere.
     pub fn flat() -> Self {
-        Self { list4x4: [[16; 16]; 6], list8x8: [[16; 64]; 6] }
+        Self {
+            list4x4: [[16; 16]; 6],
+            list8x8: [[16; 64]; 6],
+        }
     }
 
     /// The default lists (Tables 7-3 and 7-4).
@@ -165,7 +168,11 @@ impl Sps {
     /// the picture is coded as separate colour planes (each plane is its
     /// own monochrome decode; the output picture is still 4:4:4).
     pub fn frame_chroma(&self) -> crate::picture::ChromaFormat {
-        if self.separate_colour_plane { crate::picture::ChromaFormat::Monochrome } else { self.chroma_format() }
+        if self.separate_colour_plane {
+            crate::picture::ChromaFormat::Monochrome
+        } else {
+            self.chroma_format()
+        }
     }
 
     /// The picture's chroma sampling, as `chroma_format_idc` names it (4:4:4
@@ -283,7 +290,11 @@ pub(crate) fn parse_scaling_matrix(
         let present = r.flag();
         if present {
             let use_default = parse_scaling_list(r, &mut tmp4, &ZIGZAG4X4);
-            lists.list4x4[i] = if use_default { DEFAULT_SCALING4[if i < 3 { 0 } else { 1 }] } else { tmp4 };
+            lists.list4x4[i] = if use_default {
+                DEFAULT_SCALING4[if i < 3 { 0 } else { 1 }]
+            } else {
+                tmp4
+            };
         } else {
             // Rule A for i == 0 and 3, rule B otherwise.
             lists.list4x4[i] = match i {
@@ -296,7 +307,11 @@ pub(crate) fn parse_scaling_matrix(
         let present = r.flag();
         if present {
             let use_default = parse_scaling_list(r, &mut tmp8, &ZIGZAG8X8);
-            lists.list8x8[i] = if use_default { DEFAULT_SCALING8[i & 1] } else { tmp8 };
+            lists.list8x8[i] = if use_default {
+                DEFAULT_SCALING8[i & 1]
+            } else {
+                tmp8
+            };
         } else {
             lists.list8x8[i] = match i {
                 0 | 1 => fallback.list8x8[i],
@@ -338,7 +353,11 @@ fn parse_vui(r: &mut BitReader) -> Vui {
     if r.flag() {
         // aspect_ratio_info_present_flag
         let idc = r.bits(8);
-        let extended = if idc == 255 { (r.bits(16), r.bits(16)) } else { (0, 0) };
+        let extended = if idc == 255 {
+            (r.bits(16), r.bits(16))
+        } else {
+            (0, 0)
+        };
         vui.sample_aspect = crate::nal::sample_aspect(idc, extended);
     }
     if r.flag() {
@@ -406,7 +425,9 @@ impl Sps {
         let level_idc = r.bits(8) as u8;
         let id = r.ue();
         if id > 31 {
-            return Err(Error::bitstream(format!("SPS: seq_parameter_set_id {id} out of range")));
+            return Err(Error::bitstream(format!(
+                "SPS: seq_parameter_set_id {id} out of range"
+            )));
         }
 
         let mut chroma_format_idc = 1;
@@ -415,7 +436,10 @@ impl Sps {
         let mut bit_depth_chroma = 8;
         let mut transform_bypass = false;
         let mut scaling_lists = None;
-        if matches!(profile_idc, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        if matches!(
+            profile_idc,
+            100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+        ) {
             chroma_format_idc = r.ue();
             if chroma_format_idc > 3 {
                 return Err(Error::bitstream("SPS: chroma_format_idc out of range"));
@@ -452,7 +476,9 @@ impl Sps {
             0 => {
                 log2_max_poc_lsb = r.ue() + 4;
                 if log2_max_poc_lsb > 16 {
-                    return Err(Error::bitstream("SPS: log2_max_pic_order_cnt_lsb out of range"));
+                    return Err(Error::bitstream(
+                        "SPS: log2_max_pic_order_cnt_lsb out of range",
+                    ));
                 }
             }
             1 => {
@@ -461,7 +487,9 @@ impl Sps {
                 offset_for_top_to_bottom_field = r.se();
                 let n = r.ue();
                 if n > 255 {
-                    return Err(Error::bitstream("SPS: num_ref_frames_in_pic_order_cnt_cycle out of range"));
+                    return Err(Error::bitstream(
+                        "SPS: num_ref_frames_in_pic_order_cnt_cycle out of range",
+                    ));
                 }
                 for _ in 0..n {
                     offset_for_ref_frame.push(r.se());
@@ -492,14 +520,24 @@ impl Sps {
                 _ => (1, 1),
             };
             let crop_unit_x = if chroma_format_idc == 0 { 1 } else { sub_w };
-            let crop_unit_y = (if chroma_format_idc == 0 { 1 } else { sub_h }) * if frame_mbs_only { 1 } else { 2 };
+            let crop_unit_y = (if chroma_format_idc == 0 { 1 } else { sub_h })
+                * if frame_mbs_only { 1 } else { 2 };
             let l = r.ue();
             let rr = r.ue();
             let t = r.ue();
             let b = r.ue();
-            crop = (l * crop_unit_x, rr * crop_unit_x, t * crop_unit_y, b * crop_unit_y);
+            crop = (
+                l * crop_unit_x,
+                rr * crop_unit_x,
+                t * crop_unit_y,
+                b * crop_unit_y,
+            );
         }
-        let vui = if r.flag() { Some(parse_vui(&mut r)) } else { None };
+        let vui = if r.flag() {
+            Some(parse_vui(&mut r))
+        } else {
+            None
+        };
         r.finish("SPS")?;
 
         let sps = Sps {
@@ -531,7 +569,9 @@ impl Sps {
             vui,
         };
         if sps.crop.0 + sps.crop.1 >= sps.width() || sps.crop.2 + sps.crop.3 >= sps.height() {
-            return Err(Error::bitstream("SPS: cropping window larger than the picture"));
+            return Err(Error::bitstream(
+                "SPS: cropping window larger than the picture",
+            ));
         }
         Ok(sps)
     }
@@ -544,7 +584,10 @@ mod vui_signal_type_tests {
     /// An SPS NAL unit (its header byte included, no start code) → its VUI.
     fn vui(nal: &[u8]) -> Vui {
         let rbsp = crate::nal::unescape_rbsp(&nal[1..]);
-        Sps::parse(&rbsp).expect("SPS parses").vui.expect("VUI present")
+        Sps::parse(&rbsp)
+            .expect("SPS parses")
+            .vui
+            .expect("VUI present")
     }
 
     /// The x264 r3223 command line on a 64x64 raw source (`tools/synth_source.py detail`),
@@ -596,7 +639,11 @@ mod vui_signal_type_tests {
     fn the_sample_aspect_ratio_is_read_from_the_table_or_the_stream() {
         assert_eq!(vui(SAR_EXTENDED).sample_aspect, Some((64, 45)));
         assert_eq!(vui(SAR_TABLE_IDC).sample_aspect, Some((16, 11)));
-        assert_eq!(vui(NO_SIGNAL_TYPE).sample_aspect, Some((1, 1)), "--sar 1:1 is idc 1");
+        assert_eq!(
+            vui(NO_SIGNAL_TYPE).sample_aspect,
+            Some((1, 1)),
+            "--sar 1:1 is idc 1"
+        );
     }
 
     #[test]
@@ -604,7 +651,11 @@ mod vui_signal_type_tests {
         use crate::nal::sample_aspect;
         assert_eq!(sample_aspect(0, (0, 0)), None, "0 is Unspecified");
         assert_eq!(sample_aspect(17, (0, 0)), None, "17..=254 are reserved");
-        assert_eq!(sample_aspect(255, (0, 11)), None, "a zero term is unspecified");
+        assert_eq!(
+            sample_aspect(255, (0, 11)),
+            None,
+            "a zero term is unspecified"
+        );
         assert_eq!(sample_aspect(13, (0, 0)), Some((160, 99)));
     }
 }

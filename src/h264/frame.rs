@@ -607,7 +607,13 @@ impl<S: Sample> Frame<S> {
 
     /// Copy out the visible picture, cropped by `(left, right, top, bottom)`
     /// luma samples.
-    pub fn to_picture(&self, crop: (u32, u32, u32, u32), poc: i32, decode_index: u64, pool: &crate::picture::OutputPool) -> Picture {
+    pub fn to_picture(
+        &self,
+        crop: (u32, u32, u32, u32),
+        poc: i32,
+        decode_index: u64,
+        pool: &crate::picture::OutputPool,
+    ) -> Picture {
         let (l, r, t, b) = (
             crop.0 as usize,
             crop.1 as usize,
@@ -653,7 +659,11 @@ impl<S: Sample> Frame<S> {
                     }
                 }
             }
-            planes.push(Plane { offset: start, width: w as u32, height: h as u32 });
+            planes.push(Plane {
+                offset: start,
+                width: w as u32,
+                height: h as u32,
+            });
             at = start + w * h * bps;
         };
         plane(&self.y, l, t, width, height);
@@ -768,7 +778,6 @@ impl<S: Sample> SharedFrame<S> {
         }
     }
 
-
     /// Block until frame rows `< y` of the picture `parity` are parsed and
     /// their motion derived (what direct prediction reads of a colocated
     /// picture).
@@ -790,14 +799,12 @@ impl<S: Sample> SharedFrame<S> {
         self.progress[0].is_complete() && self.progress[1].is_complete()
     }
 
-
     /// Record a decoding error.
     pub fn set_error(&self) {
         self.progress[0]
             .error
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-
 
     /// Shared view; only rows the progress covers may be read.
     ///

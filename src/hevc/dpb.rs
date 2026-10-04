@@ -65,7 +65,10 @@ impl<S: Sample> RefSets<S> {
     }
 
     /// 8.3.4: build `RefPicList0/1` for a slice.
-    pub fn build_ref_lists(&self, hdr: &SliceHeader) -> Result<[Vec<RefEntry<S>>; 2], crate::Error> {
+    pub fn build_ref_lists(
+        &self,
+        hdr: &SliceHeader,
+    ) -> Result<[Vec<RefEntry<S>>; 2], crate::Error> {
         let total = self.num_pic_total_curr();
         let mut out: [Vec<RefEntry<S>>; 2] = [Vec::new(), Vec::new()];
         let nlists = if hdr.slice_type.is_b() { 2 } else { 1 };
@@ -75,11 +78,17 @@ impl<S: Sample> RefSets<S> {
                 continue;
             }
             if total == 0 {
-                return Err(crate::Error::bitstream("P/B slice with an empty reference picture set"));
+                return Err(crate::Error::bitstream(
+                    "P/B slice with an empty reference picture set",
+                ));
             }
             let num_temp = n_active.max(total);
             let mut temp: Vec<&RefEntry<S>> = Vec::with_capacity(num_temp);
-            let (first, second) = if list == 0 { (&self.st_curr_before, &self.st_curr_after) } else { (&self.st_curr_after, &self.st_curr_before) };
+            let (first, second) = if list == 0 {
+                (&self.st_curr_before, &self.st_curr_after)
+            } else {
+                (&self.st_curr_after, &self.st_curr_before)
+            };
             while temp.len() < num_temp {
                 for e in first.iter().chain(second.iter()).chain(self.lt_curr.iter()) {
                     if temp.len() < num_temp {
@@ -90,7 +99,10 @@ impl<S: Sample> RefSets<S> {
             let mut l = Vec::with_capacity(n_active);
             for i in 0..n_active {
                 let idx = match &hdr.list_entry[list] {
-                    Some(entries) => *entries.get(i).ok_or_else(|| crate::Error::bitstream("list_entry too short"))? as usize,
+                    Some(entries) => *entries
+                        .get(i)
+                        .ok_or_else(|| crate::Error::bitstream("list_entry too short"))?
+                        as usize,
                     None => i,
                 };
                 if idx >= temp.len() {
@@ -123,11 +135,17 @@ impl<S: Sample> PendingOutput<S> {
         let mut ok = true;
         if let Some(h) = self.frame.hash.lock().unwrap().take() {
             if let Err(msg) = super::hash::verify(f, &h) {
-                eprintln!("h26x: picture poc={} decode_index={}: {msg}", self.frame.poc, self.decode_index);
+                eprintln!(
+                    "h26x: picture poc={} decode_index={}: {msg}",
+                    self.frame.poc, self.decode_index
+                );
                 ok = false;
             }
         }
-        (f.to_picture(self.crop, self.frame.poc, self.decode_index, pool), ok)
+        (
+            f.to_picture(self.crop, self.frame.poc, self.decode_index, pool),
+            ok,
+        )
     }
 }
 
@@ -149,7 +167,15 @@ pub struct Dpb<S: Sample = u16> {
 impl<S: Sample> Dpb<S> {
     /// Empty.
     pub fn new() -> Self {
-        Dpb { pics: Vec::new(), output: VecDeque::new(), max_num_reorder: 0, max_latency: None, max_dec_pic_buffering: 1, warnings: 0, next_id: 1 }
+        Dpb {
+            pics: Vec::new(),
+            output: VecDeque::new(),
+            max_num_reorder: 0,
+            max_latency: None,
+            max_dec_pic_buffering: 1,
+            warnings: 0,
+            next_id: 1,
+        }
     }
 
     /// A fresh picture id.
@@ -173,7 +199,11 @@ impl<S: Sample> Dpb<S> {
         let p = &mut self.pics[i];
         p.needed_for_output = false;
         if !p.generated {
-            self.output.push_back(PendingOutput { frame: p.frame.clone(), decode_index: p.decode_index, crop: p.crop });
+            self.output.push_back(PendingOutput {
+                frame: p.frame.clone(),
+                decode_index: p.decode_index,
+                crop: p.crop,
+            });
         }
     }
 
@@ -204,7 +234,10 @@ impl<S: Sample> Dpb<S> {
 
     fn latency_exceeded(&self) -> bool {
         match self.max_latency {
-            Some(m) => self.pics.iter().any(|p| p.needed_for_output && p.latency >= m),
+            Some(m) => self
+                .pics
+                .iter()
+                .any(|p| p.needed_for_output && p.latency >= m),
             None => false,
         }
     }
@@ -241,7 +274,9 @@ impl<S: Sample> Dpb<S> {
 
     /// C.5.2.3 for the picture `id`: mark for output and bump.
     pub fn finish_current(&mut self, id: u64, pic_output: bool) {
-        let Some(idx) = self.pics.iter().position(|p| p.id() == id) else { return };
+        let Some(idx) = self.pics.iter().position(|p| p.id() == id) else {
+            return;
+        };
         let poc = self.pics[idx].poc;
         if pic_output {
             for (i, p) in self.pics.iter_mut().enumerate() {
@@ -257,7 +292,9 @@ impl<S: Sample> Dpb<S> {
             p.is_ref = true;
             p.long_term = false;
         }
-        while self.num_needed_for_output() > self.max_num_reorder as usize || self.latency_exceeded() {
+        while self.num_needed_for_output() > self.max_num_reorder as usize
+            || self.latency_exceeded()
+        {
             if !self.bump_one() {
                 break;
             }
@@ -269,7 +306,6 @@ impl<S: Sample> Dpb<S> {
         while self.bump_one() {}
         self.pics.retain(|p| p.is_ref);
     }
-
 
     /// 8.3.2: derive the RPS of the current picture from its slice header,
     /// mark the DPB accordingly, generate missing references (8.3.3), and
@@ -317,7 +353,11 @@ impl<S: Sample> Dpb<S> {
         for e in &hdr.lt {
             // e.poc is PocLsbLt - DeltaPocMsbCycleLt * MaxPocLsb; with the MSB
             // present the full POC adds the current picture's MSB (8-5).
-            let poc = if e.msb_present { e.poc + (cur_poc - (cur_poc & (max_poc_lsb - 1))) } else { e.poc };
+            let poc = if e.msb_present {
+                e.poc + (cur_poc - (cur_poc & (max_poc_lsb - 1)))
+            } else {
+                e.poc
+            };
             let entry = (poc, e.msb_present);
             if e.used {
                 lt_curr.push(entry);
@@ -328,15 +368,37 @@ impl<S: Sample> Dpb<S> {
         let find_lt = |pics: &[DpbPic<S>], poc: i32, msb_present: bool| -> Option<usize> {
             pics.iter().position(|p| {
                 p.is_ref
-                    && if msb_present { p.poc == poc } else { (p.poc & (max_poc_lsb - 1)) == (poc & (max_poc_lsb - 1)) }
+                    && if msb_present {
+                        p.poc == poc
+                    } else {
+                        (p.poc & (max_poc_lsb - 1)) == (poc & (max_poc_lsb - 1))
+                    }
             })
         };
-        let mut lt_curr_idx: Vec<Option<usize>> = lt_curr.iter().map(|&(poc, msb)| find_lt(&self.pics, poc, msb)).collect();
-        let lt_foll_idx: Vec<Option<usize>> = lt_foll.iter().map(|&(poc, msb)| find_lt(&self.pics, poc, msb)).collect();
-        let find_st = |pics: &[DpbPic<S>], poc: i32| -> Option<usize> { pics.iter().position(|p| p.is_ref && !p.long_term && p.poc == poc) };
-        let mut st_before_idx: Vec<Option<usize>> = poc_st_curr_before.iter().map(|&p| find_st(&self.pics, p)).collect();
-        let mut st_after_idx: Vec<Option<usize>> = poc_st_curr_after.iter().map(|&p| find_st(&self.pics, p)).collect();
-        let st_foll_idx: Vec<Option<usize>> = poc_st_foll.iter().map(|&p| find_st(&self.pics, p)).collect();
+        let mut lt_curr_idx: Vec<Option<usize>> = lt_curr
+            .iter()
+            .map(|&(poc, msb)| find_lt(&self.pics, poc, msb))
+            .collect();
+        let lt_foll_idx: Vec<Option<usize>> = lt_foll
+            .iter()
+            .map(|&(poc, msb)| find_lt(&self.pics, poc, msb))
+            .collect();
+        let find_st = |pics: &[DpbPic<S>], poc: i32| -> Option<usize> {
+            pics.iter()
+                .position(|p| p.is_ref && !p.long_term && p.poc == poc)
+        };
+        let mut st_before_idx: Vec<Option<usize>> = poc_st_curr_before
+            .iter()
+            .map(|&p| find_st(&self.pics, p))
+            .collect();
+        let mut st_after_idx: Vec<Option<usize>> = poc_st_curr_after
+            .iter()
+            .map(|&p| find_st(&self.pics, p))
+            .collect();
+        let st_foll_idx: Vec<Option<usize>> = poc_st_foll
+            .iter()
+            .map(|&p| find_st(&self.pics, p))
+            .collect();
 
         // Marking.
         let mut keep = vec![false; self.pics.len()];
@@ -345,7 +407,12 @@ impl<S: Sample> Dpb<S> {
             keep[*i] = true;
             make_lt[*i] = true;
         }
-        for i in st_before_idx.iter().chain(st_after_idx.iter()).chain(st_foll_idx.iter()).flatten() {
+        for i in st_before_idx
+            .iter()
+            .chain(st_after_idx.iter())
+            .chain(st_foll_idx.iter())
+            .flatten()
+        {
             keep[*i] = true;
         }
         for (i, p) in self.pics.iter_mut().enumerate() {
@@ -359,7 +426,13 @@ impl<S: Sample> Dpb<S> {
         // Generate missing "Curr" references (8.3.3.2).
         let mut next_id = self.next_id;
         let mut generate = |poc: i32, long_term: bool, pics: &mut Vec<DpbPic<S>>| -> usize {
-            let mut f = Frame::<S>::with_depths(sps.width as usize, sps.height as usize, chroma, bit_depth, bit_depth_chroma);
+            let mut f = Frame::<S>::with_depths(
+                sps.width as usize,
+                sps.height as usize,
+                chroma,
+                bit_depth,
+                bit_depth_chroma,
+            );
             f.y.data.fill(S::from_i32(1 << (bit_depth - 1)));
             let mid_c = S::from_i32(1 << (bit_depth_chroma - 1));
             f.cb.data.fill(mid_c);
@@ -403,9 +476,20 @@ impl<S: Sample> Dpb<S> {
             self.warnings += 1;
         }
         let entries = |v: Vec<Option<usize>>, pics: &[DpbPic<S>]| -> Vec<RefEntry<S>> {
-            v.into_iter().flatten().map(|i| RefEntry { frame: pics[i].frame.clone(), poc: pics[i].poc, long_term: pics[i].long_term }).collect()
+            v.into_iter()
+                .flatten()
+                .map(|i| RefEntry {
+                    frame: pics[i].frame.clone(),
+                    poc: pics[i].poc,
+                    long_term: pics[i].long_term,
+                })
+                .collect()
         };
-        RefSets { st_curr_before: entries(st_before_idx, &self.pics), st_curr_after: entries(st_after_idx, &self.pics), lt_curr: entries(lt_curr_idx, &self.pics) }
+        RefSets {
+            st_curr_before: entries(st_before_idx, &self.pics),
+            st_curr_after: entries(st_after_idx, &self.pics),
+            lt_curr: entries(lt_curr_idx, &self.pics),
+        }
     }
 }
 

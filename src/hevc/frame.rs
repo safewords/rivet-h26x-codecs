@@ -63,7 +63,15 @@ const _: () = assert!(std::mem::size_of::<MotionInfo>() == 16);
 /// is what these two- to sixteen-wide rows want (the same reasoning as
 /// `PicInfo::fill4`).
 #[inline(always)]
-pub fn fill_motion(motion: &mut [MotionInfo], w4: usize, x: usize, y: usize, w: usize, h: usize, v: MotionInfo) {
+pub fn fill_motion(
+    motion: &mut [MotionInfo],
+    w4: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    v: MotionInfo,
+) {
     let (bx0, bx1) = (x >> 2, (x + w) >> 2);
     if bx1 <= bx0 {
         return;
@@ -89,7 +97,13 @@ impl Default for MotionInfo {
 
 impl MotionInfo {
     /// An intra block.
-    pub const INTRA: MotionInfo = MotionInfo { mv: [Mv::ZERO; 2], ref_delta: [0; 2], ref_idx: [-1; 2], flags: 4, pad: 0 };
+    pub const INTRA: MotionInfo = MotionInfo {
+        mv: [Mv::ZERO; 2],
+        ref_delta: [0; 2],
+        ref_idx: [-1; 2],
+        flags: 4,
+        pad: 0,
+    };
 
     /// `predFlagLX`.
     #[inline]
@@ -134,7 +148,13 @@ pub struct Plane16<S: Sample = u16> {
 impl<S: Sample> Plane16<S> {
     fn new(width: usize, height: usize, pad: usize) -> Self {
         let stride = width + 2 * pad;
-        Plane16 { data: vec![S::default(); stride * (height + 2 * pad)], width, height, pad, stride }
+        Plane16 {
+            data: vec![S::default(); stride * (height + 2 * pad)],
+            width,
+            height,
+            pad,
+            stride,
+        }
     }
     /// Offset of visible sample (0, 0).
     #[inline(always)]
@@ -174,7 +194,8 @@ impl<S: Sample> Plane16<S> {
         let (pad, stride) = (self.pad, self.stride);
         let first = self.origin() - pad;
         for i in 1..=pad {
-            self.data.copy_within(first..first + stride, first - i * stride);
+            self.data
+                .copy_within(first..first + stride, first - i * stride);
         }
     }
 
@@ -186,10 +207,10 @@ impl<S: Sample> Plane16<S> {
         }
         let last = self.origin() + (h - 1) * stride - pad;
         for i in 1..=pad {
-            self.data.copy_within(last..last + stride, last + i * stride);
+            self.data
+                .copy_within(last..last + stride, last + i * stride);
         }
     }
-
 }
 
 /// A decoded HEVC picture.
@@ -222,8 +243,26 @@ pub struct Frame<S: Sample = u16> {
 impl<S: Sample> Frame<S> {
     /// A zero-size placeholder (no buffers).
     pub fn empty() -> Self {
-        let none = || Plane16 { data: Vec::new(), width: 0, height: 0, pad: 0, stride: 0 };
-        Frame { y: none(), cb: none(), cr: none(), chroma: ChromaFormat::Yuv420, bit_depth: 8, bit_depth_chroma: 8, width: 0, height: 0, w4: 0, motion: Vec::new(), poc: 0 }
+        let none = || Plane16 {
+            data: Vec::new(),
+            width: 0,
+            height: 0,
+            pad: 0,
+            stride: 0,
+        };
+        Frame {
+            y: none(),
+            cb: none(),
+            cr: none(),
+            chroma: ChromaFormat::Yuv420,
+            bit_depth: 8,
+            bit_depth_chroma: 8,
+            width: 0,
+            height: 0,
+            w4: 0,
+            motion: Vec::new(),
+            poc: 0,
+        }
     }
 
     /// Allocate, with chroma at the luma bit depth.
@@ -232,7 +271,13 @@ impl<S: Sample> Frame<S> {
     }
 
     /// Allocate, with the luma and chroma bit depths given separately.
-    pub fn with_depths(width: usize, height: usize, chroma: ChromaFormat, bit_depth: u32, bit_depth_chroma: u32) -> Self {
+    pub fn with_depths(
+        width: usize,
+        height: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        bit_depth_chroma: u32,
+    ) -> Self {
         let (cw, ch) = match chroma {
             ChromaFormat::Monochrome => (0, 0),
             ChromaFormat::Yuv420 => (width.div_ceil(2), height.div_ceil(2)),
@@ -261,7 +306,6 @@ impl<S: Sample> Frame<S> {
     pub fn motion_at(&self, x: usize, y: usize) -> &MotionInfo {
         &self.motion[(y / 4) * self.w4 + x / 4]
     }
-
 
     /// Extend the borders of luma rows `y0..y1` (and the matching chroma rows)
     /// left/right; the top border once `y0 == 0`, the bottom once `y1 >= height`.
@@ -294,8 +338,19 @@ impl<S: Sample> Frame<S> {
     /// Copy the visible, cropped picture out: bytes for `u8` planes (both
     /// depths 8), little-endian `u16` words for `u16` ones — every plane
     /// alike, whatever its own depth (see [`Picture::bytes_per_sample`]).
-    pub fn to_picture(&self, crop: (u32, u32, u32, u32), poc: i32, decode_index: u64, pool: &crate::picture::OutputPool) -> Picture {
-        let (l, r, t, b) = (crop.0 as usize, crop.1 as usize, crop.2 as usize, crop.3 as usize);
+    pub fn to_picture(
+        &self,
+        crop: (u32, u32, u32, u32),
+        poc: i32,
+        decode_index: u64,
+        pool: &crate::picture::OutputPool,
+    ) -> Picture {
+        let (l, r, t, b) = (
+            crop.0 as usize,
+            crop.1 as usize,
+            crop.2 as usize,
+            crop.3 as usize,
+        );
         let width = self.width.saturating_sub(l + r).max(1);
         let height = self.height.saturating_sub(t + b).max(1);
         let mut planes = Vec::with_capacity(3);
@@ -322,20 +377,42 @@ impl<S: Sample> Frame<S> {
                 if bps == 1 || cfg!(target_endian = "little") {
                     // Bytes, or little-endian u16 already in memory order.
                     // SAFETY: `src` is `w` samples of `bps` bytes; `dst` is `bps * w` bytes.
-                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst.as_mut_ptr(), bps * w) };
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src.as_ptr() as *const u8,
+                            dst.as_mut_ptr(),
+                            bps * w,
+                        )
+                    };
                 } else {
                     for (d, s) in dst.chunks_exact_mut(2).zip(src) {
                         d.copy_from_slice(&(s.to_i32() as u16).to_le_bytes());
                     }
                 }
             }
-            planes.push(Plane { offset: start, width: w as u32, height: h as u32 });
+            planes.push(Plane {
+                offset: start,
+                width: w as u32,
+                height: h as u32,
+            });
             at = start + w * h * bps;
         };
         plane(&self.y, l, t, width, height);
         if self.chroma != ChromaFormat::Monochrome {
-            plane(&self.cb, l / sw, t / sh, width.div_ceil(sw), height.div_ceil(sh));
-            plane(&self.cr, l / sw, t / sh, width.div_ceil(sw), height.div_ceil(sh));
+            plane(
+                &self.cb,
+                l / sw,
+                t / sh,
+                width.div_ceil(sw),
+                height.div_ceil(sh),
+            );
+            plane(
+                &self.cr,
+                l / sw,
+                t / sh,
+                width.div_ceil(sw),
+                height.div_ceil(sh),
+            );
         }
         Picture {
             width: width as u32,
@@ -402,9 +479,22 @@ impl<S: Sample> FramePool<S> {
 
     /// A frame of the given geometry, recycled if one is available (its
     /// samples are stale — every sample gets written before it is read).
-    pub fn take(&self, width: usize, height: usize, chroma: ChromaFormat, bit_depth: u32, bit_depth_chroma: u32) -> Frame<S> {
+    pub fn take(
+        &self,
+        width: usize,
+        height: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        bit_depth_chroma: u32,
+    ) -> Frame<S> {
         let mut g = self.0.lock().unwrap();
-        if let Some(i) = g.iter().position(|f| f.width == width && f.height == height && f.chroma == chroma && f.bit_depth == bit_depth && f.bit_depth_chroma == bit_depth_chroma) {
+        if let Some(i) = g.iter().position(|f| {
+            f.width == width
+                && f.height == height
+                && f.chroma == chroma
+                && f.bit_depth == bit_depth
+                && f.bit_depth_chroma == bit_depth_chroma
+        }) {
             let mut f = g.swap_remove(i);
             // Motion is rewritten for every coded block; stale values only
             // remain under lost slices, where they are as good as anything.
@@ -444,12 +534,30 @@ unsafe impl<S: Sample> Send for SharedFrame<S> {}
 impl<S: Sample> SharedFrame<S> {
     /// Wrap a fresh frame.
     pub fn new(frame: Frame<S>, poc: i32, id: u64, complete: bool) -> Self {
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: if complete { Progress::complete() } else { Progress::new() }, poc, id, pool: None, hash: std::sync::Mutex::new(None) }
+        SharedFrame {
+            inner: std::cell::UnsafeCell::new(frame),
+            progress: if complete {
+                Progress::complete()
+            } else {
+                Progress::new()
+            },
+            poc,
+            id,
+            pool: None,
+            hash: std::sync::Mutex::new(None),
+        }
     }
 
     /// Wrap a frame whose buffers return to `pool` on drop.
     pub fn with_pool(frame: Frame<S>, poc: i32, id: u64, pool: FramePool<S>) -> Self {
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: Progress::new(), poc, id, pool: Some(pool), hash: std::sync::Mutex::new(None) }
+        SharedFrame {
+            inner: std::cell::UnsafeCell::new(frame),
+            progress: Progress::new(),
+            poc,
+            id,
+            pool: Some(pool),
+            hash: std::sync::Mutex::new(None),
+        }
     }
 
     /// Shared view; only rows the progress covers may be read.

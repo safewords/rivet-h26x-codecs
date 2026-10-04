@@ -68,24 +68,24 @@
 use crate::dsp::distortion::DistortionDsp;
 use crate::dsp::h264::{NO_DC, PRED_STRIDE};
 use crate::dsp::h264_enc::{qbits4, quant_offset};
-use crate::encode::h264_pic::Colocated;
 use crate::encode::h264_intra::{
     IntraCtx, code_block_8x8, quad_rasters, reconstruct_8x8, satd_lambda, ssd_lambda,
 };
-use crate::h264::cavlc::sub_block_counts_8x8_scan;
-use crate::h264::inter::Weighting;
-use crate::h264::recon::explicit_weighting;
-use crate::h264::slice::PredWeightTable;
+use crate::encode::h264_pic::Colocated;
 use crate::encode::h264_syntax::Recon;
-use crate::sample::Sample;
-use crate::h264::frame::{BlockMotion, Frame, Mv, PARITY_FRAME};
+use crate::h264::cavlc::sub_block_counts_8x8_scan;
 use crate::h264::cavlc::{mb_partitions, part_index_of, sub_partition_rect};
+use crate::h264::frame::{BlockMotion, Frame, Mv, PARITY_FRAME};
+use crate::h264::inter::Weighting;
 use crate::h264::mb::SubMbShape;
 use crate::h264::mb::{
-    MbKind as DecMbKind, MbMotion, MbNeighbours, MotionCache, PRED_BI, PRED_L0, PRED_L1,
-    PicInfo, fill_motion, p_skip_mv, predict_mv,
+    MbKind as DecMbKind, MbMotion, MbNeighbours, MotionCache, PRED_BI, PRED_L0, PRED_L1, PicInfo,
+    fill_motion, p_skip_mv, predict_mv,
 };
+use crate::h264::recon::explicit_weighting;
+use crate::h264::slice::PredWeightTable;
 use crate::h264::transform::{chroma_dc_transform_420, chroma_dc_transform_422};
+use crate::sample::Sample;
 
 /// Everything inter coding needs that does not change per macroblock —
 /// the *same* struct the intra module takes, aliased rather than repeated:
@@ -203,8 +203,7 @@ impl InterDecision {
     /// false as soon as one 8x8 is split — the encoder must not write the
     /// flag where a reader will not take it.
     pub fn no_sub_mb_part_less_than_8x8(&self) -> bool {
-        self.kind != InterMbKind::P8x8
-            || self.sub_shape.iter().all(|s| s.count() == 1)
+        self.kind != InterMbKind::P8x8 || self.sub_shape.iter().all(|s| s.count() == 1)
     }
 }
 
@@ -322,13 +321,7 @@ impl MbMotionState {
 
     /// Begin macroblock `addr`: gather its neighbours from the picture
     /// coded so far, and clear the per-macroblock part. `nb` is scratch.
-    pub fn start(
-        &mut self,
-        frame: &Frame<u8>,
-        info: &PicInfo,
-        addr: usize,
-        nb: &mut MbNeighbours,
-    ) {
+    pub fn start(&mut self, frame: &Frame<u8>, info: &PicInfo, addr: usize, nb: &mut MbNeighbours) {
         nb.derive_into(info, addr, 0);
         self.cache.gather(nb, frame, info);
         self.cur = [[BlockMotion::default(); 16]; 2];
@@ -339,7 +332,14 @@ impl MbMotionState {
     /// field macroblock when `field`: its neighbours through the decoder's
     /// Table 6-4 derivation (`derive_mbaff_into`), which `gather` then reads
     /// with the field / frame scaling of 8.4.1.3.1.
-    pub fn start_mbaff(&mut self, frame: &Frame<u8>, info: &PicInfo, addr: usize, field: bool, nb: &mut MbNeighbours) {
+    pub fn start_mbaff(
+        &mut self,
+        frame: &Frame<u8>,
+        info: &PicInfo,
+        addr: usize,
+        field: bool,
+        nb: &mut MbNeighbours,
+    ) {
         nb.derive_mbaff_into(info, addr, 0, field);
         self.cache.gather(nb, frame, info);
         self.cur = [[BlockMotion::default(); 16]; 2];
@@ -372,7 +372,14 @@ impl MbMotionState {
     /// `done` bit is set, exactly as `derive_motion` orders it — an
     /// unused list stores the default, which is what a decoder holds for
     /// one.
-    pub fn commit_part(&mut self, x: usize, y: usize, w: usize, h: usize, per_list: [Option<Mv>; 2]) {
+    pub fn commit_part(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        per_list: [Option<Mv>; 2],
+    ) {
         for (list, mv) in per_list.iter().enumerate() {
             let m = match mv {
                 Some(mv) => BlockMotion {
@@ -487,9 +494,15 @@ impl BWeights<'_> {
         match *self {
             BWeights::Default => [Weighting::Default; 3],
             BWeights::Explicit(t) => b_weightings(Some(t), bit_depth),
-            BWeights::Implicit(w0, w1) => {
-                [Weighting::Default, Weighting::Default, Weighting::Weighted { log_wd: [5; 3], w: [[w0, w1]; 3], o: [[0; 2]; 3] }]
-            }
+            BWeights::Implicit(w0, w1) => [
+                Weighting::Default,
+                Weighting::Default,
+                Weighting::Weighted {
+                    log_wd: [5; 3],
+                    w: [[w0, w1]; 3],
+                    o: [[0; 2]; 3],
+                },
+            ],
         }
     }
 }
@@ -499,14 +512,22 @@ impl BWeights<'_> {
 /// a prediction can use, in [`BRefs::weighting`]'s order — or default
 /// weighting throughout without a table.
 pub(crate) fn b_weightings(t: Option<&PredWeightTable>, bit_depth: u32) -> [Weighting; 3] {
-    let wp = |r0: i8, r1: i8| t.map_or(Weighting::Default, |t| explicit_weighting(t, bit_depth, r0, r1, false));
+    let wp = |r0: i8, r1: i8| {
+        t.map_or(Weighting::Default, |t| {
+            explicit_weighting(t, bit_depth, r0, r1, false)
+        })
+    };
     [wp(0, -1), wp(-1, 0), wp(0, 0)]
 }
 
 impl<'a, S: Sample> BRefs<'a, S> {
     /// Default weighting over `planes`: every prediction plain.
     pub fn plain(planes: [&'a [Recon<S>]; 2]) -> Self {
-        BRefs { planes, search: [&planes[0][0], &planes[1][0]], weighting: [Weighting::Default; 3] }
+        BRefs {
+            planes,
+            search: [&planes[0][0], &planes[1][0]],
+            weighting: [Weighting::Default; 3],
+        }
     }
 
     /// The weighting of a prediction from the lists `used` — the reference
@@ -521,12 +542,22 @@ impl<'a, S: Sample> BRefs<'a, S> {
 /// included: 8.4.2.3.2's uni-directional formula at `log_wd`, `weight` and
 /// `offset` (already at the sample depth), clipped to `max` — the plane a
 /// weighted reference's motion search scores against ([`PRef::search`]).
-pub fn weighted_search_plane<S: Sample>(refp: &Recon<S>, log_wd: i32, weight: i32, offset: i32, max: i32) -> Recon<S> {
+pub fn weighted_search_plane<S: Sample>(
+    refp: &Recon<S>,
+    log_wd: i32,
+    weight: i32,
+    offset: i32,
+    max: i32,
+) -> Recon<S> {
     let mut out = refp.clone();
     let round = if log_wd >= 1 { 1 << (log_wd - 1) } else { 0 };
     for v in out.data.iter_mut() {
         let x = v.to_i32() * weight;
-        let p = if log_wd >= 1 { ((x + round) >> log_wd) + offset } else { x + offset };
+        let p = if log_wd >= 1 {
+            ((x + round) >> log_wd) + offset
+        } else {
+            x + offset
+        };
         *v = S::from_i32(p.clamp(0, max));
     }
     out
@@ -560,9 +591,28 @@ pub(crate) fn weighting_gain<S: Sample>(
         let (ax, ay) = (px + x, py + y);
         let mv = motion[0][(y / 4) * 4 + x / 4].mv;
         let src = &src_luma[ay * luma_stride + ax..];
-        luma_pred_into(ctx, &pref.planes[0], ax as i32, ay as i32, mv, rw, rh, &mut a);
+        luma_pred_into(
+            ctx,
+            &pref.planes[0],
+            ax as i32,
+            ay as i32,
+            mv,
+            rw,
+            rh,
+            &mut a,
+        );
         plain += u64::from((ctx.dist.satd)(src, luma_stride, &a, PRED_STRIDE, rw, rh));
-        (ctx.dsp.weighted_uni)(&mut b, PRED_STRIDE, &a, rw, rh, log_wd[0], w[0][0], o[0][0], ctx.max);
+        (ctx.dsp.weighted_uni)(
+            &mut b,
+            PRED_STRIDE,
+            &a,
+            rw,
+            rh,
+            log_wd[0],
+            w[0][0],
+            o[0][0],
+            ctx.max,
+        );
         weighted += u64::from((ctx.dist.satd)(src, luma_stride, &b, PRED_STRIDE, rw, rh));
     }
     (plain, weighted)
@@ -585,7 +635,15 @@ fn window_ok<S: Sample>(r: &Recon<S>, x0: i32, y0: i32, ww: i32, hh: i32) -> boo
 /// else a sample-by-sample clamp to the picture. Mirrors `interp` in
 /// `src/h264/inter.rs` exactly, so a far-out vector reads the same samples
 /// a decoder would.
-fn interp<S: Sample>(r: &Recon<S>, x0: i32, y0: i32, ww: usize, hh: usize, out: &mut [S], kernel: impl FnOnce(&mut [S], &[S], usize)) {
+fn interp<S: Sample>(
+    r: &Recon<S>,
+    x0: i32,
+    y0: i32,
+    ww: usize,
+    hh: usize,
+    out: &mut [S],
+    kernel: impl FnOnce(&mut [S], &[S], usize),
+) {
     if window_ok(r, x0, y0, ww as i32, hh as i32) {
         kernel(out, &r.data[r.offset(x0 as isize, y0 as isize)..], r.stride);
     } else {
@@ -627,7 +685,9 @@ fn luma_pred_into<S: Sample>(
     let yi = y + (mv.y as i32 >> 2);
     let pos = ((mv.y & 3) as usize) * 4 + (mv.x & 3) as usize;
     let k = ctx.dsp.qpel[pos];
-    interp(r, xi - 2, yi - 2, w + 5, h + 5, dst, |o, s, st| k(o, s, st, w, h, ctx.max));
+    interp(r, xi - 2, yi - 2, w + 5, h + 5, dst, |o, s, st| {
+        k(o, s, st, w, h, ctx.max)
+    });
 }
 
 /// Interpolate one chroma component's prediction (8 wide, `ch` high) for
@@ -663,7 +723,9 @@ fn chroma_pred_into<S: Sample>(
     };
     let xf = (mv.x & 7) as i32;
     let kc = ctx.dsp.chroma;
-    interp(r, xci, yci, cw + 1, ch_h + 1, dst, |o, s, st| kc(o, s, st, cw, ch_h, xf, yf));
+    interp(r, xci, yci, cw + 1, ch_h + 1, dst, |o, s, st| {
+        kc(o, s, st, cw, ch_h, xf, yf)
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +836,16 @@ fn search_rect<S: Sample>(
     let mut cost = satd_of(mv);
     for step in [2i16, 1] {
         let base = mv;
-        for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+        for (dx, dy) in [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ] {
             let cand = Mv::new(base.x + dx * step, base.y + dy * step);
             if !window_ok(
                 r,
@@ -804,11 +875,22 @@ fn search_rect<S: Sample>(
 /// dead zone). Returns the levels and their nonzero count. The shape of
 /// `code_block_4x4` in `src/encode/h264_intra.rs` (private there), minus
 /// the Intra_16x16 DC split: an inter block keeps its own DC.
-fn code_inter_4x4<S: Sample>(ctx: &MeCtx<S>, rec: &Recon<S>, off: usize, src: &[S], src_stride: usize, list: usize, qp: i32, keep_dc: bool) -> ([i16; 16], u32, i32) {
+fn code_inter_4x4<S: Sample>(
+    ctx: &MeCtx<S>,
+    rec: &Recon<S>,
+    off: usize,
+    src: &[S],
+    src_stride: usize,
+    list: usize,
+    qp: i32,
+    keep_dc: bool,
+) -> ([i16; 16], u32, i32) {
     let mut residual = [0i16; 16];
     for y in 0..4 {
         for x in 0..4 {
-            residual[y * 4 + x] = (src[y * src_stride + x].to_i32() - rec.data[off + y * rec.stride + x].to_i32()) as i16;
+            residual[y * 4 + x] = (src[y * src_stride + x].to_i32()
+                - rec.data[off + y * rec.stride + x].to_i32())
+                as i16;
         }
     }
     let mut coeffs = [0i32; 16];
@@ -833,7 +915,15 @@ fn code_inter_4x4<S: Sample>(ctx: &MeCtx<S>, rec: &Recon<S>, off: usize, src: &[
 /// ([`crate::dsp::h264::H264Dsp::residual4`], 8.5.12), so the two cannot
 /// disagree. The shape of `reconstruct_4x4` in
 /// `src/encode/h264_intra.rs` (private there).
-fn add_residual_4x4<S: Sample>(ctx: &MeCtx<S>, rec: &mut Recon<S>, off: usize, levels: &[i16; 16], list: usize, qp: i32, dc: Option<i32>) {
+fn add_residual_4x4<S: Sample>(
+    ctx: &MeCtx<S>,
+    rec: &mut Recon<S>,
+    off: usize,
+    levels: &[i16; 16],
+    list: usize,
+    qp: i32,
+    dc: Option<i32>,
+) {
     let m = (qp % 6) as usize;
     let scale = &ctx.dequant.scale4[list][m];
     let q6 = qp / 6;
@@ -846,7 +936,13 @@ fn add_residual_4x4<S: Sample>(ctx: &MeCtx<S>, rec: &mut Recon<S>, off: usize, l
             (c + (1 << (3 - q6))) >> (4 - q6)
         };
     }
-    (ctx.dsp.residual4)(&mut rec.data[off..], rec.stride, &coefs, dc.unwrap_or(NO_DC), ctx.max);
+    (ctx.dsp.residual4)(
+        &mut rec.data[off..],
+        rec.stride,
+        &coefs,
+        dc.unwrap_or(NO_DC),
+        ctx.max,
+    );
 }
 
 /// Put a one-list prediction `src` into `dst`: a copy under default
@@ -854,12 +950,30 @@ fn add_residual_4x4<S: Sample>(ctx: &MeCtx<S>, rec: &mut Recon<S>, off: usize, l
 /// weight and offset for list `list` under an explicit one — the two
 /// uni-directional arms of `predict_partition` (src/h264/inter.rs).
 #[allow(clippy::too_many_arguments)]
-fn put_uni<S: Sample>(ctx: &MeCtx<S>, dst: &mut [S], stride: usize, src: &[S], w: usize, h: usize, weighting: Weighting, c: usize, list: usize) {
+fn put_uni<S: Sample>(
+    ctx: &MeCtx<S>,
+    dst: &mut [S],
+    stride: usize,
+    src: &[S],
+    w: usize,
+    h: usize,
+    weighting: Weighting,
+    c: usize,
+    list: usize,
+) {
     match weighting {
         Weighting::Default => (ctx.dsp.copy)(dst, stride, src, w, h),
-        Weighting::Weighted { log_wd, w: wt, o } => {
-            (ctx.dsp.weighted_uni)(dst, stride, src, w, h, log_wd[c], wt[c][list], o[c][list], ctx.max)
-        }
+        Weighting::Weighted { log_wd, w: wt, o } => (ctx.dsp.weighted_uni)(
+            dst,
+            stride,
+            src,
+            w,
+            h,
+            log_wd[c],
+            wt[c][list],
+            o[c][list],
+            ctx.max,
+        ),
     }
 }
 
@@ -869,12 +983,22 @@ fn put_uni<S: Sample>(ctx: &MeCtx<S>, dst: &mut [S], stride: usize, src: &[S], w
 /// weights and offsets under an explicit one — the two bi-directional
 /// arms of `predict_partition` (src/h264/inter.rs).
 #[allow(clippy::too_many_arguments)]
-fn put_bi<S: Sample>(ctx: &MeCtx<S>, dst: &mut [S], stride: usize, a: &[S], b: &[S], w: usize, h: usize, weighting: Weighting, c: usize) {
+fn put_bi<S: Sample>(
+    ctx: &MeCtx<S>,
+    dst: &mut [S],
+    stride: usize,
+    a: &[S],
+    b: &[S],
+    w: usize,
+    h: usize,
+    weighting: Weighting,
+    c: usize,
+) {
     match weighting {
         Weighting::Default => (ctx.dsp.avg)(dst, stride, a, b, w, h),
-        Weighting::Weighted { log_wd, w: wt, o } => {
-            (ctx.dsp.weighted_bi)(dst, stride, a, b, w, h, log_wd[c], wt[c][0], wt[c][1], o[c][0], o[c][1], ctx.max)
-        }
+        Weighting::Weighted { log_wd, w: wt, o } => (ctx.dsp.weighted_bi)(
+            dst, stride, a, b, w, h, log_wd[c], wt[c][0], wt[c][1], o[c][0], o[c][1], ctx.max,
+        ),
     }
 }
 
@@ -906,13 +1030,60 @@ fn predict_inter_rect<S: Sample>(
     let off = rec[0].offset(px as isize, py as isize);
     let stride = rec[0].stride;
     if used[0] && used[1] {
-        luma_pred_into(ctx, &refs[0][0], px as i32, py as i32, mv[0], pw, ph, &mut a);
-        luma_pred_into(ctx, &refs[1][0], px as i32, py as i32, mv[1], pw, ph, &mut b);
-        put_bi(ctx, &mut rec[0].data[off..], stride, &a, &b, pw, ph, weighting, 0);
+        luma_pred_into(
+            ctx,
+            &refs[0][0],
+            px as i32,
+            py as i32,
+            mv[0],
+            pw,
+            ph,
+            &mut a,
+        );
+        luma_pred_into(
+            ctx,
+            &refs[1][0],
+            px as i32,
+            py as i32,
+            mv[1],
+            pw,
+            ph,
+            &mut b,
+        );
+        put_bi(
+            ctx,
+            &mut rec[0].data[off..],
+            stride,
+            &a,
+            &b,
+            pw,
+            ph,
+            weighting,
+            0,
+        );
     } else {
         let l = if used[0] { 0 } else { 1 };
-        luma_pred_into(ctx, &refs[l][0], px as i32, py as i32, mv[l], pw, ph, &mut a);
-        put_uni(ctx, &mut rec[0].data[off..], stride, &a, pw, ph, weighting, 0, l);
+        luma_pred_into(
+            ctx,
+            &refs[l][0],
+            px as i32,
+            py as i32,
+            mv[l],
+            pw,
+            ph,
+            &mut a,
+        );
+        put_uni(
+            ctx,
+            &mut rec[0].data[off..],
+            stride,
+            &a,
+            pw,
+            ph,
+            weighting,
+            0,
+            l,
+        );
     }
     // Chroma. 4:4:4 interpolates its chroma with the luma six-tap kernel
     // at the unscaled vector (8.4.2.2: mvCLX = mvLX) — the `c444` branch
@@ -928,13 +1099,60 @@ fn predict_inter_rect<S: Sample>(
             let off = plane.offset(px as isize, py as isize);
             let stride = plane.stride;
             if used[0] && used[1] {
-                luma_pred_into(ctx, &refs[0][comp + 1], px as i32, py as i32, mv[0], pw, ph, &mut a);
-                luma_pred_into(ctx, &refs[1][comp + 1], px as i32, py as i32, mv[1], pw, ph, &mut b);
-                put_bi(ctx, &mut plane.data[off..], stride, &a, &b, pw, ph, weighting, comp + 1);
+                luma_pred_into(
+                    ctx,
+                    &refs[0][comp + 1],
+                    px as i32,
+                    py as i32,
+                    mv[0],
+                    pw,
+                    ph,
+                    &mut a,
+                );
+                luma_pred_into(
+                    ctx,
+                    &refs[1][comp + 1],
+                    px as i32,
+                    py as i32,
+                    mv[1],
+                    pw,
+                    ph,
+                    &mut b,
+                );
+                put_bi(
+                    ctx,
+                    &mut plane.data[off..],
+                    stride,
+                    &a,
+                    &b,
+                    pw,
+                    ph,
+                    weighting,
+                    comp + 1,
+                );
             } else {
                 let l = if used[0] { 0 } else { 1 };
-                luma_pred_into(ctx, &refs[l][comp + 1], px as i32, py as i32, mv[l], pw, ph, &mut a);
-                put_uni(ctx, &mut plane.data[off..], stride, &a, pw, ph, weighting, comp + 1, l);
+                luma_pred_into(
+                    ctx,
+                    &refs[l][comp + 1],
+                    px as i32,
+                    py as i32,
+                    mv[l],
+                    pw,
+                    ph,
+                    &mut a,
+                );
+                put_uni(
+                    ctx,
+                    &mut plane.data[off..],
+                    stride,
+                    &a,
+                    pw,
+                    ph,
+                    weighting,
+                    comp + 1,
+                    l,
+                );
             }
         }
         return;
@@ -949,13 +1167,66 @@ fn predict_inter_rect<S: Sample>(
         let off = plane.offset(cx as isize, cy as isize);
         let stride = plane.stride;
         if used[0] && used[1] {
-            chroma_pred_into(ctx, &refs[0][comp + 1], cx as i32, cy as i32, mv[0], ctx.chroma_mv_dy[0], cw, crh, h, &mut a);
-            chroma_pred_into(ctx, &refs[1][comp + 1], cx as i32, cy as i32, mv[1], ctx.chroma_mv_dy[1], cw, crh, h, &mut b);
-            put_bi(ctx, &mut plane.data[off..], stride, &a, &b, cw, crh, weighting, comp + 1);
+            chroma_pred_into(
+                ctx,
+                &refs[0][comp + 1],
+                cx as i32,
+                cy as i32,
+                mv[0],
+                ctx.chroma_mv_dy[0],
+                cw,
+                crh,
+                h,
+                &mut a,
+            );
+            chroma_pred_into(
+                ctx,
+                &refs[1][comp + 1],
+                cx as i32,
+                cy as i32,
+                mv[1],
+                ctx.chroma_mv_dy[1],
+                cw,
+                crh,
+                h,
+                &mut b,
+            );
+            put_bi(
+                ctx,
+                &mut plane.data[off..],
+                stride,
+                &a,
+                &b,
+                cw,
+                crh,
+                weighting,
+                comp + 1,
+            );
         } else {
             let l = if used[0] { 0 } else { 1 };
-            chroma_pred_into(ctx, &refs[l][comp + 1], cx as i32, cy as i32, mv[l], ctx.chroma_mv_dy[l], cw, crh, h, &mut a);
-            put_uni(ctx, &mut plane.data[off..], stride, &a, cw, crh, weighting, comp + 1, l);
+            chroma_pred_into(
+                ctx,
+                &refs[l][comp + 1],
+                cx as i32,
+                cy as i32,
+                mv[l],
+                ctx.chroma_mv_dy[l],
+                cw,
+                crh,
+                h,
+                &mut a,
+            );
+            put_uni(
+                ctx,
+                &mut plane.data[off..],
+                stride,
+                &a,
+                cw,
+                crh,
+                weighting,
+                comp + 1,
+                l,
+            );
         }
     }
 }
@@ -989,7 +1260,8 @@ struct InterResidual {
 /// A macroblock's worth of luma out of a plane, packed 16 by 16.
 fn gather16<S: Sample>(p: &Recon<S>, off: usize, out: &mut [S; 256]) {
     for y in 0..16 {
-        out[y * 16..y * 16 + 16].copy_from_slice(&p.data[off + y * p.stride..off + y * p.stride + 16]);
+        out[y * 16..y * 16 + 16]
+            .copy_from_slice(&p.data[off + y * p.stride..off + y * p.stride + 16]);
     }
 }
 
@@ -1015,7 +1287,16 @@ fn code_luma_4x4<S: Sample>(
         let (bx, by) = (blk % 4, blk / 4);
         let boff = off + by * 4 * rec.stride + bx * 4;
         let bsoff = by * 4 * src_stride + bx * 4;
-        let (lv, n, _) = code_inter_4x4(ctx, rec, boff, &src[bsoff..], src_stride, 3, ctx.qp_prime, true);
+        let (lv, n, _) = code_inter_4x4(
+            ctx,
+            rec,
+            boff,
+            &src[bsoff..],
+            src_stride,
+            3,
+            ctx.qp_prime,
+            true,
+        );
         out.luma[blk] = lv;
         out.nz_luma[blk] = n as u8;
         add_residual_4x4(ctx, rec, boff, &lv, 3, ctx.qp_prime, None);
@@ -1043,8 +1324,16 @@ fn code_luma_8x8<S: Sample>(
         let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
         let boff = off + by * 4 * rec.stride + bx * 4;
         let bsoff = by * 4 * src_stride + bx * 4;
-        let (lv, counts) =
-            code_block_8x8(ctx, rec, boff, &src[bsoff..], src_stride, 1, ctx.qp_prime, false);
+        let (lv, counts) = code_block_8x8(
+            ctx,
+            rec,
+            boff,
+            &src[bsoff..],
+            src_stride,
+            1,
+            ctx.qp_prime,
+            false,
+        );
         reconstruct_8x8(ctx, rec, boff, &lv, 1, ctx.qp_prime);
         out.luma.as_flattened_mut()[blk8 * 64..blk8 * 64 + 64].copy_from_slice(&lv);
         for (sub, &raster) in quad_rasters(blk8).iter().enumerate() {
@@ -1057,10 +1346,13 @@ fn code_luma_8x8<S: Sample>(
     debug_assert_eq!(
         out.luma.as_flattened().iter().filter(|&&v| v != 0).count(),
         (0..4)
-            .map(|b| sub_block_counts_8x8_scan(&out.luma.as_flattened()[b * 64..b * 64 + 64], ctx.field)
-                .iter()
-                .map(|&n| n as usize)
-                .sum::<usize>())
+            .map(|b| sub_block_counts_8x8_scan(
+                &out.luma.as_flattened()[b * 64..b * 64 + 64],
+                ctx.field
+            )
+            .iter()
+            .map(|&n| n as usize)
+            .sum::<usize>())
             .sum::<usize>(),
         "the four sub-scans have to partition an 8x8's sixty-four positions"
     );
@@ -1129,7 +1421,14 @@ fn code_inter_mb_residual<S: Sample>(
     // has to be undone.
     let mut pred = [S::default(); 256];
     gather16(&rec[0], off, &mut pred);
-    code_luma_4x4(ctx, &mut rec[0], off, &src_luma[soff..], luma_stride, &mut out);
+    code_luma_4x4(
+        ctx,
+        &mut rec[0],
+        off,
+        &src_luma[soff..],
+        luma_stride,
+        &mut out,
+    );
 
     if ctx.t8x8 && allow_8x8 {
         // Score what the 4x4 reconstructed, keep it, and try the 8x8 from
@@ -1143,7 +1442,14 @@ fn code_inter_mb_residual<S: Sample>(
         out.cbp_luma = 0;
         out.luma = [[0; 16]; 16];
         out.nz_luma = [0; 16];
-        code_luma_8x8(ctx, &mut rec[0], off, &src_luma[soff..], luma_stride, &mut out);
+        code_luma_8x8(
+            ctx,
+            &mut rec[0],
+            off,
+            &src_luma[soff..],
+            luma_stride,
+            &mut out,
+        );
         let mut recon8 = [S::default(); 256];
         gather16(&rec[0], off, &mut recon8);
         let cost8 = (ctx.dist.ssd)(&src_luma[soff..], luma_stride, &recon8, 16, 16, 16);
@@ -1187,7 +1493,14 @@ fn code_inter_mb_residual<S: Sample>(
                     let boff = off + by * 4 * plane.stride + bx * 4;
                     let bsoff = by * 4 * luma_stride + bx * 4;
                     let (lv, counts) = code_block_8x8(
-                        ctx, plane, boff, &src[bsoff..], luma_stride, 3 + 2 * comp, qp, false,
+                        ctx,
+                        plane,
+                        boff,
+                        &src[bsoff..],
+                        luma_stride,
+                        3 + 2 * comp,
+                        qp,
+                        false,
                     );
                     reconstruct_8x8(ctx, plane, boff, &lv, 3 + 2 * comp, qp);
                     out.chroma_ac[comp].as_flattened_mut()[blk8 * 64..blk8 * 64 + 64]
@@ -1202,7 +1515,14 @@ fn code_inter_mb_residual<S: Sample>(
                     let boff = off + by * 4 * plane.stride + bx * 4;
                     let bsoff = by * 4 * luma_stride + bx * 4;
                     let (lv, n, _) = code_inter_4x4(
-                        ctx, plane, boff, &src[bsoff..], luma_stride, 4 + comp, qp, true,
+                        ctx,
+                        plane,
+                        boff,
+                        &src[bsoff..],
+                        luma_stride,
+                        4 + comp,
+                        qp,
+                        true,
                     );
                     out.chroma_ac[comp][blk] = lv;
                     out.nz_chroma[comp][blk] = n as u8;
@@ -1210,7 +1530,10 @@ fn code_inter_mb_residual<S: Sample>(
                 }
             }
             for blk8 in 0..4 {
-                if quad_rasters(blk8).iter().any(|&r| out.nz_chroma[comp][r] != 0) {
+                if quad_rasters(blk8)
+                    .iter()
+                    .any(|&r| out.nz_chroma[comp][r] != 0)
+                {
                     out.cbp_luma |= 1 << blk8;
                 }
             }
@@ -1238,7 +1561,16 @@ fn code_inter_mb_residual<S: Sample>(
             let (bx, by) = (blk % 2, blk / 2);
             let boff = off + by * 4 * plane.stride + bx * 4;
             let bsoff = by * 4 * chroma_stride + bx * 4;
-            let (lv, n, dc) = code_inter_4x4(ctx, plane, boff, &src[bsoff..], chroma_stride, list, qp, false);
+            let (lv, n, dc) = code_inter_4x4(
+                ctx,
+                plane,
+                boff,
+                &src[bsoff..],
+                chroma_stride,
+                list,
+                qp,
+                false,
+            );
             levels[blk] = lv;
             nz[blk] = n as u8;
             dcs[blk] = dc;
@@ -1278,7 +1610,11 @@ fn code_inter_mb_residual<S: Sample>(
             chroma_dc_transform_420(&mut d4, ctx.dequant.scale4[list][m][0], qp);
             dc_rec[..4].copy_from_slice(&d4);
         } else {
-            chroma_dc_transform_422(&mut dc_rec, ctx.dequant.scale4[list][((qp + 3) % 6) as usize][0], qp);
+            chroma_dc_transform_422(
+                &mut dc_rec,
+                ctx.dequant.scale4[list][((qp + 3) % 6) as usize][0],
+                qp,
+            );
         }
         for blk in 0..blocks {
             let (bx, by) = (blk % 2, blk / 2);
@@ -1338,7 +1674,12 @@ impl InterResidual {
 /// can afford to run the real intra decision and compare rate-distortion
 /// costs; it lives in this one named function so that replacement touches
 /// nothing else.
-pub fn placeholder_inter_or_intra<S: Sample>(dist: &DistortionDsp<S>, inter_satd: u32, src: &[S], src_stride: usize) -> bool {
+pub fn placeholder_inter_or_intra<S: Sample>(
+    dist: &DistortionDsp<S>,
+    inter_satd: u32,
+    src: &[S],
+    src_stride: usize,
+) -> bool {
     let mut sum = 0i32;
     for y in 0..16 {
         for x in 0..16 {
@@ -1406,8 +1747,16 @@ pub fn code_macroblock_p<S: Sample>(
             best = Some(t);
         }
     }
-    let Trial { kind, sub_shape, rects, n_rects, mvs, mvds, satd, .. } =
-        best.expect("16x16 is always a candidate");
+    let Trial {
+        kind,
+        sub_shape,
+        rects,
+        n_rects,
+        mvs,
+        mvds,
+        satd,
+        ..
+    } = best.expect("16x16 is always a candidate");
     out.kind = kind;
     out.sub_shape = sub_shape;
     out.mvd = mvds;
@@ -1426,7 +1775,18 @@ pub fn code_macroblock_p<S: Sample>(
         let (x, y, w, h) = rects[i];
         let mv = mvs[(y / 4) * 4 + x / 4];
         st.commit_part(x, y, w, h, [Some(mv), None]);
-        predict_inter_rect(ctx, rec, [refp.planes, refp.planes], px + x, py + y, w, h, [true, false], [mv, Mv::ZERO], refp.weighting);
+        predict_inter_rect(
+            ctx,
+            rec,
+            [refp.planes, refp.planes],
+            px + x,
+            py + y,
+            w,
+            h,
+            [true, false],
+            [mv, Mv::ZERO],
+            refp.weighting,
+        );
     }
     // `transform_size_8x8_flag` is not present when any sub-macroblock
     // partition is smaller than 8x8 (7.3.5's
@@ -1434,7 +1794,14 @@ pub fn code_macroblock_p<S: Sample>(
     // 8x8 transform there — coding with it and then dropping the flag
     // would have a decoder reconstruct 4x4 over 8x8 coefficients.
     let r = code_inter_mb_residual(
-        ctx, rec, mb_x, mb_y, src_luma, luma_stride, src_chroma, chroma_stride,
+        ctx,
+        rec,
+        mb_x,
+        mb_y,
+        src_luma,
+        luma_stride,
+        src_chroma,
+        chroma_stride,
         out.no_sub_mb_part_less_than_8x8(),
     );
     out.transform_8x8 = r.transform_8x8;
@@ -1543,12 +1910,29 @@ fn trial_fixed<S: Sample>(
     };
     for &rect in kind.parts() {
         t.satd += search_and_commit(
-            ctx, search, st, px, py, rect, src_luma, luma_stride, &mut t.mvs, &mut t.mvds,
+            ctx,
+            search,
+            st,
+            px,
+            py,
+            rect,
+            src_luma,
+            luma_stride,
+            &mut t.mvs,
+            &mut t.mvds,
         );
         t.rects[t.n_rects] = rect;
         t.n_rects += 1;
     }
-    t.cost = placeholder_partition_cost(kind, &t.sub_shape, t.satd, &t.mvds, &t.rects, t.n_rects, satd_lambda(ctx));
+    t.cost = placeholder_partition_cost(
+        kind,
+        &t.sub_shape,
+        t.satd,
+        &t.mvds,
+        &t.rects,
+        t.n_rects,
+        satd_lambda(ctx),
+    );
     t
 }
 
@@ -1603,7 +1987,16 @@ fn trial_8x8<S: Sample>(
             for sub in 0..shape.count() {
                 let rect = sub_partition_rect(part, shape, sub);
                 satd += search_and_commit(
-                    ctx, search, st, px, py, rect, src_luma, luma_stride, &mut mvs, &mut mvds,
+                    ctx,
+                    search,
+                    st,
+                    px,
+                    py,
+                    rect,
+                    src_luma,
+                    luma_stride,
+                    &mut mvs,
+                    &mut mvds,
                 );
             }
             let cost = placeholder_sub_shape_cost(shape, satd, &mvds, part, satd_lambda(ctx));
@@ -1623,7 +2016,13 @@ fn trial_8x8<S: Sample>(
         }
     }
     t.cost = placeholder_partition_cost(
-        InterMbKind::P8x8, &t.sub_shape, t.satd, &t.mvds, &t.rects, t.n_rects, satd_lambda(ctx),
+        InterMbKind::P8x8,
+        &t.sub_shape,
+        t.satd,
+        &t.mvds,
+        &t.rects,
+        t.n_rects,
+        satd_lambda(ctx),
     );
     t
 }
@@ -1661,7 +2060,11 @@ fn placeholder_sub_shape_cost(
 /// close enough to what CABAC spends on the same element for a decision
 /// that is choosing between two of them.
 fn se_bits(v: i16) -> f32 {
-    let code = if v > 0 { 2 * v as u32 - 1 } else { (-2 * v as i32) as u32 };
+    let code = if v > 0 {
+        2 * v as u32 - 1
+    } else {
+        (-2 * v as i32) as u32
+    };
     (2 * (32 - (code + 1).leading_zeros()) - 1) as f32
 }
 
@@ -2043,8 +2446,7 @@ pub fn spatial_direct(
     let mut mv = [[Mv::ZERO; 2]; 4];
     for part in 0..4 {
         let (col_mv, col_ref) = col.motion(addr, field_mb, mb_parity, part);
-        let col_zero =
-            col_ref == 0 && (-1..=1).contains(&col_mv.x) && (-1..=1).contains(&col_mv.y);
+        let col_zero = col_ref == 0 && (-1..=1).contains(&col_mv.x) && (-1..=1).contains(&col_mv.y);
         for l in 0..2 {
             if ref_idx[l] >= 0 && !(ref_idx[l] == 0 && col_zero) {
                 mv[part][l] = mvp[l];
@@ -2110,7 +2512,19 @@ fn rect_satd<S: Sample>(
     used: [bool; 2],
     mv: [Mv; 2],
 ) -> u32 {
-    rect_satd_under(ctx, refs, x, y, w, h, src, src_stride, used, mv, refs.weighting_for(used))
+    rect_satd_under(
+        ctx,
+        refs,
+        x,
+        y,
+        w,
+        h,
+        src,
+        src_stride,
+        used,
+        mv,
+        refs.weighting_for(used),
+    )
 }
 
 /// SATD of the source against the luma prediction for the given lists
@@ -2135,7 +2549,18 @@ fn b_luma_satd<S: Sample>(
     for part in 0..4 {
         let (ox, oy) = (((part & 1) * 8) as i32, ((part >> 1) * 8) as i32);
         let s = &src[oy as usize * src_stride + ox as usize..];
-        total += rect_satd(ctx, refs, px + ox, py + oy, 8, 8, s, src_stride, used, mv[part]);
+        total += rect_satd(
+            ctx,
+            refs,
+            px + ox,
+            py + oy,
+            8,
+            8,
+            s,
+            src_stride,
+            used,
+            mv[part],
+        );
     }
     total
 }
@@ -2163,8 +2588,31 @@ pub(crate) fn weighting_gain_b<S: Sample>(
         let mv = [motion[0][blk].mv, motion[1][blk].mv];
         let (ax, ay) = (px + x, py + y);
         let src = &src_luma[ay * luma_stride + ax..];
-        plain += u64::from(rect_satd_under(ctx, refs, ax as i32, ay as i32, rw, rh, src, luma_stride, used, mv, Weighting::Default));
-        weighted += u64::from(rect_satd(ctx, refs, ax as i32, ay as i32, rw, rh, src, luma_stride, used, mv));
+        plain += u64::from(rect_satd_under(
+            ctx,
+            refs,
+            ax as i32,
+            ay as i32,
+            rw,
+            rh,
+            src,
+            luma_stride,
+            used,
+            mv,
+            Weighting::Default,
+        ));
+        weighted += u64::from(rect_satd(
+            ctx,
+            refs,
+            ax as i32,
+            ay as i32,
+            rw,
+            rh,
+            src,
+            luma_stride,
+            used,
+            mv,
+        ));
     }
     (plain, weighted)
 }
@@ -2227,7 +2675,13 @@ impl BTrial {
 
     /// Record a rectangle's motion over the blocks it covers: the vectors
     /// per list, and the differences for the lists it uses.
-    fn fill(&mut self, rect: (usize, usize, usize, usize), used: [bool; 2], mv: [Mv; 2], mvd: [Mv; 2]) {
+    fn fill(
+        &mut self,
+        rect: (usize, usize, usize, usize),
+        used: [bool; 2],
+        mv: [Mv; 2],
+        mvd: [Mv; 2],
+    ) {
         let (x, y, w, h) = rect;
         for by in y / 4..(y + h) / 4 {
             for bx in x / 4..(x + w) / 4 {
@@ -2261,7 +2715,12 @@ impl<S: Sample> BSearch<'_, '_, S> {
 
     /// Search one list for `rect`, seeded at that list's predictor over
     /// the state as it stands: `(predictor, vector)`.
-    fn search(&self, st: &MbMotionState, list: usize, rect: (usize, usize, usize, usize)) -> (Mv, Mv) {
+    fn search(
+        &self,
+        st: &MbMotionState,
+        list: usize,
+        rect: (usize, usize, usize, usize),
+    ) -> (Mv, Mv) {
         let (x, y, w, h) = rect;
         let pred = st.predict(list, 0, x, y, w, h);
         let (mv, _) = search_rect(
@@ -2331,7 +2790,10 @@ fn trial_b_fixed<S: Sample>(s: &BSearch<S>, st: &mut MbMotionState, kind: BMbKin
         let (p0, m0) = s.search(st, 0, rect);
         let (p1, m1) = s.search(st, 1, rect);
         let mv = [m0, m1];
-        let mvd = [Mv::new(m0.x - p0.x, m0.y - p0.y), Mv::new(m1.x - p1.x, m1.y - p1.y)];
+        let mvd = [
+            Mv::new(m0.x - p0.x, m0.y - p0.y),
+            Mv::new(m1.x - p1.x, m1.y - p1.y),
+        ];
         let mut best: Option<(u8, u32, f32, f32)> = None;
         for dir in B_DIRS {
             let used = lists_of(dir);
@@ -2355,7 +2817,11 @@ fn trial_b_fixed<S: Sample>(s: &BSearch<S>, st: &mut MbMotionState, kind: BMbKin
         t.fill(rect, used, mv, mvd);
         st.commit_part(x, y, w, h, [used[0].then_some(m0), used[1].then_some(m1)]);
     }
-    let decision = BDecision { kind, dir: t.dir, ..BDecision::default() };
+    let decision = BDecision {
+        kind,
+        dir: t.dir,
+        ..BDecision::default()
+    };
     t.cost = t.satd as f32 + lam * (b_mb_type_bins(decision.mb_type()) + bits);
     t
 }
@@ -2400,7 +2866,10 @@ fn trial_b_8x8<S: Sample>(
             rect8.1,
             8,
             8,
-            [dused[0].then_some(dmv[part][0]), dused[1].then_some(dmv[part][1])],
+            [
+                dused[0].then_some(dmv[part][0]),
+                dused[1].then_some(dmv[part][1]),
+            ],
         );
         let mut cand = BTrial::new(BMbKind::B8x8);
         cand.fill(rect8, dused, dmv[part], [Mv::ZERO; 2]);
@@ -2413,7 +2882,12 @@ fn trial_b_8x8<S: Sample>(
             cand,
             after,
         );
-        for shape in [SubMbShape::S8x8, SubMbShape::S8x4, SubMbShape::S4x8, SubMbShape::S4x4] {
+        for shape in [
+            SubMbShape::S8x8,
+            SubMbShape::S8x4,
+            SubMbShape::S4x8,
+            SubMbShape::S4x4,
+        ] {
             // The level's vector budget and bi-prediction size
             // (`MotionLimits`): a shape no direction may take is not
             // searched, and a direction it rules out not priced.
@@ -2549,24 +3023,68 @@ pub fn code_macroblock_b<S: Sample>(
     let (dref, dmv) = direct;
     let dused = [dref[0] >= 0, dref[1] >= 0];
     let ddir = (dused[0] as u8) * PRED_L0 + (dused[1] as u8) * PRED_L1;
-    let dsatd = b_luma_satd(ctx, refs, px as i32, py as i32, src, luma_stride, dused, &dmv);
+    let dsatd = b_luma_satd(
+        ctx,
+        refs,
+        px as i32,
+        py as i32,
+        src,
+        luma_stride,
+        dused,
+        &dmv,
+    );
     let mut dtrial = BTrial::new(BMbKind::BDirect16);
     dtrial.dir = [ddir; 4];
     for part in 0..4 {
-        dtrial.fill(sub_partition_rect(part, SubMbShape::S8x8, 0), dused, dmv[part], [Mv::ZERO; 2]);
+        dtrial.fill(
+            sub_partition_rect(part, SubMbShape::S8x8, 0),
+            dused,
+            dmv[part],
+            [Mv::ZERO; 2],
+        );
     }
     dtrial.satd = dsatd;
     dtrial.cost = dsatd as f32 + satd_lambda(ctx) * b_mb_type_bins(0);
 
-    let s = BSearch { ctx, refs, px, py, src_luma, luma_stride };
+    let s = BSearch {
+        ctx,
+        refs,
+        px,
+        py,
+        src_luma,
+        luma_stride,
+    };
     let best: BTrial = if !ctx.subparts {
         // The 16x16-only decision, exactly as it has always been: one
         // search per list around that list's median predictor, then the
         // three directions against direct by SATD alone, direct keeping
         // ties.
-        let pred = [st.predict(0, 0, 0, 0, 16, 16), st.predict(1, 0, 0, 0, 16, 16)];
-        let (mv0, _) = search_rect(ctx, refs.search[0], px as i32, py as i32, 16, 16, src, luma_stride, pred[0]);
-        let (mv1, _) = search_rect(ctx, refs.search[1], px as i32, py as i32, 16, 16, src, luma_stride, pred[1]);
+        let pred = [
+            st.predict(0, 0, 0, 0, 16, 16),
+            st.predict(1, 0, 0, 0, 16, 16),
+        ];
+        let (mv0, _) = search_rect(
+            ctx,
+            refs.search[0],
+            px as i32,
+            py as i32,
+            16,
+            16,
+            src,
+            luma_stride,
+            pred[0],
+        );
+        let (mv1, _) = search_rect(
+            ctx,
+            refs.search[1],
+            px as i32,
+            py as i32,
+            16,
+            16,
+            src,
+            luma_stride,
+            pred[1],
+        );
         let mut best = dtrial;
         for (dir, mv) in [
             (PRED_L0, [mv0, Mv::ZERO]),
@@ -2574,7 +3092,16 @@ pub fn code_macroblock_b<S: Sample>(
             (PRED_BI, [mv0, mv1]),
         ] {
             let used = lists_of(dir);
-            let satd = b_luma_satd(ctx, refs, px as i32, py as i32, src, luma_stride, used, &[mv; 4]);
+            let satd = b_luma_satd(
+                ctx,
+                refs,
+                px as i32,
+                py as i32,
+                src,
+                luma_stride,
+                used,
+                &[mv; 4],
+            );
             if satd < best.satd {
                 let mut t = BTrial::new(BMbKind::B16);
                 t.dir = [dir; 4];
@@ -2629,15 +3156,39 @@ pub fn code_macroblock_b<S: Sample>(
     for &(x, y, w, h) in rects.iter().take(n) {
         let used = out.used(part_index_of(x, y));
         let mv = out.mv[(y / 4) * 4 + x / 4];
-        st.commit_part(x, y, w, h, [used[0].then_some(mv[0]), used[1].then_some(mv[1])]);
-        predict_inter_rect(ctx, rec, refs.planes, px + x, py + y, w, h, used, mv, refs.weighting_for(used));
+        st.commit_part(
+            x,
+            y,
+            w,
+            h,
+            [used[0].then_some(mv[0]), used[1].then_some(mv[1])],
+        );
+        predict_inter_rect(
+            ctx,
+            rec,
+            refs.planes,
+            px + x,
+            py + y,
+            w,
+            h,
+            used,
+            mv,
+            refs.weighting_for(used),
+        );
     }
     // `transform_size_8x8_flag` is absent when any sub-macroblock
     // partition is smaller than 8x8 (a direct one is not, under
     // `direct_8x8_inference`), so the residual must not use the 8x8
     // transform there.
     let r = code_inter_mb_residual(
-        ctx, rec, mb_x, mb_y, src_luma, luma_stride, src_chroma, chroma_stride,
+        ctx,
+        rec,
+        mb_x,
+        mb_y,
+        src_luma,
+        luma_stride,
+        src_chroma,
+        chroma_stride,
         out.no_sub_mb_part_less_than_8x8(),
     );
     out.transform_8x8 = r.transform_8x8;
@@ -2668,7 +3219,12 @@ pub(crate) fn test_b_decision(
     sub_shape: [SubMbShape; 4],
     seed: i16,
 ) -> BDecision {
-    let mut dec = BDecision { kind, dir, sub_shape, ..BDecision::default() };
+    let mut dec = BDecision {
+        kind,
+        dir,
+        sub_shape,
+        ..BDecision::default()
+    };
     let mut rects = [(0usize, 0usize, 0usize, 0usize); 16];
     let n = dec.rects(&mut rects);
     for (k, &(x, y, w, h)) in rects.iter().take(n).enumerate() {
@@ -2711,14 +3267,17 @@ mod tests {
     use crate::dsp::h264::H264Dsp;
     use crate::dsp::h264_enc::{H264EncDsp, Quant};
     use crate::encode::h264_syntax::recon_plane;
-    use crate::h264::frame::{BlockMotion, Frame, LUMA_PAD, CHROMA_PAD, PARITY_FRAME};
+    use crate::h264::frame::{BlockMotion, CHROMA_PAD, Frame, LUMA_PAD, PARITY_FRAME};
     use crate::h264::mb::{MbKind as DecKind, MbNeighbours, MotionCache, PicInfo};
     use crate::h264::sps::ScalingLists;
     use crate::h264::transform::{Dequant, dequant4x4, idct4x4};
     use crate::picture::ChromaFormat;
 
     fn flat() -> ScalingLists {
-        ScalingLists { list4x4: [[16; 16]; 6], list8x8: [[16; 64]; 6] }
+        ScalingLists {
+            list4x4: [[16; 16]; 6],
+            list8x8: [[16; 64]; 6],
+        }
     }
 
     struct Tables {
@@ -2764,7 +3323,9 @@ mod tests {
     }
 
     fn lcg(s: &mut u64) -> u64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *s >> 33
     }
 
@@ -2837,9 +3398,17 @@ mod tests {
             for bx in (0..w).step_by(16) {
                 let xi = bx as i32 + (mv.x as i32 >> 2);
                 let yi = by as i32 + (mv.y as i32 >> 2);
-                k(&mut block, &refp.data[refp.offset((xi - 2) as isize, (yi - 2) as isize)..], refp.stride, 16, 16, 255);
+                k(
+                    &mut block,
+                    &refp.data[refp.offset((xi - 2) as isize, (yi - 2) as isize)..],
+                    refp.stride,
+                    16,
+                    16,
+                    255,
+                );
                 for y in 0..16 {
-                    src[(by + y) * w + bx..(by + y) * w + bx + 16].copy_from_slice(&block[y * PRED_STRIDE..y * PRED_STRIDE + 16]);
+                    src[(by + y) * w + bx..(by + y) * w + bx + 16]
+                        .copy_from_slice(&block[y * PRED_STRIDE..y * PRED_STRIDE + 16]);
                 }
             }
         }
@@ -2860,9 +3429,18 @@ mod tests {
             for bx in (0..w).step_by(8) {
                 let xi = bx as i32 + (mv.x as i32 >> 3);
                 let yi = by as i32 + (mv.y as i32 >> 3);
-                (dsp.chroma)(&mut block, &refp.data[refp.offset(xi as isize, yi as isize)..], refp.stride, 8, 8, xf, yf);
+                (dsp.chroma)(
+                    &mut block,
+                    &refp.data[refp.offset(xi as isize, yi as isize)..],
+                    refp.stride,
+                    8,
+                    8,
+                    xf,
+                    yf,
+                );
                 for y in 0..8 {
-                    src[(by + y) * w + bx..(by + y) * w + bx + 8].copy_from_slice(&block[y * PRED_STRIDE..y * PRED_STRIDE + 8]);
+                    src[(by + y) * w + bx..(by + y) * w + bx + 8]
+                        .copy_from_slice(&block[y * PRED_STRIDE..y * PRED_STRIDE + 8]);
                 }
             }
         }
@@ -2881,11 +3459,24 @@ mod tests {
         let refp = grating_plane(48, 48, LUMA_PAD);
         let truth = Mv::new(0, -40);
         let src = translated_luma(&refp, truth);
-        let at = |ctx: &MeCtx<u8>, pred: Mv| search_rect(ctx, &refp, 16, 16, 16, 16, &src[16 * 48 + 16..], 48, pred).0;
+        let at = |ctx: &MeCtx<u8>, pred: Mv| {
+            search_rect(ctx, &refp, 16, 16, 16, 16, &src[16 * 48 + 16..], 48, pred).0
+        };
         let free = t.ctx(26);
-        assert_eq!(at(&free, truth), truth, "no limit: the search finds the motion");
+        assert_eq!(
+            at(&free, truth),
+            truth,
+            "no limit: the search finds the motion"
+        );
         for (field, range) in [(false, 4), (true, 2)] {
-            let ctx = MeCtx { field, motion: crate::encode::level::MotionLimits { max_vmv_r: 4, ..crate::encode::level::MotionLimits::NONE }, ..t.ctx(26) };
+            let ctx = MeCtx {
+                field,
+                motion: crate::encode::level::MotionLimits {
+                    max_vmv_r: 4,
+                    ..crate::encode::level::MotionLimits::NONE
+                },
+                ..t.ctx(26)
+            };
             for pred in [truth, Mv::new(0, -400), Mv::new(8, 400), Mv::ZERO] {
                 let mv = at(&ctx, pred);
                 assert!(
@@ -2925,14 +3516,20 @@ mod tests {
         let mut frame = Frame::<u8>::empty();
         frame.mb_width = 3;
         frame.mb_height = 3;
-        frame.motion = [vec![BlockMotion::default(); 9 * 16], vec![BlockMotion::default(); 9 * 16]];
+        frame.motion = [
+            vec![BlockMotion::default(); 9 * 16],
+            vec![BlockMotion::default(); 9 * 16],
+        ];
         frame.mb_intra = vec![false; 9];
         let mut info = PicInfo::new(3, 3);
         for &(addr, per_list) in per_mb {
             info.mbs[addr].decoded = true;
             info.mbs[addr].slice = 0;
-            info.mbs[addr].kind =
-                if per_list.iter().all(|m| m.is_none()) { DecKind::I16x16 } else { DecKind::Inter16x16 };
+            info.mbs[addr].kind = if per_list.iter().all(|m| m.is_none()) {
+                DecKind::I16x16
+            } else {
+                DecKind::Inter16x16
+            };
             for (l, mv) in per_list.iter().enumerate() {
                 let Some(mv) = mv else { continue };
                 let bm = BlockMotion {
@@ -2974,7 +3571,11 @@ mod tests {
         srcc: [&[u8]; 2],
         st: &mut MbMotionState,
     ) -> (InterDecision, Mv) {
-        let pref = PRef { planes: refp, search: &refp[0], weighting: Weighting::Default };
+        let pref = PRef {
+            planes: refp,
+            search: &refp[0],
+            weighting: Weighting::Default,
+        };
         let d = code_macroblock_p(ctx, rec, &pref, 1, 1, srcy, 48, srcc, 24, st);
         let mv = st.motion()[0][0].mv;
         (d, mv)
@@ -2992,7 +3593,20 @@ mod tests {
         let t = Tables::new();
         let ctx = t.ctx(26);
         let refp = reference();
-        for (dx, dy) in [(0i16, 0i16), (1, 0), (0, -1), (5, 3), (-7, 2), (3, -8), (8, 8), (-8, -8), (12, -9), (16, 16), (-16, -16), (16, -16)] {
+        for (dx, dy) in [
+            (0i16, 0i16),
+            (1, 0),
+            (0, -1),
+            (5, 3),
+            (-7, 2),
+            (3, -8),
+            (8, 8),
+            (-8, -8),
+            (12, -9),
+            (16, 16),
+            (-16, -16),
+            (16, -16),
+        ] {
             let mv = Mv::new(dx * 4, dy * 4);
             let srcy = translated_luma(&refp[0], mv);
             let srcb = translated_chroma(&refp[1], mv);
@@ -3021,7 +3635,11 @@ mod tests {
                 let mut rec = fresh_rec();
                 let (d, mv0) = code_centre(&ctx, &mut rec, &refp, &srcy, [&srcb, &srcr], &mut st);
                 assert_eq!(mv0, mv, "({dx},{dy})");
-                assert_eq!(d.kind, InterMbKind::P16x16, "({dx},{dy}) skip vector is zero, must not skip");
+                assert_eq!(
+                    d.kind,
+                    InterMbKind::P16x16,
+                    "({dx},{dy}) skip vector is zero, must not skip"
+                );
             }
 
             // No neighbours at all: the predictor is zero, so the diamond
@@ -3029,14 +3647,27 @@ mod tests {
             // zero, so only the untranslated case may skip.
             if dx.abs() <= 8 && dy.abs() <= 8 {
                 let mut rec = fresh_rec();
-                let (d, mv0) =
-                code_centre(&ctx, &mut rec, &refp, &srcy, [&srcb, &srcr], &mut absent_state());
+                let (d, mv0) = code_centre(
+                    &ctx,
+                    &mut rec,
+                    &refp,
+                    &srcy,
+                    [&srcb, &srcr],
+                    &mut absent_state(),
+                );
                 assert_eq!(mv0, mv, "({dx},{dy}) from a zero seed");
                 assert_eq!(d.cbp_luma, 0);
                 assert_eq!(d.cbp_chroma, 0);
-                let want = if mv == Mv::ZERO { InterMbKind::PSkip } else { InterMbKind::P16x16 };
+                let want = if mv == Mv::ZERO {
+                    InterMbKind::PSkip
+                } else {
+                    InterMbKind::P16x16
+                };
                 assert_eq!(d.kind, want, "({dx},{dy}) skip legality");
-                assert_eq!(d.mvd[0], mv, "mvd against a zero predictor is the vector itself");
+                assert_eq!(
+                    d.mvd[0], mv,
+                    "mvd against a zero predictor is the vector itself"
+                );
             }
         }
     }
@@ -3064,9 +3695,19 @@ mod tests {
             }
         }
         let mut rec = fresh_rec();
-        let (d, _mv0) =
-                code_centre(&ctx, &mut rec, &refp, &srcy, [&srcb, &srcr], &mut absent_state());
-        assert_ne!(d.kind, InterMbKind::PSkip, "residual survived, skip is illegal");
+        let (d, _mv0) = code_centre(
+            &ctx,
+            &mut rec,
+            &refp,
+            &srcy,
+            [&srcb, &srcr],
+            &mut absent_state(),
+        );
+        assert_ne!(
+            d.kind,
+            InterMbKind::PSkip,
+            "residual survived, skip is illegal"
+        );
         assert_eq!(d.kind, InterMbKind::P16x16);
         assert_ne!(d.cbp_luma, 0, "±15 noise must leave levels at QP 26");
     }
@@ -3079,16 +3720,35 @@ mod tests {
         let t = Tables::new();
         let ctx = t.ctx(26);
         let refp = reference();
-        for (qx, qy) in [(2i16, 0i16), (0, 2), (2, 2), (6, 0), (-2, 4), (10, -6), (1, 0), (3, 2), (-1, -1)] {
+        for (qx, qy) in [
+            (2i16, 0i16),
+            (0, 2),
+            (2, 2),
+            (6, 0),
+            (-2, 4),
+            (10, -6),
+            (1, 0),
+            (3, 2),
+            (-1, -1),
+        ] {
             let mv = Mv::new(qx, qy);
             let srcy = translated_luma(&refp[0], mv);
             let srcb = translated_chroma(&refp[1], mv);
             let srcr = translated_chroma(&refp[2], mv);
             let mut rec = fresh_rec();
-            let (d, mv0) =
-                code_centre(&ctx, &mut rec, &refp, &srcy, [&srcb, &srcr], &mut absent_state());
+            let (d, mv0) = code_centre(
+                &ctx,
+                &mut rec,
+                &refp,
+                &srcy,
+                [&srcb, &srcr],
+                &mut absent_state(),
+            );
             assert_eq!(mv0, mv, "quarter vector ({qx},{qy})");
-            assert_eq!(d.cbp_luma, 0, "({qx},{qy}) the residual is zero by construction");
+            assert_eq!(
+                d.cbp_luma, 0,
+                "({qx},{qy}) the residual is zero by construction"
+            );
             assert_eq!(d.cbp_chroma, 0, "({qx},{qy})");
             assert!(d.nz_luma.iter().all(|&n| n == 0));
         }
@@ -3146,14 +3806,16 @@ mod tests {
                             });
                             used_any = true;
                         } else {
-                            frame.motion[l][addr * 16..addr * 16 + 16]
-                                .fill(BlockMotion::default());
+                            frame.motion[l][addr * 16..addr * 16 + 16].fill(BlockMotion::default());
                         }
                     }
                     info.mbs[addr].decoded = true;
                     info.mbs[addr].slice = 0;
-                    info.mbs[addr].kind =
-                        if used_any { DecKind::Inter16x16 } else { DecKind::I16x16 };
+                    info.mbs[addr].kind = if used_any {
+                        DecKind::Inter16x16
+                    } else {
+                        DecKind::I16x16
+                    };
                 }
                 // The colocated record: rotate through intra, still (a
                 // vector inside the +-1 window), and moving; list 1 only
@@ -3171,7 +3833,12 @@ mod tests {
                 for l in 0..2 {
                     let uses = !col_intra && (l == 1 || !col_list1_only);
                     colf.motion[l][cur_addr * 16..cur_addr * 16 + 16].fill(if uses {
-                        BlockMotion { mv: col_mv, ref_idx: 0, ref_parity: PARITY_FRAME, ref_id: 9 }
+                        BlockMotion {
+                            mv: col_mv,
+                            ref_idx: 0,
+                            ref_parity: PARITY_FRAME,
+                            ref_id: 9,
+                        }
                     } else {
                         BlockMotion::default()
                     });
@@ -3195,7 +3862,11 @@ mod tests {
                 col.commit(
                     cur_addr,
                     crate::h264::mb::MbInfo {
-                        kind: if col_intra { DecKind::I16x16 } else { DecKind::Inter16x16 },
+                        kind: if col_intra {
+                            DecKind::I16x16
+                        } else {
+                            DecKind::Inter16x16
+                        },
                         decoded: true,
                         slice: 0,
                         ..crate::h264::mb::MbInfo::default()
@@ -3223,9 +3894,8 @@ mod tests {
                     }
                 }
                 let (mv_col, ref_col, _, _) = colocated_motion(&colf, cur_addr, 0);
-                let col_zero = ref_col == 0
-                    && (-1..=1).contains(&mv_col.x)
-                    && (-1..=1).contains(&mv_col.y);
+                let col_zero =
+                    ref_col == 0 && (-1..=1).contains(&mv_col.x) && (-1..=1).contains(&mv_col.y);
                 for list in 0..2 {
                     if want_ref[list] >= 0 && want_ref[list] == 0 && col_zero {
                         want_mv[list] = Mv::ZERO;
@@ -3238,14 +3908,23 @@ mod tests {
                 // Mine, over the same state the picture walk would hold.
                 let mut st = MbMotionState::new();
                 st.start(&frame, &info, cur_addr, &mut dnb);
-                let (got_ref, got_mv) = spatial_direct(&st, &Colocated::progressive(&col), cur_addr, false, PARITY_FRAME);
+                let (got_ref, got_mv) = spatial_direct(
+                    &st,
+                    &Colocated::progressive(&col),
+                    cur_addr,
+                    false,
+                    PARITY_FRAME,
+                );
                 assert_eq!(got_ref, want_ref, "mask {mask:04b} draw {draw} ref");
                 // The colocated macroblock here has one motion, so all
                 // four 8x8 answers must agree with the whole-macroblock
                 // one; `differing_colocated_partitions_reach_direct` is
                 // the case where they must not.
                 for part in 0..4 {
-                    assert_eq!(got_mv[part], want_mv, "mask {mask:04b} draw {draw} part {part}");
+                    assert_eq!(
+                        got_mv[part], want_mv,
+                        "mask {mask:04b} draw {draw} part {part}"
+                    );
                 }
             }
         }
@@ -3303,16 +3982,27 @@ mod tests {
         );
 
         let (refs, mv) = spatial_direct(&st, &Colocated::progressive(&col), 4, false, PARITY_FRAME);
-        assert_eq!(refs, [0, -1], "one list-0 neighbour gives reference 0 on list 0 only");
+        assert_eq!(
+            refs,
+            [0, -1],
+            "one list-0 neighbour gives reference 0 on list 0 only"
+        );
         // Partitions 0 and 1 are the upper half: their colocated corners
         // are blocks 0 and 3, both still, so colZeroFlag holds.
-        assert_eq!(mv[0][0], Mv::ZERO, "upper-left takes zero from a still colocated corner");
+        assert_eq!(
+            mv[0][0],
+            Mv::ZERO,
+            "upper-left takes zero from a still colocated corner"
+        );
         assert_eq!(mv[1][0], Mv::ZERO, "upper-right likewise");
         // Partitions 2 and 3 are the lower half: corners 12 and 15, both
         // moving, so the median prediction stands.
         assert_eq!(mv[2][0], nbmv, "lower-left takes the median prediction");
         assert_eq!(mv[3][0], nbmv, "lower-right likewise");
-        assert_ne!(mv[0][0], mv[2][0], "the point of the test is that they differ");
+        assert_ne!(
+            mv[0][0], mv[2][0],
+            "the point of the test is that they differ"
+        );
     }
 
     /// Under an explicit table, `B_Skip` predicts with the weighting of
@@ -3350,11 +4040,19 @@ mod tests {
                 q
             })
             .collect();
-        let entry = |luma: (i32, i32), cb: (i32, i32), cr: (i32, i32)| WeightEntry { luma, chroma: [cb, cr], luma_flag: true, chroma_flag: true };
+        let entry = |luma: (i32, i32), cb: (i32, i32), cr: (i32, i32)| WeightEntry {
+            luma,
+            chroma: [cb, cr],
+            luma_flag: true,
+            chroma_flag: true,
+        };
         let table = PredWeightTable {
             luma_log2_denom: 6,
             chroma_log2_denom: 6,
-            lists: [vec![entry((40, 5), (50, 3), (70, -4))], vec![entry((84, -6), (60, 2), (58, 1))]],
+            lists: [
+                vec![entry((40, 5), (50, 3), (70, -4))],
+                vec![entry((84, -6), (60, 2), (58, 1))],
+            ],
         };
         let refs = BRefs {
             planes: [&ref0, &ref1],
@@ -3364,10 +4062,20 @@ mod tests {
         // The colocated macroblock moves, so colZeroFlag never holds and
         // direct's vectors are the neighbours' zero medians.
         let mut col = crate::encode::h264_pic::PicMotion::new(3, 3);
-        let moving = BlockMotion { mv: Mv::new(40, 40), ref_idx: 0, ref_parity: PARITY_FRAME, ref_id: 1 };
+        let moving = BlockMotion {
+            mv: Mv::new(40, 40),
+            ref_idx: 0,
+            ref_parity: PARITY_FRAME,
+            ref_id: 1,
+        };
         col.commit(
             4,
-            crate::h264::mb::MbInfo { kind: DecKind::Inter16x16, decoded: true, slice: 0, ..crate::h264::mb::MbInfo::default() },
+            crate::h264::mb::MbInfo {
+                kind: DecKind::Inter16x16,
+                decoded: true,
+                slice: 0,
+                ..crate::h264::mb::MbInfo::default()
+            },
             &[[moving; 16], [BlockMotion::default(); 16]],
         );
         let col = Colocated::progressive(&col);
@@ -3434,7 +4142,11 @@ mod tests {
                 assert_ne!(pa, pb, "{a} and {b} predict the same samples");
             }
             let plain = if a == "list 1 only" { &ref1 } else { &ref0 };
-            assert_ne!(pa[0][..48], plain[0].data[plain[0].origin()..plain[0].origin() + 48], "{a}: the weighting changed nothing");
+            assert_ne!(
+                pa[0][..48],
+                plain[0].data[plain[0].origin()..plain[0].origin() + 48],
+                "{a}: the weighting changed nothing"
+            );
         }
     }
 
@@ -3457,13 +4169,27 @@ mod tests {
             let mut srcy = translated_luma(&refp[0], mv_true);
             let mut srcb = translated_chroma(&refp[1], mv_true);
             let mut srcr = translated_chroma(&refp[2], mv_true);
-            for v in srcy.iter_mut().chain(srcb.iter_mut()).chain(srcr.iter_mut()) {
+            for v in srcy
+                .iter_mut()
+                .chain(srcb.iter_mut())
+                .chain(srcr.iter_mut())
+            {
                 *v = (*v as i32 + (lcg(&mut seed) % 17) as i32 - 8).clamp(0, 255) as u8;
             }
             let mut rec = fresh_rec();
-            let (d, mv0) =
-                code_centre(&ctx, &mut rec, &refp, &srcy, [&srcb, &srcr], &mut absent_state());
-            assert_eq!(d.kind, InterMbKind::P16x16, "qp={qp} inter must win on matched content");
+            let (d, mv0) = code_centre(
+                &ctx,
+                &mut rec,
+                &refp,
+                &srcy,
+                [&srcb, &srcr],
+                &mut absent_state(),
+            );
+            assert_eq!(
+                d.kind,
+                InterMbKind::P16x16,
+                "qp={qp} inter must win on matched content"
+            );
 
             // Luma: prediction through the same decoder kernel, residual
             // through the test-only inverse pair.
@@ -3536,12 +4262,22 @@ mod tests {
             let mut srcy = translated_luma(&refp[0], mv_true);
             let mut srcb = translated_chroma(&refp[1], mv_true);
             let mut srcr = translated_chroma(&refp[2], mv_true);
-            for v in srcy.iter_mut().chain(srcb.iter_mut()).chain(srcr.iter_mut()) {
+            for v in srcy
+                .iter_mut()
+                .chain(srcb.iter_mut())
+                .chain(srcr.iter_mut())
+            {
                 *v = (*v as i32 + (lcg(&mut seed) % 21) as i32 - 10).clamp(0, 255) as u8;
             }
             let mut rec = fresh_rec();
-            let (d, _mv0) =
-                code_centre(&ctx, &mut rec, &refp, &srcy, [&srcb, &srcr], &mut absent_state());
+            let (d, _mv0) = code_centre(
+                &ctx,
+                &mut rec,
+                &refp,
+                &srcy,
+                [&srcb, &srcr],
+                &mut absent_state(),
+            );
             assert_eq!(d.kind, InterMbKind::P16x16, "qp={qp}");
 
             for blk in 0..16 {
@@ -3558,13 +4294,25 @@ mod tests {
             for comp in 0..2 {
                 for blk in 0..4 {
                     let count = d.chroma_ac[comp][blk].iter().filter(|&&v| v != 0).count() as u8;
-                    assert_eq!(d.nz_chroma[comp][blk], count, "qp={qp} comp={comp} blk={blk}");
-                    assert_eq!(d.chroma_ac[comp][blk][0], 0, "AC position 0 lives in chroma_dc");
+                    assert_eq!(
+                        d.nz_chroma[comp][blk], count,
+                        "qp={qp} comp={comp} blk={blk}"
+                    );
+                    assert_eq!(
+                        d.chroma_ac[comp][blk][0], 0,
+                        "AC position 0 lives in chroma_dc"
+                    );
                     any_ac |= count != 0;
                 }
                 any_dc |= d.chroma_dc[comp][..4].iter().any(|&v| v != 0);
             }
-            let want = if any_ac { 2 } else if any_dc { 1 } else { 0 };
+            let want = if any_ac {
+                2
+            } else if any_dc {
+                1
+            } else {
+                0
+            };
             assert_eq!(d.cbp_chroma, want, "qp={qp}");
         }
     }

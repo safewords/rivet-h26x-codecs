@@ -13,7 +13,6 @@ use super::pic::{PicInfo, SaoParams};
 use super::pps::Pps;
 use super::sps::Sps;
 
-
 /// The deblocked source samples for one CTB row's SAO: a copy of the row
 /// plus a line above and below (see [`sao_ctb_row`]), and which picture
 /// rows its first lines are.
@@ -30,7 +29,11 @@ pub struct SaoBand<S: Sample> {
 impl<S: Sample> SaoBand<S> {
     /// Nothing saved yet.
     pub fn new() -> Self {
-        SaoBand { luma_row0: 0, chroma_row0: 0, last: [Vec::new(), Vec::new(), Vec::new()] }
+        SaoBand {
+            luma_row0: 0,
+            chroma_row0: 0,
+            last: [Vec::new(), Vec::new(), Vec::new()],
+        }
     }
 
     /// Copy the deblocked lines CTB row `ry` needs from `frame` into
@@ -46,7 +49,11 @@ impl<S: Sample> SaoBand<S> {
         self.luma_row0 = ya;
         copy_lines(&frame.y, &mut band.y, ya, yb);
         let (ch, ctbc) = (frame.height / sh, ctb / sh);
-        let (cy0, ca, cb) = (y0 / sh, (y0 / sh).saturating_sub(1), (y0 / sh + ctbc + 1).min(ch + 1));
+        let (cy0, ca, cb) = (
+            y0 / sh,
+            (y0 / sh).saturating_sub(1),
+            (y0 / sh + ctbc + 1).min(ch + 1),
+        );
         if !mono {
             self.chroma_row0 = ca;
             copy_lines(&frame.cb, &mut band.cb, ca, cb);
@@ -54,7 +61,11 @@ impl<S: Sample> SaoBand<S> {
         }
         // The line above came from the picture already filtered: put back
         // the saved one; then save this row's last line for the next row.
-        let planes: [(&mut Plane16<S>, usize, usize, usize); 3] = [(&mut band.y, ya, y0, (y0 + ctb - 1).min(frame.height - 1)), (&mut band.cb, ca, cy0, (cy0 + ctbc - 1).min(ch.max(1) - 1)), (&mut band.cr, ca, cy0, (cy0 + ctbc - 1).min(ch.max(1) - 1))];
+        let planes: [(&mut Plane16<S>, usize, usize, usize); 3] = [
+            (&mut band.y, ya, y0, (y0 + ctb - 1).min(frame.height - 1)),
+            (&mut band.cb, ca, cy0, (cy0 + ctbc - 1).min(ch.max(1) - 1)),
+            (&mut band.cr, ca, cy0, (cy0 + ctbc - 1).min(ch.max(1) - 1)),
+        ];
         for (c, (plane, row0, first, last)) in planes.into_iter().enumerate() {
             if c > 0 && mono {
                 break;
@@ -96,7 +107,16 @@ fn copy_lines<S: Sample>(from: &Plane16<S>, to: &mut Plane16<S>, y0: usize, y1: 
 /// hold final deblocked values — at least the last line of the row above
 /// and the first line of the row below).
 #[allow(clippy::too_many_arguments)]
-pub fn sao_ctb_row<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Frame<S>, band: &SaoBand<S>, info: &PicInfo, sps: &Sps, pps: &Pps, ry: usize) {
+pub fn sao_ctb_row<S: Sample>(
+    dsp: &HevcDsp<S>,
+    frame: &mut Frame<S>,
+    src: &Frame<S>,
+    band: &SaoBand<S>,
+    info: &PicInfo,
+    sps: &Sps,
+    pps: &Pps,
+    ry: usize,
+) {
     if !sps.sao_enabled {
         return;
     }
@@ -136,7 +156,11 @@ pub fn sao_ctb_row<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Fram
                     continue;
                 }
                 let (sw, sh) = if c == 0 { (1, 1) } else { sps.sub_wh() };
-                let bd = if c == 0 { sps.bit_depth_luma } else { sps.bit_depth_chroma };
+                let bd = if c == 0 {
+                    sps.bit_depth_luma
+                } else {
+                    sps.bit_depth_chroma
+                };
                 let (src, dst, src_row0): (&Plane16<S>, &mut Plane16<S>, usize) = match c {
                     0 => (src_y, &mut frame.y, band.luma_row0),
                     1 => (src_cb, &mut frame.cb, band.chroma_row0),
@@ -146,7 +170,22 @@ pub fn sao_ctb_row<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Fram
                 let y0 = ry * ctb / sh;
                 let w = (ctb / sw).min(pw / sw - x0);
                 let h = (ctb / sh).min(ph / sh - y0);
-                sao_ctb(dsp, src, src_row0, dst, info, x0, y0, w, h, (sw, sh), bd, p, &nb, exempt_any);
+                sao_ctb(
+                    dsp,
+                    src,
+                    src_row0,
+                    dst,
+                    info,
+                    x0,
+                    y0,
+                    w,
+                    h,
+                    (sw, sh),
+                    bd,
+                    p,
+                    &nb,
+                    exempt_any,
+                );
             }
         }
     }
@@ -242,7 +281,9 @@ fn sao_ctb<S: Sample>(
     // Picture (x, y) in the band's data, and the same index in `dst`.
     let at = |x: usize, y: usize| src.offset(x as isize, y as isize - src_row0 as isize);
     let dst = &mut dst.data[src_row0 * stride..];
-    let exempt = |x: usize, y: usize| -> bool { exempt_any && info.filter_exempt[info.idx4(x * sw, y * sh)] & 1 != 0 };
+    let exempt = |x: usize, y: usize| -> bool {
+        exempt_any && info.filter_exempt[info.idx4(x * sw, y * sh)] & 1 != 0
+    };
     match p.type_idx {
         1 => {
             let shift = bit_depth as i32 - 5;
@@ -252,7 +293,17 @@ fn sao_ctb<S: Sample>(
             }
             let off = at(x0, y0);
             if !exempt_any {
-                (dsp.sao_band)(&mut dst[off..], stride, &src.data[off..], stride, w, h, &table, shift, max);
+                (dsp.sao_band)(
+                    &mut dst[off..],
+                    stride,
+                    &src.data[off..],
+                    stride,
+                    w,
+                    h,
+                    &table,
+                    shift,
+                    max,
+                );
             } else {
                 for y in 0..h {
                     for x in 0..w {
@@ -261,7 +312,8 @@ fn sao_ctb<S: Sample>(
                         }
                         let i = off + y * stride + x;
                         let v = src.data[i].to_i32();
-                        dst[i] = S::from_i32((v + table[(v >> shift) as usize] as i32).clamp(0, max));
+                        dst[i] =
+                            S::from_i32((v + table[(v >> shift) as usize] as i32).clamp(0, max));
                     }
                 }
             }
@@ -297,7 +349,18 @@ fn sao_ctb<S: Sample>(
             let interior_ok = !exempt_any && xs < xe && ys < ye;
             if interior_ok {
                 let off = at(xs, ys);
-                (dsp.sao_edge)(dst, &src.data, off, stride, xe - xs, ye - ys, na, nbb, &off_tab, max);
+                (dsp.sao_edge)(
+                    dst,
+                    &src.data,
+                    off,
+                    stride,
+                    xe - xs,
+                    ye - ys,
+                    na,
+                    nbb,
+                    &off_tab,
+                    max,
+                );
             }
             // The ring (or everything, with exempt blocks): per sample, with
             // the exact neighbour rules.

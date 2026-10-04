@@ -9,10 +9,10 @@
 use std::sync::Arc;
 
 use super::frame::{PARITY_FRAME, SharedFrame};
-use crate::sample::Sample;
 use super::slice::{Mmco, RefListMod, SliceHeader, SliceType};
 use super::sps::Sps;
 use crate::picture::Picture;
+use crate::sample::Sample;
 use crate::{Error, Result};
 
 /// How a stored picture (field) is marked.
@@ -89,12 +89,20 @@ impl<S: Sample> DecodedPic<S> {
     /// The POC of the picture `parity` (a field's, or the frame's).
     #[inline]
     pub fn poc_of(&self, parity: u8) -> i32 {
-        if parity == PARITY_FRAME { self.poc } else { self.field_poc[parity as usize] }
+        if parity == PARITY_FRAME {
+            self.poc
+        } else {
+            self.field_poc[parity as usize]
+        }
     }
     /// The mark of the picture `parity`.
     #[inline]
     pub fn mark_of(&self, parity: u8) -> RefMark {
-        if parity == PARITY_FRAME { self.mark[0] } else { self.mark[parity as usize] }
+        if parity == PARITY_FRAME {
+            self.mark[0]
+        } else {
+            self.mark[parity as usize]
+        }
     }
     /// Field `p` decoded?
     #[inline]
@@ -160,7 +168,11 @@ pub fn compute_poc(sps: &Sps, hdr: &SliceHeader, st: &mut PocState) -> (i32, i32
             }
         }
         1 | 2 => {
-            let prev_offset = if st.prev_had_mmco5 { 0 } else { st.prev_frame_num_offset };
+            let prev_offset = if st.prev_had_mmco5 {
+                0
+            } else {
+                st.prev_frame_num_offset
+            };
             let frame_num_offset = if hdr.is_idr() {
                 0
             } else if st.prev_frame_num > hdr.frame_num {
@@ -171,7 +183,11 @@ pub fn compute_poc(sps: &Sps, hdr: &SliceHeader, st: &mut PocState) -> (i32, i32
             st.prev_frame_num_offset = frame_num_offset;
             if sps.poc_type == 1 {
                 let cycle = sps.offset_for_ref_frame.len() as i32;
-                let mut abs_frame_num = if cycle != 0 { frame_num_offset + hdr.frame_num as i32 } else { 0 };
+                let mut abs_frame_num = if cycle != 0 {
+                    frame_num_offset + hdr.frame_num as i32
+                } else {
+                    0
+                };
                 if hdr.nal_ref_idc == 0 && abs_frame_num > 0 {
                     abs_frame_num -= 1;
                 }
@@ -252,7 +268,9 @@ impl<S: Sample> Dpb<S> {
         let (mut cap, mut reorder) = (level_frames, level_frames);
         if let Some(vui) = &sps.vui {
             if let Some(m) = vui.max_dec_frame_buffering {
-                cap = (m as usize).clamp(1, 16).max(sps.max_num_ref_frames as usize);
+                cap = (m as usize)
+                    .clamp(1, 16)
+                    .max(sps.max_num_ref_frames as usize);
             }
             if let Some(r) = vui.max_num_reorder_frames {
                 reorder = (r as usize).min(cap);
@@ -267,9 +285,9 @@ impl<S: Sample> Dpb<S> {
         self.crop = sps.crop;
     }
 
-
     fn remove_unneeded(&mut self) {
-        self.pics.retain(|p| p.is_ref() || p.needed_for_output || p.awaiting_field);
+        self.pics
+            .retain(|p| p.is_ref() || p.needed_for_output || p.awaiting_field);
     }
 
     /// The entry holding `frame`, if any.
@@ -292,7 +310,12 @@ impl<S: Sample> Dpb<S> {
             eprintln!("  bump poc {}", p.poc);
         }
         if !p.non_existing {
-            self.output.push_back(PendingOutput { frame: p.frame.clone(), poc: p.poc, decode_index: p.decode_index, crop: self.crop });
+            self.output.push_back(PendingOutput {
+                frame: p.frame.clone(),
+                poc: p.poc,
+                decode_index: p.decode_index,
+                crop: self.crop,
+            });
         }
         self.remove_unneeded();
         true
@@ -334,7 +357,11 @@ impl<S: Sample> Dpb<S> {
         let max = sps.max_frame_num() as i32;
         for p in &mut self.pics {
             if p.any_short() {
-                p.frame_num_wrap = if p.frame_num as i32 > curr { p.frame_num as i32 - max } else { p.frame_num as i32 };
+                p.frame_num_wrap = if p.frame_num as i32 > curr {
+                    p.frame_num as i32 - max
+                } else {
+                    p.frame_num as i32
+                };
             }
         }
     }
@@ -344,11 +371,23 @@ impl<S: Sample> Dpb<S> {
     /// per `hdr` and outputting what the bumping rules say (C.4.5.3, plus
     /// the reorder-depth early output). `parity` is [`PARITY_FRAME`] or the
     /// field's.
-    pub fn store(&mut self, mut pic: DecodedPic<S>, hdr: &SliceHeader, sps: &Sps, had_mmco5: bool, parity: u8) -> Result<()> {
+    pub fn store(
+        &mut self,
+        mut pic: DecodedPic<S>,
+        hdr: &SliceHeader,
+        sps: &Sps,
+        had_mmco5: bool,
+        parity: u8,
+    ) -> Result<()> {
         let field = parity != PARITY_FRAME;
         let trace = std::env::var_os("H26X_TRACE_DPB").is_some();
         // The second field of a frame already in the DPB?
-        let second = if field { self.index_of(&pic.frame).filter(|&i| self.pics[i].awaiting_field) } else { None };
+        let second = if field {
+            self.index_of(&pic.frame)
+                .filter(|&i| self.pics[i].awaiting_field)
+        } else {
+            None
+        };
         if let Some(i) = second {
             // Complete the entry (it stays "awaiting" through the marking so
             // nothing below drops it before it is flagged for output).
@@ -419,9 +458,11 @@ impl<S: Sample> Dpb<S> {
                             }
                         }
                         Mmco::MaxLongTermIdx(plus1) => {
-                            self.max_long_term_frame_idx = if plus1 == 0 { None } else { Some(plus1 - 1) };
+                            self.max_long_term_frame_idx =
+                                if plus1 == 0 { None } else { Some(plus1 - 1) };
                             for p in &mut self.pics {
-                                if p.any_long() && (plus1 == 0 || p.long_term_frame_idx > plus1 - 1) {
+                                if p.any_long() && (plus1 == 0 || p.long_term_frame_idx > plus1 - 1)
+                                {
                                     for q in 0..2 {
                                         if p.mark[q] == RefMark::Long {
                                             p.mark[q] = RefMark::Unused;
@@ -446,7 +487,8 @@ impl<S: Sample> Dpb<S> {
             } else {
                 // Sliding window (8.2.5.3): not for the second field of a
                 // reference pair whose first field is short-term.
-                let first_short = second.is_some_and(|i| self.pics[i].mark[1 - parity as usize] == RefMark::Short);
+                let first_short = second
+                    .is_some_and(|i| self.pics[i].mark[1 - parity as usize] == RefMark::Short);
                 if !first_short {
                     self.sliding_window(sps, second);
                 }
@@ -454,7 +496,14 @@ impl<S: Sample> Dpb<S> {
             }
         }
         if trace {
-            eprintln!("  marking: idr {} adaptive {} ops {:?} mmco5 {} parity {parity} second {:?}", hdr.is_idr(), hdr.marking.adaptive, hdr.marking.ops, had_mmco5, second);
+            eprintln!(
+                "  marking: idr {} adaptive {} ops {:?} mmco5 {} parity {parity} second {:?}",
+                hdr.is_idr(),
+                hdr.marking.adaptive,
+                hdr.marking.ops,
+                had_mmco5,
+                second
+            );
         }
         // Apply the current picture's mark.
         {
@@ -493,7 +542,21 @@ impl<S: Sample> Dpb<S> {
             e.needed_for_output = !e.non_existing;
             if trace {
                 let (poc, fnum, marks) = (e.poc, e.frame_num, e.mark);
-                eprintln!("store 2nd field poc {} fn {} marks {:?} | dpb: {:?}", poc, fnum, marks, self.pics.iter().map(|p| (p.poc, p.mark[0] as u8, p.mark[1] as u8, p.needed_for_output as u8)).collect::<Vec<_>>());
+                eprintln!(
+                    "store 2nd field poc {} fn {} marks {:?} | dpb: {:?}",
+                    poc,
+                    fnum,
+                    marks,
+                    self.pics
+                        .iter()
+                        .map(|p| (
+                            p.poc,
+                            p.mark[0] as u8,
+                            p.mark[1] as u8,
+                            p.needed_for_output as u8
+                        ))
+                        .collect::<Vec<_>>()
+                );
             }
             self.reorder_bump();
             return Ok(());
@@ -503,7 +566,15 @@ impl<S: Sample> Dpb<S> {
                 "  before capacity loop: len {} cap {} list {:?}",
                 self.pics.len(),
                 self.capacity,
-                self.pics.iter().map(|p| (p.poc, p.mark[0] as u8, p.mark[1] as u8, p.needed_for_output as u8)).collect::<Vec<_>>()
+                self.pics
+                    .iter()
+                    .map(|p| (
+                        p.poc,
+                        p.mark[0] as u8,
+                        p.mark[1] as u8,
+                        p.needed_for_output as u8
+                    ))
+                    .collect::<Vec<_>>()
             );
         }
         // C.4.5.2: a non-reference frame with no free frame buffer is output
@@ -511,14 +582,24 @@ impl<S: Sample> Dpb<S> {
         // needs storing. (A first field needs its buffer for the second.)
         if !hdr.is_reference() && !hdr.is_idr() && !field {
             while self.pics.len() >= self.capacity {
-                let min_waiting = self.pics.iter().filter(|p| p.needed_for_output).map(|p| p.poc).min();
+                let min_waiting = self
+                    .pics
+                    .iter()
+                    .filter(|p| p.needed_for_output)
+                    .map(|p| p.poc)
+                    .min();
                 match min_waiting {
                     Some(m) if pic.poc > m => {
                         self.bump_one();
                     }
                     _ => {
                         if !pic.non_existing {
-                            self.output.push_back(PendingOutput { frame: pic.frame.clone(), poc: pic.poc, decode_index: pic.decode_index, crop: self.crop });
+                            self.output.push_back(PendingOutput {
+                                frame: pic.frame.clone(),
+                                poc: pic.poc,
+                                decode_index: pic.decode_index,
+                                crop: self.crop,
+                            });
                         }
                         return Ok(());
                     }
@@ -559,7 +640,15 @@ impl<S: Sample> Dpb<S> {
                 pic.fields,
                 self.capacity,
                 self.num_reorder,
-                self.pics.iter().map(|p| (p.poc, p.mark[0] as u8, p.mark[1] as u8, p.needed_for_output as u8)).collect::<Vec<_>>()
+                self.pics
+                    .iter()
+                    .map(|p| (
+                        p.poc,
+                        p.mark[0] as u8,
+                        p.mark[1] as u8,
+                        p.needed_for_output as u8
+                    ))
+                    .collect::<Vec<_>>()
             );
         }
         self.pics.push(pic);
@@ -588,13 +677,30 @@ impl<S: Sample> Dpb<S> {
     /// Returns `(entry, field)`.
     fn find_short(&self, pic_num: i32, field: bool, cur_parity: u8) -> Option<(usize, usize)> {
         if !field {
-            self.pics.iter().position(|p| p.both_short() && p.frame_num_wrap == pic_num && !p.awaiting_field).map(|i| (i, 0))
-                .or_else(|| self.pics.iter().position(|p| p.any_short() && p.frame_num_wrap == pic_num).map(|i| (i, 0)))
+            self.pics
+                .iter()
+                .position(|p| p.both_short() && p.frame_num_wrap == pic_num && !p.awaiting_field)
+                .map(|i| (i, 0))
+                .or_else(|| {
+                    self.pics
+                        .iter()
+                        .position(|p| p.any_short() && p.frame_num_wrap == pic_num)
+                        .map(|i| (i, 0))
+                })
         } else {
             let same = pic_num & 1 == 1;
-            let q = if same { cur_parity as usize } else { 1 - cur_parity as usize };
+            let q = if same {
+                cur_parity as usize
+            } else {
+                1 - cur_parity as usize
+            };
             let fnw = pic_num >> 1;
-            self.pics.iter().position(|p| p.mark[q] == RefMark::Short && p.has_field(q as u8) && p.frame_num_wrap == fnw).map(|i| (i, q))
+            self.pics
+                .iter()
+                .position(|p| {
+                    p.mark[q] == RefMark::Short && p.has_field(q as u8) && p.frame_num_wrap == fnw
+                })
+                .map(|i| (i, q))
         }
     }
 
@@ -602,12 +708,26 @@ impl<S: Sample> Dpb<S> {
     /// [`Self::find_short`].
     fn find_long(&self, lt_pic_num: i32, field: bool, cur_parity: u8) -> Option<(usize, usize)> {
         if !field {
-            self.pics.iter().position(|p| p.any_long() && p.long_term_frame_idx as i32 == lt_pic_num).map(|i| (i, 0))
+            self.pics
+                .iter()
+                .position(|p| p.any_long() && p.long_term_frame_idx as i32 == lt_pic_num)
+                .map(|i| (i, 0))
         } else {
             let same = lt_pic_num & 1 == 1;
-            let q = if same { cur_parity as usize } else { 1 - cur_parity as usize };
+            let q = if same {
+                cur_parity as usize
+            } else {
+                1 - cur_parity as usize
+            };
             let idx = lt_pic_num >> 1;
-            self.pics.iter().position(|p| p.mark[q] == RefMark::Long && p.has_field(q as u8) && p.long_term_frame_idx as i32 == idx).map(|i| (i, q))
+            self.pics
+                .iter()
+                .position(|p| {
+                    p.mark[q] == RefMark::Long
+                        && p.has_field(q as u8)
+                        && p.long_term_frame_idx as i32 == idx
+                })
+                .map(|i| (i, q))
         }
     }
 
@@ -645,7 +765,9 @@ impl<S: Sample> Dpb<S> {
                 if Some(i) == current {
                     continue;
                 }
-                if p.any_short() && best.is_none_or(|b| p.frame_num_wrap < self.pics[b].frame_num_wrap) {
+                if p.any_short()
+                    && best.is_none_or(|b| p.frame_num_wrap < self.pics[b].frame_num_wrap)
+                {
                     best = Some(i);
                 }
             }
@@ -665,7 +787,14 @@ impl<S: Sample> Dpb<S> {
 
     /// Insert "non-existing" frames for a gap in frame_num (8.2.5.2).
     /// `grey` is a complete grey frame of the right size to stand in.
-    pub fn fill_frame_num_gap(&mut self, sps: &Sps, prev_ref_frame_num: u32, frame_num: u32, grey: &Arc<SharedFrame<S>>, decode_index: &mut u64) {
+    pub fn fill_frame_num_gap(
+        &mut self,
+        sps: &Sps,
+        prev_ref_frame_num: u32,
+        frame_num: u32,
+        grey: &Arc<SharedFrame<S>>,
+        decode_index: &mut u64,
+    ) {
         let max = sps.max_frame_num();
         let mut unused = (prev_ref_frame_num + 1) % max;
         let mut guard = 0;
@@ -723,9 +852,19 @@ pub const MISSING_REF: (usize, u8) = (usize::MAX, PARITY_FRAME);
 /// 8.2.4.2.5: the fields of the frames `frames` (in order), alternating
 /// parity starting with `cur_parity`, taking only fields that are decoded
 /// and marked `want`.
-fn alternate_fields<S: Sample>(dpb: &Dpb<S>, frames: &[usize], cur_parity: u8, want: RefMark) -> Vec<(usize, u8)> {
+fn alternate_fields<S: Sample>(
+    dpb: &Dpb<S>,
+    frames: &[usize],
+    cur_parity: u8,
+    want: RefMark,
+) -> Vec<(usize, u8)> {
     let pick = |q: u8| -> Vec<(usize, u8)> {
-        frames.iter().copied().filter(|&i| dpb.pics[i].has_field(q) && dpb.pics[i].mark[q as usize] == want).map(|i| (i, q)).collect()
+        frames
+            .iter()
+            .copied()
+            .filter(|&i| dpb.pics[i].has_field(q) && dpb.pics[i].mark[q as usize] == want)
+            .map(|i| (i, q))
+            .collect()
     };
     let same = pick(cur_parity);
     let opp = pick(1 - cur_parity);
@@ -749,17 +888,39 @@ fn alternate_fields<S: Sample>(dpb: &Dpb<S>, frames: &[usize], cur_parity: u8, w
 
 /// Build the reference picture lists for a P or B slice (8.2.4).
 /// `cur_parity` is [`PARITY_FRAME`] for a frame picture.
-pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader, cur_poc: i32, cur_parity: u8) -> Result<RefLists> {
+pub fn build_ref_lists<S: Sample>(
+    dpb: &mut Dpb<S>,
+    sps: &Sps,
+    hdr: &SliceHeader,
+    cur_poc: i32,
+    cur_parity: u8,
+) -> Result<RefLists> {
     let field = cur_parity != PARITY_FRAME;
     let max_frame_num = sps.max_frame_num() as i32;
     dpb.update_frame_num_wrap(hdr.frame_num, sps);
-    let (curr_pic_num, max_pic_num) = if field { (2 * hdr.frame_num as i32 + 1, 2 * max_frame_num) } else { (hdr.frame_num as i32, max_frame_num) };
+    let (curr_pic_num, max_pic_num) = if field {
+        (2 * hdr.frame_num as i32 + 1, 2 * max_frame_num)
+    } else {
+        (hdr.frame_num as i32, max_frame_num)
+    };
 
     let mut lists: [Vec<(usize, u8)>; 2] = [Vec::new(), Vec::new()];
     if !field {
         // Frames: entries with both fields marked alike.
-        let shorts: Vec<usize> = dpb.pics.iter().enumerate().filter(|(_, p)| p.both_short() && !p.awaiting_field).map(|(i, _)| i).collect();
-        let mut longs: Vec<usize> = dpb.pics.iter().enumerate().filter(|(_, p)| p.both_long() && !p.awaiting_field).map(|(i, _)| i).collect();
+        let shorts: Vec<usize> = dpb
+            .pics
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.both_short() && !p.awaiting_field)
+            .map(|(i, _)| i)
+            .collect();
+        let mut longs: Vec<usize> = dpb
+            .pics
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.both_long() && !p.awaiting_field)
+            .map(|(i, _)| i)
+            .collect();
         longs.sort_by_key(|&i| dpb.pics[i].long_term_frame_idx);
         match hdr.slice_type {
             SliceType::P | SliceType::Sp => {
@@ -769,8 +930,16 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
                 lists[0].extend(longs.iter().map(|&i| (i, PARITY_FRAME)));
             }
             SliceType::B => {
-                let mut before: Vec<usize> = shorts.iter().copied().filter(|&i| dpb.pics[i].poc < cur_poc).collect();
-                let mut after: Vec<usize> = shorts.iter().copied().filter(|&i| dpb.pics[i].poc > cur_poc).collect();
+                let mut before: Vec<usize> = shorts
+                    .iter()
+                    .copied()
+                    .filter(|&i| dpb.pics[i].poc < cur_poc)
+                    .collect();
+                let mut after: Vec<usize> = shorts
+                    .iter()
+                    .copied()
+                    .filter(|&i| dpb.pics[i].poc > cur_poc)
+                    .collect();
                 before.sort_by(|&a, &b| dpb.pics[b].poc.cmp(&dpb.pics[a].poc));
                 after.sort_by_key(|&i| dpb.pics[i].poc);
                 lists[0].extend(before.iter().map(|&i| (i, PARITY_FRAME)));
@@ -788,8 +957,20 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
     } else {
         // Fields (8.2.4.2.2 / 8.2.4.2.4 / 8.2.4.2.5): frames with any field
         // marked, ordered as frames, then their fields alternating parity.
-        let shorts: Vec<usize> = dpb.pics.iter().enumerate().filter(|(_, p)| p.any_short()).map(|(i, _)| i).collect();
-        let mut longs: Vec<usize> = dpb.pics.iter().enumerate().filter(|(_, p)| p.any_long()).map(|(i, _)| i).collect();
+        let shorts: Vec<usize> = dpb
+            .pics
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.any_short())
+            .map(|(i, _)| i)
+            .collect();
+        let mut longs: Vec<usize> = dpb
+            .pics
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.any_long())
+            .map(|(i, _)| i)
+            .collect();
         longs.sort_by_key(|&i| dpb.pics[i].long_term_frame_idx);
         match hdr.slice_type {
             SliceType::P | SliceType::Sp => {
@@ -799,8 +980,16 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
                 lists[0].extend(alternate_fields(dpb, &longs, cur_parity, RefMark::Long));
             }
             SliceType::B => {
-                let mut before: Vec<usize> = shorts.iter().copied().filter(|&i| dpb.pics[i].poc <= cur_poc).collect();
-                let mut after: Vec<usize> = shorts.iter().copied().filter(|&i| dpb.pics[i].poc > cur_poc).collect();
+                let mut before: Vec<usize> = shorts
+                    .iter()
+                    .copied()
+                    .filter(|&i| dpb.pics[i].poc <= cur_poc)
+                    .collect();
+                let mut after: Vec<usize> = shorts
+                    .iter()
+                    .copied()
+                    .filter(|&i| dpb.pics[i].poc > cur_poc)
+                    .collect();
                 before.sort_by(|&a, &b| dpb.pics[b].poc.cmp(&dpb.pics[a].poc));
                 after.sort_by_key(|&i| dpb.pics[i].poc);
                 let mut f0 = before.clone();
@@ -824,7 +1013,11 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
     let pic_num_of = |e: (usize, u8)| -> Option<i32> {
         let p = &dpb.pics[e.0];
         if !field {
-            if p.both_short() { Some(p.frame_num_wrap) } else { None }
+            if p.both_short() {
+                Some(p.frame_num_wrap)
+            } else {
+                None
+            }
         } else if p.mark[e.1 as usize] == RefMark::Short {
             Some(2 * p.frame_num_wrap + (e.1 == cur_parity) as i32)
         } else {
@@ -834,7 +1027,11 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
     let lt_pic_num_of = |e: (usize, u8)| -> Option<i32> {
         let p = &dpb.pics[e.0];
         if !field {
-            if p.both_long() { Some(p.long_term_frame_idx as i32) } else { None }
+            if p.both_long() {
+                Some(p.long_term_frame_idx as i32)
+            } else {
+                None
+            }
         } else if p.mark[e.1 as usize] == RefMark::Long {
             Some(2 * p.long_term_frame_idx as i32 + (e.1 == cur_parity) as i32)
         } else {
@@ -844,20 +1041,50 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
     // The entry with a given PicNum / LongTermPicNum.
     let find_pic_num = |pic_num: i32| -> Option<(usize, u8)> {
         if !field {
-            dpb.pics.iter().position(|p| p.both_short() && !p.awaiting_field && p.frame_num_wrap == pic_num).map(|i| (i, PARITY_FRAME))
+            dpb.pics
+                .iter()
+                .position(|p| p.both_short() && !p.awaiting_field && p.frame_num_wrap == pic_num)
+                .map(|i| (i, PARITY_FRAME))
         } else {
-            let q = if pic_num & 1 == 1 { cur_parity } else { 1 - cur_parity };
+            let q = if pic_num & 1 == 1 {
+                cur_parity
+            } else {
+                1 - cur_parity
+            };
             let fnw = pic_num >> 1;
-            dpb.pics.iter().position(|p| p.has_field(q) && p.mark[q as usize] == RefMark::Short && p.frame_num_wrap == fnw).map(|i| (i, q))
+            dpb.pics
+                .iter()
+                .position(|p| {
+                    p.has_field(q)
+                        && p.mark[q as usize] == RefMark::Short
+                        && p.frame_num_wrap == fnw
+                })
+                .map(|i| (i, q))
         }
     };
     let find_lt_pic_num = |lt: i32| -> Option<(usize, u8)> {
         if !field {
-            dpb.pics.iter().position(|p| p.both_long() && !p.awaiting_field && p.long_term_frame_idx as i32 == lt).map(|i| (i, PARITY_FRAME))
+            dpb.pics
+                .iter()
+                .position(|p| {
+                    p.both_long() && !p.awaiting_field && p.long_term_frame_idx as i32 == lt
+                })
+                .map(|i| (i, PARITY_FRAME))
         } else {
-            let q = if lt & 1 == 1 { cur_parity } else { 1 - cur_parity };
+            let q = if lt & 1 == 1 {
+                cur_parity
+            } else {
+                1 - cur_parity
+            };
             let idx = lt >> 1;
-            dpb.pics.iter().position(|p| p.has_field(q) && p.mark[q as usize] == RefMark::Long && p.long_term_frame_idx as i32 == idx).map(|i| (i, q))
+            dpb.pics
+                .iter()
+                .position(|p| {
+                    p.has_field(q)
+                        && p.mark[q as usize] == RefMark::Long
+                        && p.long_term_frame_idx as i32 == idx
+                })
+                .map(|i| (i, q))
         }
     };
 
@@ -877,16 +1104,26 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
                 match *m {
                     RefListMod::SubtractPicNum(d) | RefListMod::AddPicNum(d) => {
                         let d = d as i32;
-                        let mut no_wrap = if matches!(m, RefListMod::SubtractPicNum(_)) { pic_num_pred - d } else { pic_num_pred + d };
+                        let mut no_wrap = if matches!(m, RefListMod::SubtractPicNum(_)) {
+                            pic_num_pred - d
+                        } else {
+                            pic_num_pred + d
+                        };
                         if no_wrap < 0 {
                             no_wrap += max_pic_num;
                         } else if no_wrap >= max_pic_num {
                             no_wrap -= max_pic_num;
                         }
                         pic_num_pred = no_wrap;
-                        let pic_num = if no_wrap > curr_pic_num { no_wrap - max_pic_num } else { no_wrap };
+                        let pic_num = if no_wrap > curr_pic_num {
+                            no_wrap - max_pic_num
+                        } else {
+                            no_wrap
+                        };
                         let Some(t) = find_pic_num(pic_num) else {
-                            return Err(Error::bitstream(format!("ref_pic_list_modification names a missing short-term picture (PicNum {pic_num})")));
+                            return Err(Error::bitstream(format!(
+                                "ref_pic_list_modification names a missing short-term picture (PicNum {pic_num})"
+                            )));
                         };
                         // Insert and remove the duplicate.
                         for c in (ref_idx + 1..=n).rev() {
@@ -911,7 +1148,9 @@ pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader
                     }
                     RefListMod::LongTerm(lt) => {
                         let Some(t) = find_lt_pic_num(lt as i32) else {
-                            return Err(Error::bitstream(format!("ref_pic_list_modification names a missing long-term picture ({lt})")));
+                            return Err(Error::bitstream(format!(
+                                "ref_pic_list_modification names a missing long-term picture ({lt})"
+                            )));
                         };
                         for c in (ref_idx + 1..=n).rev() {
                             list[c] = list[c - 1];
@@ -981,6 +1220,11 @@ pub struct RefEntry<S: Sample = u8> {
 
 impl<S: Sample> Clone for RefEntry<S> {
     fn clone(&self) -> Self {
-        RefEntry { frame: self.frame.clone(), poc: self.poc, long_term: self.long_term, parity: self.parity }
+        RefEntry {
+            frame: self.frame.clone(),
+            poc: self.poc,
+            long_term: self.long_term,
+            parity: self.parity,
+        }
     }
 }

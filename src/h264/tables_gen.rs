@@ -4513,4 +4513,3 @@ pub static SIG_COEFF_8X8_CTX: [[u8; 63]; 2] = [
 /// ctxIdxInc for last_significant_coeff_flag of 8x8 blocks by scan position (Table 9-43).
 #[rustfmt::skip]
 pub static LAST_COEFF_8X8_CTX: [u8; 63] = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8];
-

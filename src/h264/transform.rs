@@ -30,13 +30,15 @@ impl Dequant {
                     // generated table is ordered [even-even, mixed, odd-odd],
                     // i.e. by the number of odd indices.
                     let class = (i % 2) + (j % 2);
-                    scale4[list][m][pos] = lists.list4x4[list][pos] as i32 * DEQUANT4_INIT[m][class] as i32;
+                    scale4[list][m][pos] =
+                        lists.list4x4[list][pos] as i32 * DEQUANT4_INIT[m][class] as i32;
                 }
                 for pos in 0..64 {
                     let (i, j) = (pos / 8, pos % 8);
                     // normAdjust8x8(m, i, j) by (i%4, j%4) class table.
                     let class = DEQUANT8_INIT_SCAN[(i % 4) * 4 + (j % 4)] as usize;
-                    scale8[list][m][pos] = lists.list8x8[list][pos] as i32 * DEQUANT8_INIT[m][class] as i32;
+                    scale8[list][m][pos] =
+                        lists.list8x8[list][pos] as i32 * DEQUANT8_INIT[m][class] as i32;
                 }
             }
         }
@@ -71,7 +73,6 @@ pub fn dequant4x4(coeffs: &mut [i32; 16], scale: &[i32; 16], qp: i32, skip_dc: b
         }
     }
 }
-
 
 /// Inverse 4x4 transform (8.5.12.2) producing the residual `r[i][j]`
 /// (already `(x + 32) >> 6`), in place.
@@ -116,7 +117,16 @@ pub fn idct8x8(d: &mut [i32; 64]) {
         tmp[i * 8..i * 8 + 8].copy_from_slice(&out);
     }
     for j in 0..8 {
-        let col = [tmp[j], tmp[8 + j], tmp[16 + j], tmp[24 + j], tmp[32 + j], tmp[40 + j], tmp[48 + j], tmp[56 + j]];
+        let col = [
+            tmp[j],
+            tmp[8 + j],
+            tmp[16 + j],
+            tmp[24 + j],
+            tmp[32 + j],
+            tmp[40 + j],
+            tmp[48 + j],
+            tmp[56 + j],
+        ];
         let mut out = [0i32; 8];
         idct8_1d(&col, &mut out);
         for i in 0..8 {
@@ -235,7 +245,6 @@ pub fn chroma_dc_transform_422(dc: &mut [i32; 8], scale00: i32, qp: i32) {
         dc[i] = ((f[i] * scale00) << q6) >> 6;
     }
 }
-
 
 #[cfg(test)]
 mod tests {

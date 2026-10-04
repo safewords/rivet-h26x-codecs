@@ -421,14 +421,27 @@ pub(crate) mod avx2 {
     #[inline]
     fn widen_add(acc: __m256i, v: __m256i) -> __m256i {
         let z = _mm256_setzero_si256();
-        _mm256_add_epi64(acc, _mm256_add_epi64(_mm256_unpacklo_epi32(v, z), _mm256_unpackhi_epi32(v, z)))
+        _mm256_add_epi64(
+            acc,
+            _mm256_add_epi64(_mm256_unpacklo_epi32(v, z), _mm256_unpackhi_epi32(v, z)),
+        )
     }
 
-    pub(crate) fn wp_moments(cur: &[u8], cur_stride: usize, refp: &[u8], ref_stride: usize, w: usize, h: usize) -> WpMoments {
+    pub(crate) fn wp_moments(
+        cur: &[u8],
+        cur_stride: usize,
+        refp: &[u8],
+        ref_stride: usize,
+        w: usize,
+        h: usize,
+    ) -> WpMoments {
         if w == 0 || h == 0 {
             return WpMoments::default();
         }
-        assert!(cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w, "region out of range");
+        assert!(
+            cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w,
+            "region out of range"
+        );
         // SAFETY: `install` only installs this for a CPU with AVX2, and
         // every row's loads are inside the `w` samples checked above.
         unsafe { wp_moments_impl(cur.as_ptr(), cur_stride, refp.as_ptr(), ref_stride, w, h) }
@@ -440,7 +453,14 @@ pub(crate) mod avx2 {
     /// i32 lanes are widened into u64 once a row: a row of up to 2^14
     /// samples puts at most 2^9 pairs, under 2^26, in a lane.
     #[target_feature(enable = "avx2")]
-    unsafe fn wp_moments_impl(cur: *const u8, cur_stride: usize, refp: *const u8, ref_stride: usize, w: usize, h: usize) -> WpMoments {
+    unsafe fn wp_moments_impl(
+        cur: *const u8,
+        cur_stride: usize,
+        refp: *const u8,
+        ref_stride: usize,
+        w: usize,
+        h: usize,
+    ) -> WpMoments {
         unsafe {
             let z = _mm256_setzero_si256();
             let (mut sr, mut sc, mut sad, mut srr, mut src) = (z, z, z, z, z);
@@ -458,8 +478,14 @@ pub(crate) mod avx2 {
                     sad = _mm256_add_epi64(sad, _mm256_sad_epu8(vr, vc));
                     let (rl, rh) = (_mm256_unpacklo_epi8(vr, z), _mm256_unpackhi_epi8(vr, z));
                     let (cl, ch) = (_mm256_unpacklo_epi8(vc, z), _mm256_unpackhi_epi8(vc, z));
-                    rr = _mm256_add_epi32(rr, _mm256_add_epi32(_mm256_madd_epi16(rl, rl), _mm256_madd_epi16(rh, rh)));
-                    rc = _mm256_add_epi32(rc, _mm256_add_epi32(_mm256_madd_epi16(rl, cl), _mm256_madd_epi16(rh, ch)));
+                    rr = _mm256_add_epi32(
+                        rr,
+                        _mm256_add_epi32(_mm256_madd_epi16(rl, rl), _mm256_madd_epi16(rh, rh)),
+                    );
+                    rc = _mm256_add_epi32(
+                        rc,
+                        _mm256_add_epi32(_mm256_madd_epi16(rl, cl), _mm256_madd_epi16(rh, ch)),
+                    );
                     x += 32;
                 }
                 srr = widen_add(srr, rr);
@@ -484,19 +510,47 @@ pub(crate) mod avx2 {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn weighted_sad(cur: &[u8], cur_stride: usize, refp: &[u8], ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32, max: i32) -> u64 {
+    pub(crate) fn weighted_sad(
+        cur: &[u8],
+        cur_stride: usize,
+        refp: &[u8],
+        ref_stride: usize,
+        w: usize,
+        h: usize,
+        weight: i32,
+        shift: u32,
+        offset: i32,
+        max: i32,
+    ) -> u64 {
         if w == 0 || h == 0 {
             return 0;
         }
-        assert!(cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w, "region out of range");
+        assert!(
+            cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w,
+            "region out of range"
+        );
         // The word pairs below hold the weight and the rounding term as
         // i16, and the clip assumes an 8-bit ceiling; anything else (no
         // caller passes it) takes the reference.
         if !(-32768..=32767).contains(&weight) || shift > 14 || max != 255 {
-            return crate::dsp::distortion::weighted_sad_scalar(cur, cur_stride, refp, ref_stride, w, h, weight, shift, offset, max);
+            return crate::dsp::distortion::weighted_sad_scalar(
+                cur, cur_stride, refp, ref_stride, w, h, weight, shift, offset, max,
+            );
         }
         // SAFETY: AVX2 as above; the loads stay inside the checked rows.
-        unsafe { weighted_sad_impl(cur.as_ptr(), cur_stride, refp.as_ptr(), ref_stride, w, h, weight, shift, offset) }
+        unsafe {
+            weighted_sad_impl(
+                cur.as_ptr(),
+                cur_stride,
+                refp.as_ptr(),
+                ref_stride,
+                w,
+                h,
+                weight,
+                shift,
+                offset,
+            )
+        }
     }
 
     /// 16 samples a step: the reference words interleaved with ones, so one
@@ -506,7 +560,17 @@ pub(crate) mod avx2 {
     /// (at most 255 a sample) are widened into u64 once a row.
     #[allow(clippy::too_many_arguments)]
     #[target_feature(enable = "avx2")]
-    unsafe fn weighted_sad_impl(cur: *const u8, cur_stride: usize, refp: *const u8, ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32) -> u64 {
+    unsafe fn weighted_sad_impl(
+        cur: *const u8,
+        cur_stride: usize,
+        refp: *const u8,
+        ref_stride: usize,
+        w: usize,
+        h: usize,
+        weight: i32,
+        shift: u32,
+        offset: i32,
+    ) -> u64 {
         unsafe {
             let round = if shift >= 1 { 1i32 << (shift - 1) } else { 0 };
             let wr = _mm256_set1_epi32((weight & 0xffff) | (round << 16));
@@ -517,7 +581,15 @@ pub(crate) mod avx2 {
             let mut acc = _mm256_setzero_si256();
             let mut total = 0u64;
             let wide = if w <= 1 << 20 { w & !15 } else { 0 };
-            let predict = |r: __m256i| _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(_mm256_sra_epi32(_mm256_madd_epi16(r, wr), sh), off), lo), hi);
+            let predict = |r: __m256i| {
+                _mm256_min_epi32(
+                    _mm256_max_epi32(
+                        _mm256_add_epi32(_mm256_sra_epi32(_mm256_madd_epi16(r, wr), sh), off),
+                        lo,
+                    ),
+                    hi,
+                )
+            };
             for y in 0..h {
                 let (c, r) = (cur.add(y * cur_stride), refp.add(y * ref_stride));
                 let mut row = _mm256_setzero_si256();
@@ -527,9 +599,18 @@ pub(crate) mod avx2 {
                     // `cvtepu8` leaves them: 0-7 low, 8-15 high.
                     let vr = _mm256_cvtepu8_epi16(_mm_loadu_si128(r.add(x) as *const __m128i));
                     let vc = _mm256_cvtepu8_epi16(_mm_loadu_si128(c.add(x) as *const __m128i));
-                    let (pa, pb) = (predict(_mm256_unpacklo_epi16(vr, ones)), predict(_mm256_unpackhi_epi16(vr, ones)));
+                    let (pa, pb) = (
+                        predict(_mm256_unpacklo_epi16(vr, ones)),
+                        predict(_mm256_unpackhi_epi16(vr, ones)),
+                    );
                     let (ca, cb) = (_mm256_unpacklo_epi16(vc, lo), _mm256_unpackhi_epi16(vc, lo));
-                    row = _mm256_add_epi32(row, _mm256_add_epi32(_mm256_abs_epi32(_mm256_sub_epi32(pa, ca)), _mm256_abs_epi32(_mm256_sub_epi32(pb, cb))));
+                    row = _mm256_add_epi32(
+                        row,
+                        _mm256_add_epi32(
+                            _mm256_abs_epi32(_mm256_sub_epi32(pa, ca)),
+                            _mm256_abs_epi32(_mm256_sub_epi32(pb, cb)),
+                        ),
+                    );
                     x += 16;
                 }
                 acc = widen_add(acc, row);
@@ -788,7 +869,11 @@ pub(crate) mod avx2 {
     fn satd(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: usize, h: usize) -> u32 {
         // Sixteen or more wide, or eight wide in whole 8x8 blocks; the rest
         // is a pair of tiles or fewer, one 128-bit vector's work.
-        let ours = if w == 8 { h.is_multiple_of(8) } else { w.is_multiple_of(16) && h.is_multiple_of(4) };
+        let ours = if w == 8 {
+            h.is_multiple_of(8)
+        } else {
+            w.is_multiple_of(16) && h.is_multiple_of(4)
+        };
         if !ours || h == 0 {
             return super::avx::satd(a, a_stride, b, b_stride, w, h);
         }
@@ -996,8 +1081,15 @@ mod tests {
         }
         let d16 = DistortionDsp::<u16>::new(cpu);
         type Sad8 = crate::dsp::distortion::SadFn<u8>;
-        let ours = [sse2::sad as Sad8 as usize, ssse3::sad as Sad8 as usize, avx::sad as Sad8 as usize];
-        assert!(!ours.contains(&(d16.sad as usize)), "a u16 table took an 8-bit kernel");
+        let ours = [
+            sse2::sad as Sad8 as usize,
+            ssse3::sad as Sad8 as usize,
+            avx::sad as Sad8 as usize,
+        ];
+        assert!(
+            !ours.contains(&(d16.sad as usize)),
+            "a u16 table took an 8-bit kernel"
+        );
     }
 
     /// Cycles per call, scalar against each rung, over the shapes the

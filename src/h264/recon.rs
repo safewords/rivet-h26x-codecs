@@ -11,9 +11,9 @@ use super::frame::{BlockMotion, Frame, Mv, PARITY_FRAME, SharedFrame};
 use super::inter::{MbGeom, Weighting, predict_partition};
 use super::intra::{IntraAvail, predict_4x4, predict_8x8, predict_16x16, predict_chroma};
 use super::mb::{
-    Jobs, MbKind, MbLayer, MbMotion, MbNeighbours, MotionCache, PicInfo, SliceCtx, SubMbShape, block_available,
-    colocated_block, colocated_motion, fill_motion, median_mvp, p_skip_mv, predict_mv,
-    prediction_neighbours, spatial_direct_ref_idx,
+    Jobs, MbKind, MbLayer, MbMotion, MbNeighbours, MotionCache, PicInfo, SliceCtx, SubMbShape,
+    block_available, colocated_block, colocated_motion, fill_motion, median_mvp, p_skip_mv,
+    predict_mv, prediction_neighbours, spatial_direct_ref_idx,
 };
 use super::slice::PredWeightTable;
 use super::tables::BLK4X4_FROM_RASTER;
@@ -202,7 +202,13 @@ impl<'a, S: Sample> SliceRefs<'a, S> {
 /// long-term, the two coincide, or the distance ratio leaves the range.
 /// A free function, as [`explicit_weighting`] is, so the H.264 encoder
 /// weights its implicit B pictures by the decoder's own derivation.
-pub(crate) fn implicit_pair(cur_poc: i32, poc0: i32, poc1: i32, long0: bool, long1: bool) -> (i32, i32) {
+pub(crate) fn implicit_pair(
+    cur_poc: i32,
+    poc0: i32,
+    poc1: i32,
+    long0: bool,
+    long1: bool,
+) -> (i32, i32) {
     let tb = (cur_poc - poc0).clamp(-128, 127);
     let td = (poc1 - poc0).clamp(-128, 127);
     if td == 0 || long0 || long1 {
@@ -228,10 +234,20 @@ pub(crate) fn implicit_pair(cur_poc: i32, poc0: i32, poc1: i32, long0: bool, lon
 /// function, so the H.264 encoder hands its own motion compensation exactly
 /// what a decoder derives from the table it wrote — the H.265 reader's
 /// `explicit_weighting`, for the same reason.
-pub(crate) fn explicit_weighting(t: &PredWeightTable, bit_depth: u32, r0: i8, r1: i8, field_mb: bool) -> Weighting {
+pub(crate) fn explicit_weighting(
+    t: &PredWeightTable,
+    bit_depth: u32,
+    r0: i8,
+    r1: i8,
+    field_mb: bool,
+) -> Weighting {
     let mut w = [[1i32; 2]; 3];
     let mut o = [[0i32; 2]; 3];
-    let log_wd = [t.luma_log2_denom as i32, t.chroma_log2_denom as i32, t.chroma_log2_denom as i32];
+    let log_wd = [
+        t.luma_log2_denom as i32,
+        t.chroma_log2_denom as i32,
+        t.chroma_log2_denom as i32,
+    ];
     for (list, r) in [(0usize, r0), (1usize, r1)] {
         if r < 0 {
             continue;
@@ -272,7 +288,14 @@ fn intra_ok(info: &PicInfo, ctx: &SliceCtx, addr: Option<usize>) -> bool {
 /// Where a macroblock's samples go. A field macroblock of an MBAFF frame
 /// (storage row `2 * pair_row + parity`) covers every other line of its
 /// pair's 32 rows and works in field coordinates for motion compensation.
-fn mb_geom<S: Sample>(ctx: &SliceCtx, cur: &Frame<S>, info: &PicInfo, nb: &MbNeighbours, layer: &MbLayer, refs: &SliceRefs<S>) -> MbGeom {
+fn mb_geom<S: Sample>(
+    ctx: &SliceCtx,
+    cur: &Frame<S>,
+    info: &PicInfo,
+    nb: &MbNeighbours,
+    layer: &MbLayer,
+    refs: &SliceRefs<S>,
+) -> MbGeom {
     let addr = nb.addr;
     let mbx = addr % info.mb_width;
     let mby = addr / info.mb_width;
@@ -327,7 +350,10 @@ fn mv_census(layer: &MbLayer) -> (u32, bool) {
         MbKind::Inter8x16 => (lists(d[0]) + lists(d[1]), false),
         MbKind::Inter8x8 => (0..4).fold((0, false), |(n, bi), q| match layer.sub_shape[q] {
             SubMbShape::Direct => (n + 2, bi),
-            s => (n + s.count() as u32 * lists(d[q]), bi || (s != SubMbShape::S8x8 && d[q] == PRED_BI)),
+            s => (
+                n + s.count() as u32 * lists(d[q]),
+                bi || (s != SubMbShape::S8x8 && d[q] == PRED_BI),
+            ),
         }),
         _ => (0, false),
     }
@@ -420,7 +446,11 @@ pub fn derive<S: Sample>(
     }
 
     // The planes coded luma-style: luma alone, or all three in 4:4:4.
-    let planes = if cur.chroma == ChromaFormat::Yuv444 { 3 } else { 1 };
+    let planes = if cur.chroma == ChromaFormat::Yuv444 {
+        3
+    } else {
+        1
+    };
     // Partition boundaries inside the macroblock (inter): see MbInfo::part_edges.
     let mut part_edges = [0u16; 2];
     if intra {
@@ -430,14 +460,18 @@ pub fn derive<S: Sample>(
         }
         // Intra prediction modes are validated here so reconstruction
         // cannot fail on them.
-        if matches!(layer.kind, MbKind::I4x4 | MbKind::I8x8 | MbKind::Si) && layer.intra_modes.iter().any(|&m| m > 8) {
+        if matches!(layer.kind, MbKind::I4x4 | MbKind::I8x8 | MbKind::Si)
+            && layer.intra_modes.iter().any(|&m| m > 8)
+        {
             return Err(Error::bitstream("intra prediction mode out of range"));
         }
         if layer.kind == MbKind::I16x16 && layer.intra16_mode > 3 {
             return Err(Error::bitstream("Intra_16x16 prediction mode out of range"));
         }
         if layer.chroma_mode > 3 {
-            return Err(Error::bitstream("intra chroma prediction mode out of range"));
+            return Err(Error::bitstream(
+                "intra chroma prediction mode out of range",
+            ));
         }
     } else {
         part_edges = derive_motion(ctx, cur, info, nb, layer, refs, geom, scratch)?;
@@ -460,7 +494,10 @@ pub fn derive<S: Sample>(
         if layer.transform_8x8 {
             // Spread each 8x8's bit over its four 4x4s.
             let q = |bits: u16| -> u16 { if bits != 0 { 0x33 } else { 0 } };
-            q(nzm & 0x0033) | (q(nzm & 0x00cc) << 2) | (q(nzm & 0x3300) << 8) | (q(nzm & 0xcc00) << 10)
+            q(nzm & 0x0033)
+                | (q(nzm & 0x00cc) << 2)
+                | (q(nzm & 0x3300) << 8)
+                | (q(nzm & 0xcc00) << 10)
         } else {
             nzm
         }
@@ -547,7 +584,11 @@ pub fn reconstruct<S: Sample>(
     // The planes coded luma-style: luma alone, or all three in 4:4:4 (Cb
     // and Cr then use the luma prediction modes, transforms and scaling
     // lists, at their own QP).
-    let planes = if cur.chroma == ChromaFormat::Yuv444 { 3 } else { 1 };
+    let planes = if cur.chroma == ChromaFormat::Yuv444 {
+        3
+    } else {
+        1
+    };
     let plane_qp = [qp, qpc[0], qpc[1]];
     if intra {
         match layer.kind {
@@ -629,11 +670,22 @@ pub fn reconstruct<S: Sample>(
                     } else {
                         // Residual: DC transform then per-4x4 blocks.
                         let mut dc = layer.dc[p];
-                        luma_dc_transform(&mut dc, dq.scale4[p + ctx.scaling_plane][(qp % 6) as usize][0], qp);
+                        luma_dc_transform(
+                            &mut dc,
+                            dq.scale4[p + ctx.scaling_plane][(qp % 6) as usize][0],
+                            qp,
+                        );
                         for blk in 0..16 {
                             let (bx, by) = (blk % 4, blk / 4);
                             let boff = off + by * 4 * stride + bx * 4;
-                            residual4(dsp, &mut plane.data[boff..], stride, &layer.coef[p][blk * 16..blk * 16 + 16], Some(dc[blk]), max);
+                            residual4(
+                                dsp,
+                                &mut plane.data[boff..],
+                                stride,
+                                &layer.coef[p][blk * 16..blk * 16 + 16],
+                                Some(dc[blk]),
+                                max,
+                            );
                         }
                     }
                 }
@@ -666,7 +718,14 @@ pub fn reconstruct<S: Sample>(
                                     max,
                                 );
                             } else {
-                                residual4(dsp, &mut plane.data[boff..], stride, &layer.coef[p][raster * 16..raster * 16 + 16], None, max);
+                                residual4(
+                                    dsp,
+                                    &mut plane.data[boff..],
+                                    stride,
+                                    &layer.coef[p][raster * 16..raster * 16 + 16],
+                                    None,
+                                    max,
+                                );
                             }
                         }
                     }
@@ -703,7 +762,13 @@ pub fn reconstruct<S: Sample>(
                                     max,
                                 );
                             } else {
-                                residual8(dsp, &mut plane.data[boff..], stride, &layer.coef[p][blk8 * 64..blk8 * 64 + 64], max);
+                                residual8(
+                                    dsp,
+                                    &mut plane.data[boff..],
+                                    stride,
+                                    &layer.coef[p][blk8 * 64..blk8 * 64 + 64],
+                                    max,
+                                );
                             }
                         }
                     }
@@ -723,7 +788,14 @@ pub fn reconstruct<S: Sample>(
                     let (bx, by) = (raster % 4, raster / 4);
                     let av = intra_avail_4x4(info, ctx, nb, bx, by);
                     let boff = off + by * 4 * stride + bx * 4;
-                    predict_4x4(plane, boff, stride, layer.intra_modes[raster], av, bit_depth)?;
+                    predict_4x4(
+                        plane,
+                        boff,
+                        stride,
+                        layer.intra_modes[raster],
+                        av,
+                        bit_depth,
+                    )?;
                     super::sp::luma_block(
                         &mut plane.data[boff..],
                         stride,
@@ -787,7 +859,13 @@ pub fn reconstruct<S: Sample>(
                         r.copy_from_slice(&layer.coef[p][blk8 * 64..blk8 * 64 + 64]);
                         add_bypass(&mut plane.data[boff..], stride, &mut r, 8, None, max);
                     } else {
-                        residual8(dsp, &mut plane.data[boff..], stride, &layer.coef[p][blk8 * 64..blk8 * 64 + 64], max);
+                        residual8(
+                            dsp,
+                            &mut plane.data[boff..],
+                            stride,
+                            &layer.coef[p][blk8 * 64..blk8 * 64 + 64],
+                            max,
+                        );
                     }
                 }
             } else {
@@ -802,7 +880,14 @@ pub fn reconstruct<S: Sample>(
                         r.copy_from_slice(&layer.coef[p][raster * 16..raster * 16 + 16]);
                         add_bypass(&mut plane.data[boff..], stride, &mut r, 4, None, max);
                     } else {
-                        residual4(dsp, &mut plane.data[boff..], stride, &layer.coef[p][raster * 16..raster * 16 + 16], None, max);
+                        residual4(
+                            dsp,
+                            &mut plane.data[boff..],
+                            stride,
+                            &layer.coef[p][raster * 16..raster * 16 + 16],
+                            None,
+                            max,
+                        );
                     }
                 }
             }
@@ -812,7 +897,7 @@ pub fn reconstruct<S: Sample>(
         {
             add_chroma_residual(dsp, cur, layer, geom, qpc, dq, false, bypass);
         }
-        }
+    }
     Ok(())
 }
 
@@ -928,13 +1013,23 @@ fn predict_and_add_chroma<S: Sample>(
 /// The SP / SI chroma reconstruction of a 4:2:0 macroblock whose
 /// prediction is in the picture: both components through
 /// [`super::sp::chroma_420`] with the macroblock's raw chroma levels.
-fn sp_chroma<S: Sample>(ctx: &SliceCtx, cur: &mut Frame<S>, layer: &MbLayer, geom: MbGeom, qpc: [i32; 2], max: i32, switching: bool) {
+fn sp_chroma<S: Sample>(
+    ctx: &SliceCtx,
+    cur: &mut Frame<S>,
+    layer: &MbLayer,
+    geom: MbGeom,
+    qpc: [i32; 2],
+    max: i32,
+    switching: bool,
+) {
     if cur.chroma != ChromaFormat::Yuv420 {
         // 4:0:0 has none; other formats are refused with SP / SI upstream.
         return;
     }
     let cstride = cur.cb.stride * geom.step;
-    let coff = cur.cb.offset((geom.x / 16 * 8) as isize, geom.yc_dst as isize);
+    let coff = cur
+        .cb
+        .offset((geom.x / 16 * 8) as isize, geom.yc_dst as isize);
     for comp in 0..2 {
         let plane = if comp == 0 { &mut cur.cb } else { &mut cur.cr };
         super::sp::chroma_420(
@@ -1086,7 +1181,14 @@ fn add_chroma_residual<S: Sample>(
         for blk in 0..(mbh_c / 4) * 2 {
             let (bx, by) = (blk % 2, blk / 2);
             let boff = coff + by * 4 * cstride + bx * 4;
-            residual4(dsp, &mut plane.data[boff..], cstride, &layer.chroma_ac[comp][blk], Some(dc[blk]), max);
+            residual4(
+                dsp,
+                &mut plane.data[boff..],
+                cstride,
+                &layer.chroma_ac[comp][blk],
+                Some(dc[blk]),
+                max,
+            );
         }
     }
 }
@@ -1134,7 +1236,10 @@ fn derive_motion<S: Sample>(
     let jobs = &mut layer.jobs;
     jobs.len = 0;
     // The neighbouring motion every partition predicts from, gathered once.
-    let DeriveScratch { motion: cache, mb_motion: mot } = scratch;
+    let DeriveScratch {
+        motion: cache,
+        mb_motion: mot,
+    } = scratch;
     cache.gather(nb, cur, info);
     let cache = &*cache;
 
@@ -1142,8 +1247,8 @@ fn derive_motion<S: Sample>(
         MbKind::PSkip => {
             let mv = p_skip_mv(cache, mot);
             fill_motion(
-                        mot,
-                        0,
+                mot,
+                0,
                 0,
                 0,
                 16,
@@ -1154,7 +1259,18 @@ fn derive_motion<S: Sample>(
             jobs.push((0, 0, 16, 16, 0, mv, -1, Mv::ZERO));
         }
         MbKind::BSkip | MbKind::BDirect16x16 => {
-            direct_partitions(ctx, cur, info, nb, refs, cache, mot, &[0, 1, 2, 3], jobs, geom)?;
+            direct_partitions(
+                ctx,
+                cur,
+                info,
+                nb,
+                refs,
+                cache,
+                mot,
+                &[0, 1, 2, 3],
+                jobs,
+                geom,
+            )?;
         }
         MbKind::Inter16x16 | MbKind::Inter16x8 | MbKind::Inter8x16 => {
             let parts = mb_partitions(layer.kind);
@@ -1226,8 +1342,8 @@ fn derive_motion<S: Sample>(
                         let mvd = layer.mvd[(y / 4) * 4 + x / 4].mvd[list];
                         let mv = Mv::new(mvp.x.wrapping_add(mvd.x), mvp.y.wrapping_add(mvd.y));
                         fill_motion(
-                        mot,
-                        list,
+                            mot,
+                            list,
                             x,
                             y,
                             w,
@@ -1273,7 +1389,13 @@ fn derive_motion<S: Sample>(
 /// bilinear chroma: 1 below, in luma rows), then predict. A field
 /// macroblock of an MBAFF frame reads the fields of the frame list (index
 /// >> 1, parity from index & 1) in field coordinates.
-fn predict_jobs<S: Sample>(cur: &mut Frame<S>, layer: &MbLayer, refs: &SliceRefs<S>, geom: MbGeom, mc: &mut super::inter::McScratch<S>) {
+fn predict_jobs<S: Sample>(
+    cur: &mut Frame<S>,
+    layer: &MbLayer,
+    refs: &SliceRefs<S>,
+    geom: MbGeom,
+    mc: &mut super::inter::McScratch<S>,
+) {
     let py = geom.y_pic;
     let jobs = &layer.jobs;
     let field_mb = geom.step == 2;
@@ -1297,7 +1419,9 @@ fn predict_jobs<S: Sample>(cur: &mut Frame<S>, layer: &MbLayer, refs: &SliceRefs
             fr[list] = Some((refs.frames[list][fi], mv, rpar));
         }
         let weighting = refs.weighting(r0, r1, field_mb, geom.parity);
-        predict_partition(&refs.dsp, cur, geom, x, y, w, h, fr[0], fr[1], weighting, mc);
+        predict_partition(
+            &refs.dsp, cur, geom, x, y, w, h, fr[0], fr[1], weighting, mc,
+        );
     }
 }
 
@@ -1733,8 +1857,8 @@ fn direct_partitions<S: Sample>(
                     )
                 };
                 fill_motion(
-                        mot,
-                        0,
+                    mot,
+                    0,
                     x,
                     y,
                     w,
@@ -1742,8 +1866,8 @@ fn direct_partitions<S: Sample>(
                     refs.motion_of(0, ref0, mv0, field_mb, mb_parity),
                 );
                 fill_motion(
-                        mot,
-                        1,
+                    mot,
+                    1,
                     x,
                     y,
                     w,
@@ -1777,7 +1901,14 @@ fn direct_partitions<S: Sample>(
 /// (`dc`: an already-scaled DC replacing position 0, or `NO_DC`).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn residual4<S: Sample>(dsp: &H264Dsp<S>, dst: &mut [S], stride: usize, coefs: &[i32], dc: Option<i32>, max: i32) {
+fn residual4<S: Sample>(
+    dsp: &H264Dsp<S>,
+    dst: &mut [S],
+    stride: usize,
+    coefs: &[i32],
+    dc: Option<i32>,
+    max: i32,
+) {
     let coefs: &[i32; 16] = coefs.try_into().expect("16 coefficients");
     (dsp.residual4)(dst, stride, coefs, dc.unwrap_or(NO_DC), max);
 }

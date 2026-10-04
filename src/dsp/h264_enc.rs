@@ -57,9 +57,11 @@ pub type Hadamard2x4Fn = fn(dc: &mut [i32; 8]);
 /// position), `qbits` and `offset` the shift and rounding offset. Returns
 /// the number of nonzero levels, which mode decision wants and which costs
 /// nothing to count here.
-pub type Quant4Fn = fn(coeffs: &[i32; 16], levels: &mut [i16; 16], mf: &[i32; 16], qbits: u32, offset: i32) -> u32;
+pub type Quant4Fn =
+    fn(coeffs: &[i32; 16], levels: &mut [i16; 16], mf: &[i32; 16], qbits: u32, offset: i32) -> u32;
 /// The same for an 8x8 block.
-pub type Quant8Fn = fn(coeffs: &[i32; 64], levels: &mut [i16; 64], mf: &[i32; 64], qbits: u32, offset: i32) -> u32;
+pub type Quant8Fn =
+    fn(coeffs: &[i32; 64], levels: &mut [i16; 64], mf: &[i32; 64], qbits: u32, offset: i32) -> u32;
 
 /// The encode-side kernel table, filled at run time from what the CPU has,
 /// exactly as [`super::h264::H264Dsp`] is. Kept separate from it because a
@@ -270,7 +272,13 @@ fn hadamard2x4_scalar(dc: &mut [i32; 8]) {
 // Quantisation
 // ----------------------------------------------------------------------
 
-pub(crate) fn quant4_scalar(coeffs: &[i32; 16], levels: &mut [i16; 16], mf: &[i32; 16], qbits: u32, offset: i32) -> u32 {
+pub(crate) fn quant4_scalar(
+    coeffs: &[i32; 16],
+    levels: &mut [i16; 16],
+    mf: &[i32; 16],
+    qbits: u32,
+    offset: i32,
+) -> u32 {
     let mut nz = 0;
     for i in 0..16 {
         let c = coeffs[i];
@@ -282,7 +290,13 @@ pub(crate) fn quant4_scalar(coeffs: &[i32; 16], levels: &mut [i16; 16], mf: &[i3
     nz
 }
 
-pub(crate) fn quant8_scalar(coeffs: &[i32; 64], levels: &mut [i16; 64], mf: &[i32; 64], qbits: u32, offset: i32) -> u32 {
+pub(crate) fn quant8_scalar(
+    coeffs: &[i32; 64],
+    levels: &mut [i16; 64],
+    mf: &[i32; 64],
+    qbits: u32,
+    offset: i32,
+) -> u32 {
     let mut nz = 0;
     for i in 0..64 {
         let c = coeffs[i];
@@ -388,7 +402,9 @@ mod tests {
     }
 
     fn lcg(s: &mut u64) -> i32 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 33) & 0x1ff) as i32 - 255
     }
 

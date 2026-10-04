@@ -31,8 +31,8 @@
 
 use std::arch::x86_64::*;
 
-use super::h264::{H264Dsp, NO_DC, PRED_STRIDE};
 use super::h264::simd16::{DEEPEST, normal_in_range, strong_in_range, weights_in_range};
+use super::h264::{H264Dsp, NO_DC, PRED_STRIDE};
 
 /// Replace the entries of `d` that 256-bit lanes improve.
 pub fn install(d: &mut H264Dsp<u16>) {
@@ -171,14 +171,23 @@ unsafe fn j_narrow(w: &[__m256i; 6], maxv: __m256i) -> __m256i {
         let c45 = _mm256_set1_epi32(pair(-5, 1));
         let round = _mm256_set1_epi32(512 + 32 * 16384);
         let lo = _mm256_add_epi32(
-            _mm256_add_epi32(_mm256_madd_epi16(_mm256_unpacklo_epi16(r0, r1), c01), _mm256_madd_epi16(_mm256_unpacklo_epi16(r2, r3), c23)),
+            _mm256_add_epi32(
+                _mm256_madd_epi16(_mm256_unpacklo_epi16(r0, r1), c01),
+                _mm256_madd_epi16(_mm256_unpacklo_epi16(r2, r3), c23),
+            ),
             _mm256_add_epi32(_mm256_madd_epi16(_mm256_unpacklo_epi16(r4, r5), c45), round),
         );
         let hi = _mm256_add_epi32(
-            _mm256_add_epi32(_mm256_madd_epi16(_mm256_unpackhi_epi16(r0, r1), c01), _mm256_madd_epi16(_mm256_unpackhi_epi16(r2, r3), c23)),
+            _mm256_add_epi32(
+                _mm256_madd_epi16(_mm256_unpackhi_epi16(r0, r1), c01),
+                _mm256_madd_epi16(_mm256_unpackhi_epi16(r2, r3), c23),
+            ),
             _mm256_add_epi32(_mm256_madd_epi16(_mm256_unpackhi_epi16(r4, r5), c45), round),
         );
-        clip(_mm256_packs_epi32(_mm256_srai_epi32(lo, 10), _mm256_srai_epi32(hi, 10)), maxv)
+        clip(
+            _mm256_packs_epi32(_mm256_srai_epi32(lo, 10), _mm256_srai_epi32(hi, 10)),
+            maxv,
+        )
     }
 }
 
@@ -198,8 +207,14 @@ unsafe fn tap6_wide(p: *const u16, step: usize) -> Wide {
         let k = _mm256_set1_epi32(pair(20, -5));
         let zero = _mm256_setzero_si256();
         [
-            _mm256_add_epi32(_mm256_madd_epi16(_mm256_unpacklo_epi16(t, u), k), _mm256_unpacklo_epi16(v, zero)),
-            _mm256_add_epi32(_mm256_madd_epi16(_mm256_unpackhi_epi16(t, u), k), _mm256_unpackhi_epi16(v, zero)),
+            _mm256_add_epi32(
+                _mm256_madd_epi16(_mm256_unpacklo_epi16(t, u), k),
+                _mm256_unpacklo_epi16(v, zero),
+            ),
+            _mm256_add_epi32(
+                _mm256_madd_epi16(_mm256_unpackhi_epi16(t, u), k),
+                _mm256_unpackhi_epi16(v, zero),
+            ),
         ]
     }
 }
@@ -209,13 +224,26 @@ unsafe fn tap6_wide(p: *const u16, step: usize) -> Wide {
 unsafe fn half_wide(v: Wide, maxv: __m256i) -> __m256i {
     unsafe {
         let r = _mm256_set1_epi32(16);
-        clip(_mm256_packs_epi32(_mm256_srai_epi32(_mm256_add_epi32(v[0], r), 5), _mm256_srai_epi32(_mm256_add_epi32(v[1], r), 5)), maxv)
+        clip(
+            _mm256_packs_epi32(
+                _mm256_srai_epi32(_mm256_add_epi32(v[0], r), 5),
+                _mm256_srai_epi32(_mm256_add_epi32(v[1], r), 5),
+            ),
+            maxv,
+        )
     }
 }
 
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn tap6_i32(r0: __m256i, r1: __m256i, r2: __m256i, r3: __m256i, r4: __m256i, r5: __m256i) -> __m256i {
+unsafe fn tap6_i32(
+    r0: __m256i,
+    r1: __m256i,
+    r2: __m256i,
+    r3: __m256i,
+    r4: __m256i,
+    r5: __m256i,
+) -> __m256i {
     let t = _mm256_add_epi32(r2, r3);
     let u = _mm256_add_epi32(r1, r4);
     let v = _mm256_add_epi32(r0, r5);
@@ -229,12 +257,27 @@ unsafe fn tap6_i32(r0: __m256i, r1: __m256i, r2: __m256i, r3: __m256i, r4: __m25
 unsafe fn j_wide(w: &[Wide; 6], maxv: __m256i) -> __m256i {
     unsafe {
         let round = _mm256_set1_epi32(512);
-        let half = |k: usize| _mm256_srai_epi32(_mm256_add_epi32(tap6_i32(w[0][k], w[1][k], w[2][k], w[3][k], w[4][k], w[5][k]), round), 10);
+        let half = |k: usize| {
+            _mm256_srai_epi32(
+                _mm256_add_epi32(
+                    tap6_i32(w[0][k], w[1][k], w[2][k], w[3][k], w[4][k], w[5][k]),
+                    round,
+                ),
+                10,
+            )
+        };
         clip(_mm256_packs_epi32(half(0), half(1)), maxv)
     }
 }
 
-fn qpel<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+fn qpel<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     // A sixteen-lane load from column 0 reads column 15, +5 for the taps.
     let need = (h + 5 - 1) * stride + 21;
     if src.len() < need || dst.len() < h * PRED_STRIDE || w > 16 || !(1..=DEEPEST).contains(&max) {
@@ -250,7 +293,13 @@ fn qpel<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: 
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn qpel_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, h: usize, max: i32) {
+unsafe fn qpel_narrow<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    h: usize,
+    max: i32,
+) {
     if matches!((XF, YF), (2, 2) | (2, 1) | (2, 3) | (1, 2) | (3, 2)) {
         return unsafe { qpel_centre_narrow::<XF, YF>(dst, src, stride, h, max) };
     }
@@ -284,7 +333,13 @@ unsafe fn qpel_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, h: usize, max: i32) {
+unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    h: usize,
+    max: i32,
+) {
     unsafe {
         let s = src.as_ptr();
         let maxv = _mm256_set1_epi16(max as i16);
@@ -310,7 +365,13 @@ unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], 
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn qpel_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, h: usize, max: i32) {
+unsafe fn qpel_wide<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    h: usize,
+    max: i32,
+) {
     if matches!((XF, YF), (2, 2) | (2, 1) | (2, 3) | (1, 2) | (3, 2)) {
         return unsafe { qpel_centre_wide::<XF, YF>(dst, src, stride, h, max) };
     }
@@ -343,7 +404,13 @@ unsafe fn qpel_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u1
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, h: usize, max: i32) {
+unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    h: usize,
+    max: i32,
+) {
     unsafe {
         let s = src.as_ptr();
         let maxv = _mm256_set1_epi16(max as i16);
@@ -373,7 +440,12 @@ unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(dst: &mut [u16], sr
 // ----------------------------------------------------------------------
 
 fn avg(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h: usize) {
-    assert!(h == 0 || ((h - 1) * stride + w <= dst.len() && h * PRED_STRIDE <= a.len().min(b.len()) && w <= 16));
+    assert!(
+        h == 0
+            || ((h - 1) * stride + w <= dst.len()
+                && h * PRED_STRIDE <= a.len().min(b.len())
+                && w <= 16)
+    );
     unsafe { avg_impl(dst.as_mut_ptr(), stride, a.as_ptr(), b.as_ptr(), w, h) }
 }
 
@@ -381,7 +453,10 @@ fn avg(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h: usize)
 unsafe fn avg_impl(dst: *mut u16, stride: usize, a: *const u16, b: *const u16, w: usize, h: usize) {
     unsafe {
         for y in 0..h {
-            let v = _mm256_avg_epu16(load16(a.add(y * PRED_STRIDE)), load16(b.add(y * PRED_STRIDE)));
+            let v = _mm256_avg_epu16(
+                load16(a.add(y * PRED_STRIDE)),
+                load16(b.add(y * PRED_STRIDE)),
+            );
             store_n(dst.add(y * stride), v, w);
         }
     }
@@ -394,16 +469,48 @@ fn combine_fits(dst: &[u16], stride: usize, src: &[u16], w: usize, h: usize) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_uni(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, max: i32) {
+fn weighted_uni(
+    dst: &mut [u16],
+    stride: usize,
+    src: &[u16],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+) {
     if !weights_in_range(log_wd, [wt, 0], [o, 0], max) || !combine_fits(dst, stride, src, w, h) {
         return (H264Dsp::<u16>::SCALAR.weighted_uni)(dst, stride, src, w, h, log_wd, wt, o, max);
     }
-    unsafe { weighted_uni_impl(dst.as_mut_ptr(), stride, src.as_ptr(), w, h, log_wd, wt, o, max) }
+    unsafe {
+        weighted_uni_impl(
+            dst.as_mut_ptr(),
+            stride,
+            src.as_ptr(),
+            w,
+            h,
+            log_wd,
+            wt,
+            o,
+            max,
+        )
+    }
 }
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn weighted_uni_impl(dst: *mut u16, stride: usize, src: *const u16, w: usize, h: usize, log_wd: i32, wt: i32, o: i32, max: i32) {
+unsafe fn weighted_uni_impl(
+    dst: *mut u16,
+    stride: usize,
+    src: *const u16,
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+) {
     unsafe {
         let wv = _mm256_set1_epi16(wt as i16);
         let round = _mm256_set1_epi32(if log_wd >= 1 { 1 << (log_wd - 1) } else { 0 });
@@ -414,24 +521,77 @@ unsafe fn weighted_uni_impl(dst: *mut u16, stride: usize, src: *const u16, w: us
             let s = load16(src.add(y * PRED_STRIDE));
             let lo = _mm256_mullo_epi16(s, wv);
             let hi = _mm256_mulhi_epi16(s, wv);
-            let q = |p: __m256i| _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(p, round), sh), ov);
-            let v = clip(_mm256_packs_epi32(q(_mm256_unpacklo_epi16(lo, hi)), q(_mm256_unpackhi_epi16(lo, hi))), maxv);
+            let q =
+                |p: __m256i| _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(p, round), sh), ov);
+            let v = clip(
+                _mm256_packs_epi32(
+                    q(_mm256_unpacklo_epi16(lo, hi)),
+                    q(_mm256_unpackhi_epi16(lo, hi)),
+                ),
+                maxv,
+            );
             store_n(dst.add(y * stride), v, w);
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32) {
-    if !weights_in_range(log_wd, [w0, w1], [o0, o1], max) || !combine_fits(dst, stride, a, w, h) || !combine_fits(dst, stride, b, w, h) {
-        return (H264Dsp::<u16>::SCALAR.weighted_bi)(dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1, max);
+fn weighted_bi(
+    dst: &mut [u16],
+    stride: usize,
+    a: &[u16],
+    b: &[u16],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+) {
+    if !weights_in_range(log_wd, [w0, w1], [o0, o1], max)
+        || !combine_fits(dst, stride, a, w, h)
+        || !combine_fits(dst, stride, b, w, h)
+    {
+        return (H264Dsp::<u16>::SCALAR.weighted_bi)(
+            dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1, max,
+        );
     }
-    unsafe { weighted_bi_impl(dst.as_mut_ptr(), stride, a.as_ptr(), b.as_ptr(), w, h, log_wd, w0, w1, o0, o1, max) }
+    unsafe {
+        weighted_bi_impl(
+            dst.as_mut_ptr(),
+            stride,
+            a.as_ptr(),
+            b.as_ptr(),
+            w,
+            h,
+            log_wd,
+            w0,
+            w1,
+            o0,
+            o1,
+            max,
+        )
+    }
 }
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn weighted_bi_impl(dst: *mut u16, stride: usize, a: *const u16, b: *const u16, w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32) {
+unsafe fn weighted_bi_impl(
+    dst: *mut u16,
+    stride: usize,
+    a: *const u16,
+    b: *const u16,
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+) {
     unsafe {
         let wv = _mm256_set1_epi32(pair(w0 as i16, w1 as i16));
         let round = _mm256_set1_epi32(1 << log_wd);
@@ -441,8 +601,19 @@ unsafe fn weighted_bi_impl(dst: *mut u16, stride: usize, a: *const u16, b: *cons
         for y in 0..h {
             let va = load16(a.add(y * PRED_STRIDE));
             let vb = load16(b.add(y * PRED_STRIDE));
-            let q = |v: __m256i| _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(_mm256_madd_epi16(v, wv), round), sh), off);
-            let v = clip(_mm256_packs_epi32(q(_mm256_unpacklo_epi16(va, vb)), q(_mm256_unpackhi_epi16(va, vb))), maxv);
+            let q = |v: __m256i| {
+                _mm256_add_epi32(
+                    _mm256_sra_epi32(_mm256_add_epi32(_mm256_madd_epi16(v, wv), round), sh),
+                    off,
+                )
+            };
+            let v = clip(
+                _mm256_packs_epi32(
+                    q(_mm256_unpacklo_epi16(va, vb)),
+                    q(_mm256_unpackhi_epi16(va, vb)),
+                ),
+                maxv,
+            );
             store_n(dst.add(y * stride), v, w);
         }
     }
@@ -464,20 +635,35 @@ type LumaLines = [__m256i; 8];
 /// bS < 4 luma filter on sixteen lines (8.7.2.3), in place.
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn luma_filter_normal(v: &mut LumaLines, alpha: i32, beta: i32, tc0v: __m256i, maxv: __m256i) {
+unsafe fn luma_filter_normal(
+    v: &mut LumaLines,
+    alpha: i32,
+    beta: i32,
+    tc0v: __m256i,
+    maxv: __m256i,
+) {
     unsafe {
         let [_, p2, p1, p0, q0, q1, q2, _] = *v;
         let alpha = _mm256_set1_epi16(alpha as i16);
         let beta = _mm256_set1_epi16(beta as i16);
         let zero = _mm256_setzero_si256();
         let bs_on = _mm256_cmpgt_epi16(tc0v, _mm256_set1_epi16(-1));
-        let mask = _mm256_and_si256(_mm256_and_si256(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), _mm256_and_si256(diff_lt(q1, q0, beta), bs_on));
+        let mask = _mm256_and_si256(
+            _mm256_and_si256(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+            _mm256_and_si256(diff_lt(q1, q0, beta), bs_on),
+        );
         let ap = diff_lt(p2, p0, beta);
         let aq = diff_lt(q2, q0, beta);
         let tc = _mm256_sub_epi16(_mm256_sub_epi16(tc0v, ap), aq);
         // ((q0 − p0) + ((p1 − q1 + 4) >> 2)) >> 1: the standard's delta, inside i16.
         let d = _mm256_srai_epi16(
-            _mm256_add_epi16(_mm256_sub_epi16(q0, p0), _mm256_srai_epi16(_mm256_add_epi16(_mm256_sub_epi16(p1, q1), _mm256_set1_epi16(4)), 2)),
+            _mm256_add_epi16(
+                _mm256_sub_epi16(q0, p0),
+                _mm256_srai_epi16(
+                    _mm256_add_epi16(_mm256_sub_epi16(p1, q1), _mm256_set1_epi16(4)),
+                    2,
+                ),
+            ),
             1,
         );
         let d = _mm256_min_epi16(_mm256_max_epi16(d, _mm256_sub_epi16(zero, tc)), tc);
@@ -485,10 +671,16 @@ unsafe fn luma_filter_normal(v: &mut LumaLines, alpha: i32, beta: i32, tc0v: __m
         let nq0 = _mm256_sub_epi16(q0, d);
         let avg = _mm256_avg_epu16(p0, q0);
         let ntc0 = _mm256_sub_epi16(zero, tc0v);
-        let dp1 = _mm256_srai_epi16(_mm256_sub_epi16(_mm256_add_epi16(p2, avg), _mm256_slli_epi16(p1, 1)), 1);
+        let dp1 = _mm256_srai_epi16(
+            _mm256_sub_epi16(_mm256_add_epi16(p2, avg), _mm256_slli_epi16(p1, 1)),
+            1,
+        );
         let dp1 = _mm256_min_epi16(_mm256_max_epi16(dp1, ntc0), tc0v);
         let np1 = _mm256_add_epi16(p1, _mm256_and_si256(dp1, ap));
-        let dq1 = _mm256_srai_epi16(_mm256_sub_epi16(_mm256_add_epi16(q2, avg), _mm256_slli_epi16(q1, 1)), 1);
+        let dq1 = _mm256_srai_epi16(
+            _mm256_sub_epi16(_mm256_add_epi16(q2, avg), _mm256_slli_epi16(q1, 1)),
+            1,
+        );
         let dq1 = _mm256_min_epi16(_mm256_max_epi16(dq1, ntc0), tc0v);
         let nq1 = _mm256_add_epi16(q1, _mm256_and_si256(dq1, aq));
         v[2] = _mm256_blendv_epi8(p1, np1, mask);
@@ -506,7 +698,10 @@ unsafe fn luma_filter_intra(v: &mut LumaLines, alpha: i32, beta: i32) {
         let [p3, p2, p1, p0, q0, q1, q2, q3] = *v;
         let alphav = _mm256_set1_epi16(alpha as i16);
         let beta = _mm256_set1_epi16(beta as i16);
-        let mask = _mm256_and_si256(_mm256_and_si256(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)), diff_lt(q1, q0, beta));
+        let mask = _mm256_and_si256(
+            _mm256_and_si256(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)),
+            diff_lt(q1, q0, beta),
+        );
         let strong = diff_lt(p0, q0, _mm256_set1_epi16(((alpha >> 2) + 2) as i16));
         let ap = _mm256_and_si256(diff_lt(p2, p0, beta), strong);
         let aq = _mm256_and_si256(diff_lt(q2, q0, beta), strong);
@@ -518,11 +713,17 @@ unsafe fn luma_filter_intra(v: &mut LumaLines, alpha: i32, beta: i32) {
         let wp0 = _mm256_srli_epi16(add(add(dbl(p1), p0), add(q1, two)), 2);
         let wq0 = _mm256_srli_epi16(add(add(dbl(q1), q0), add(p1, two)), 2);
         let p0q0 = add(p0, q0);
-        let sp0 = _mm256_srli_epi16(add(_mm256_srli_epi16(add(add(p2, q1), four), 1), add(p1, p0q0)), 2);
+        let sp0 = _mm256_srli_epi16(
+            add(_mm256_srli_epi16(add(add(p2, q1), four), 1), add(p1, p0q0)),
+            2,
+        );
         let tp = add(add(p2, p1), add(p0q0, two));
         let sp1 = _mm256_srli_epi16(tp, 2);
         let sp2 = _mm256_srli_epi16(add(add(_mm256_srli_epi16(tp, 1), one), add(p3, p2)), 2);
-        let sq0 = _mm256_srli_epi16(add(_mm256_srli_epi16(add(add(q2, p1), four), 1), add(q1, p0q0)), 2);
+        let sq0 = _mm256_srli_epi16(
+            add(_mm256_srli_epi16(add(add(q2, p1), four), 1), add(q1, p0q0)),
+            2,
+        );
         let tq = add(add(q2, q1), add(p0q0, two));
         let sq1 = _mm256_srli_epi16(tq, 2);
         let sq2 = _mm256_srli_epi16(add(add(_mm256_srli_epi16(tq, 1), one), add(q3, q2)), 2);
@@ -546,7 +747,24 @@ unsafe fn luma_filter_intra(v: &mut LumaLines, alpha: i32, beta: i32) {
 #[inline]
 unsafe fn tc0_luma(tc0: &[i16; 4]) -> __m256i {
     let t = |k: usize| tc0[k];
-    _mm256_setr_epi16(t(0), t(0), t(0), t(0), t(1), t(1), t(1), t(1), t(2), t(2), t(2), t(2), t(3), t(3), t(3), t(3))
+    _mm256_setr_epi16(
+        t(0),
+        t(0),
+        t(0),
+        t(0),
+        t(1),
+        t(1),
+        t(1),
+        t(1),
+        t(2),
+        t(2),
+        t(2),
+        t(2),
+        t(3),
+        t(3),
+        t(3),
+        t(3),
+    )
 }
 
 /// Transpose eight 8-lane rows.
@@ -594,7 +812,9 @@ unsafe fn load_transposed_16x8(data: *const u16, stride: usize) -> LumaLines {
         }
         transpose8(&mut top);
         transpose8(&mut bottom);
-        std::array::from_fn(|k| _mm256_inserti128_si256(_mm256_castsi128_si256(top[k]), bottom[k], 1))
+        std::array::from_fn(|k| {
+            _mm256_inserti128_si256(_mm256_castsi128_si256(top[k]), bottom[k], 1)
+        })
     }
 }
 
@@ -614,7 +834,15 @@ unsafe fn store_transposed_16x8(data: *mut u16, stride: usize, v: &LumaLines) {
     }
 }
 
-fn deblock_luma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_luma_v(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -626,15 +854,35 @@ fn deblock_luma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta:
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_luma_v_impl(data: *mut u16, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+unsafe fn deblock_luma_v_impl(
+    data: *mut u16,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     unsafe {
         let mut v = load_transposed_16x8(data, stride);
-        luma_filter_normal(&mut v, alpha, beta, tc0_luma(tc0), _mm256_set1_epi16(max as i16));
+        luma_filter_normal(
+            &mut v,
+            alpha,
+            beta,
+            tc0_luma(tc0),
+            _mm256_set1_epi16(max as i16),
+        );
         store_transposed_16x8(data, stride, &v);
     }
 }
 
-fn deblock_luma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_luma_v_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
         return (H264Dsp::<u16>::SCALAR.deblock_luma_v_intra)(data, off, stride, alpha, beta, max);
     }
@@ -651,7 +899,15 @@ unsafe fn deblock_luma_v_intra_impl(data: *mut u16, stride: usize, alpha: i32, b
     }
 }
 
-fn deblock_luma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_luma_h(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -663,12 +919,25 @@ fn deblock_luma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta:
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_luma_h_impl(data: *mut u16, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+unsafe fn deblock_luma_h_impl(
+    data: *mut u16,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     unsafe {
         let zero = _mm256_setzero_si256();
         let ld = |k: isize| load16(data.offset(k * stride as isize));
         let mut v: LumaLines = [zero, ld(-3), ld(-2), ld(-1), ld(0), ld(1), ld(2), zero];
-        luma_filter_normal(&mut v, alpha, beta, tc0_luma(tc0), _mm256_set1_epi16(max as i16));
+        luma_filter_normal(
+            &mut v,
+            alpha,
+            beta,
+            tc0_luma(tc0),
+            _mm256_set1_epi16(max as i16),
+        );
         store16(data.offset(-2 * stride as isize), v[2]);
         store16(data.offset(-(stride as isize)), v[3]);
         store16(data, v[4]);
@@ -676,7 +945,14 @@ unsafe fn deblock_luma_h_impl(data: *mut u16, stride: usize, alpha: i32, beta: i
     }
 }
 
-fn deblock_luma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_luma_h_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
         return (H264Dsp::<u16>::SCALAR.deblock_luma_h_intra)(data, off, stride, alpha, beta, max);
     }
@@ -705,7 +981,12 @@ unsafe fn deblock_luma_h_intra_impl(data: *mut u16, stride: usize, alpha: i32, b
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn transpose8_32(r: &[__m256i; 8]) -> [__m256i; 8] {
-    let t = |i: usize| (_mm256_unpacklo_epi32(r[i], r[i + 1]), _mm256_unpackhi_epi32(r[i], r[i + 1]));
+    let t = |i: usize| {
+        (
+            _mm256_unpacklo_epi32(r[i], r[i + 1]),
+            _mm256_unpackhi_epi32(r[i], r[i + 1]),
+        )
+    };
     let (t0, t1) = t(0);
     let (t2, t3) = t(2);
     let (t4, t5) = t(4);
@@ -756,7 +1037,16 @@ unsafe fn idct8_pass(d: &[__m256i; 8]) -> [__m256i; 8] {
     let b7 = sub(a7, sh2(a1));
     let b3 = add(a3, sh2(a5));
     let b5 = sub(sh2(a3), a5);
-    [add(b0, b7), add(b2, b5), add(b4, b3), add(b6, b1), sub(b6, b1), sub(b4, b3), sub(b2, b5), sub(b0, b7)]
+    [
+        add(b0, b7),
+        add(b2, b5),
+        add(b4, b3),
+        add(b6, b1),
+        sub(b6, b1),
+        sub(b4, b3),
+        sub(b2, b5),
+        sub(b0, b7),
+    ]
 }
 
 /// The transform of eight rows of i32 coefficients, added to `dst`: rows
@@ -788,7 +1078,9 @@ fn idct8_add(dst: &mut [u16], stride: usize, coeffs: &[i16; 64], max: i32) {
 #[target_feature(enable = "avx2")]
 unsafe fn idct8_add_impl(dst: *mut u16, stride: usize, c: &[i16; 64], max: i32) {
     unsafe {
-        let rows: [__m256i; 8] = std::array::from_fn(|i| _mm256_cvtepi16_epi32(_mm_loadu_si128(c.as_ptr().add(8 * i) as *const __m128i)));
+        let rows: [__m256i; 8] = std::array::from_fn(|i| {
+            _mm256_cvtepi16_epi32(_mm_loadu_si128(c.as_ptr().add(8 * i) as *const __m128i))
+        });
         idct8_rows(dst, stride, &rows, max);
     }
 }
@@ -805,7 +1097,8 @@ fn residual8(dst: &mut [u16], stride: usize, coefs: &[i32; 64], max: i32) {
 unsafe fn residual8_impl(dst: *mut u16, stride: usize, coefs: &[i32; 64], max: i32) {
     unsafe {
         let p = coefs.as_ptr();
-        let rows: [__m256i; 8] = std::array::from_fn(|i| _mm256_loadu_si256(p.add(8 * i) as *const __m256i));
+        let rows: [__m256i; 8] =
+            std::array::from_fn(|i| _mm256_loadu_si256(p.add(8 * i) as *const __m256i));
         let mut ac = _mm256_andnot_si256(_mm256_setr_epi32(-1, 0, 0, 0, 0, 0, 0, 0), rows[0]);
         for r in &rows[1..] {
             ac = _mm256_or_si256(ac, *r);
@@ -814,7 +1107,8 @@ unsafe fn residual8_impl(dst: *mut u16, stride: usize, coefs: &[i32; 64], max: i
             if coefs[0] != 0 {
                 // DC only: `(dc + 32) >> 6` saturated to i16, as the 128-bit
                 // rung adds it (and exact after the clip for the same reason).
-                let v = _mm_set1_epi16((coefs[0].wrapping_add(32) >> 6).clamp(-32768, 32767) as i16);
+                let v =
+                    _mm_set1_epi16((coefs[0].wrapping_add(32) >> 6).clamp(-32768, 32767) as i16);
                 let maxv = _mm_set1_epi16(max as i16);
                 for i in 0..8 {
                     let q = dst.add(i * stride);

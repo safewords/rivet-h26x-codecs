@@ -40,7 +40,10 @@ struct Rng(u64);
 
 impl Rng {
     fn next(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) as u32
     }
 
@@ -95,15 +98,22 @@ fn whole(v: &[u16]) -> Vec<u16> {
 /// The `w x h` block of a [`PRED_STRIDE`]-strided scratch buffer: the SIMD
 /// kernels may write the rest of each row.
 fn block(v: &[u16], w: usize, h: usize) -> Vec<u16> {
-    (0..h).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].iter().copied()).collect()
+    (0..h)
+        .flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].iter().copied())
+        .collect()
 }
 
 /// Every H.264 sweep, at every depth.
 pub fn h264(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
-    Ok(h264_interp(tables)? + h264_chroma(tables)? + h264_combine(tables)? + h264_deblock(tables)? + h264_transforms(tables)?)
+    Ok(h264_interp(tables)?
+        + h264_chroma(tables)?
+        + h264_combine(tables)?
+        + h264_deblock(tables)?
+        + h264_transforms(tables)?)
 }
 
-const LUMA_SIZES: [(usize, usize); 7] = [(4, 4), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16)];
+const LUMA_SIZES: [(usize, usize); 7] =
+    [(4, 4), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16)];
 
 /// A `64 x 64` plane for the luma interpolation sweep, by `mode`: uniform
 /// samples (0); samples on the rails, 0 or `max` (1); and a pattern that
@@ -169,7 +179,11 @@ pub fn h264_interp(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
                             &mut n,
                             |d, buf| (d.qpel[pos])(buf, src, 64, w, h, max),
                             |v| block(v, w, h),
-                            || format!("qpel position {pos}, {w}x{h}, {bd} bits, plane {mode} read from origin {o}"),
+                            || {
+                                format!(
+                                    "qpel position {pos}, {w}x{h}, {bd} bits, plane {mode} read from origin {o}"
+                                )
+                            },
                         )?;
                     }
                 }
@@ -179,7 +193,16 @@ pub fn h264_interp(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
     Ok(n)
 }
 
-const CHROMA_SIZES: [(usize, usize); 8] = [(2, 2), (2, 4), (4, 2), (4, 4), (4, 8), (8, 4), (8, 8), (8, 16)];
+const CHROMA_SIZES: [(usize, usize); 8] = [
+    (2, 2),
+    (2, 4),
+    (4, 2),
+    (4, 4),
+    (4, 8),
+    (8, 4),
+    (8, 8),
+    (8, 16),
+];
 
 /// A `64 x 64` plane for the chroma sweep, by `mode`: uniform (0); the rails
 /// (1); all `max`, the largest weighted sum (2); rows alternately of at most
@@ -248,12 +271,28 @@ pub fn h264_chroma(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
 
 /// `(log_wd, w, o)` for weighted uni-prediction, `o` in 8-bit units: the
 /// 8-bit tests' rows and the corners of the explicit ranges.
-const UNI: [(i32, i32, i32); 8] = [(6, 64, 0), (0, 1, 3), (5, -20, -7), (7, 127, 127), (2, 33, -128), (0, 127, 127), (0, -128, -128), (7, -128, 127)];
+const UNI: [(i32, i32, i32); 8] = [
+    (6, 64, 0),
+    (0, 1, 3),
+    (5, -20, -7),
+    (7, 127, 127),
+    (2, 33, -128),
+    (0, 127, 127),
+    (0, -128, -128),
+    (7, -128, 127),
+];
 
 /// `(log_wd, w0, w1, o0, o1)` for weighted bi-prediction: default, the
 /// implicit extremes (−64, 128), and the corners of the explicit ranges.
-const BI: [(i32, i32, i32, i32, i32); 7] =
-    [(5, 32, 32, 0, 0), (5, -64, 128, 0, 0), (5, 128, -64, 0, 0), (6, 127, -128, 127, -128), (0, 127, 127, 127, 127), (2, -128, -128, -128, -128), (7, 64, 0, -128, 127)];
+const BI: [(i32, i32, i32, i32, i32); 7] = [
+    (5, 32, 32, 0, 0),
+    (5, -64, 128, 0, 0),
+    (5, 128, -64, 0, 0),
+    (6, 127, -128, 127, -128),
+    (0, 127, 127, 127, 127),
+    (2, -128, -128, -128, -128),
+    (7, 64, 0, -128, 127),
+];
 
 /// Copy, average and weighted combination.
 pub fn h264_combine(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
@@ -278,20 +317,53 @@ pub fn h264_combine(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
             for &(w, h) in &LUMA_SIZES {
                 let ds = w + 3;
                 let dst = vec![0u16; ds * h];
-                let what = |k: &str| format!("{k}, {w}x{h}, {bd} bits, samples {}", if mode == 0 { "uniform" } else { "on the rails" });
-                same(tables, &s, &dst, &mut n, |d, buf| (d.avg)(buf, ds, &a, &b, w, h), whole, || what("avg"))?;
-                same(tables, &s, &dst, &mut n, |d, buf| (d.copy)(buf, ds, &a, w, h), whole, || what("copy"))?;
+                let what = |k: &str| {
+                    format!(
+                        "{k}, {w}x{h}, {bd} bits, samples {}",
+                        if mode == 0 { "uniform" } else { "on the rails" }
+                    )
+                };
+                same(
+                    tables,
+                    &s,
+                    &dst,
+                    &mut n,
+                    |d, buf| (d.avg)(buf, ds, &a, &b, w, h),
+                    whole,
+                    || what("avg"),
+                )?;
+                same(
+                    tables,
+                    &s,
+                    &dst,
+                    &mut n,
+                    |d, buf| (d.copy)(buf, ds, &a, w, h),
+                    whole,
+                    || what("copy"),
+                )?;
                 for &(lwd, wt, o) in &UNI {
                     let o = o * scale;
-                    same(tables, &s, &dst, &mut n, |d, buf| (d.weighted_uni)(buf, ds, &a, w, h, lwd, wt, o, max), whole, || {
-                        what(&format!("weighted_uni log_wd {lwd} w {wt} o {o}"))
-                    })?;
+                    same(
+                        tables,
+                        &s,
+                        &dst,
+                        &mut n,
+                        |d, buf| (d.weighted_uni)(buf, ds, &a, w, h, lwd, wt, o, max),
+                        whole,
+                        || what(&format!("weighted_uni log_wd {lwd} w {wt} o {o}")),
+                    )?;
                 }
                 for &(lwd, w0, w1, o0, o1) in &BI {
                     let (o0, o1) = (o0 * scale, o1 * scale);
-                    same(tables, &s, &dst, &mut n, |d, buf| (d.weighted_bi)(buf, ds, &a, &b, w, h, lwd, w0, w1, o0, o1, max), whole, || {
-                        what(&format!("weighted_bi log_wd {lwd} w {w0} {w1} o {o0} {o1}"))
-                    })?;
+                    same(
+                        tables,
+                        &s,
+                        &dst,
+                        &mut n,
+                        |d, buf| (d.weighted_bi)(buf, ds, &a, &b, w, h, lwd, w0, w1, o0, o1, max),
+                        whole,
+                        || what(&format!("weighted_bi log_wd {lwd} w {w0} {w1} o {o0} {o1}")),
+                    )?;
                 }
             }
         }
@@ -305,7 +377,14 @@ pub fn h264_combine(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
 /// `max`, where it clips at the top (4); and a cliff across both edges the
 /// sweep filters, `alpha - 1` high with jitter under `beta`, which is the
 /// largest step the filters still act on (5).
-fn deblock_plane(rng: &mut Rng, kind: u32, max: i32, alpha: i32, beta: i32, stride: usize) -> Vec<u16> {
+fn deblock_plane(
+    rng: &mut Rng,
+    kind: u32,
+    max: i32,
+    alpha: i32,
+    beta: i32,
+    stride: usize,
+) -> Vec<u16> {
     let m = max as u32;
     let len = stride * 40;
     match kind {
@@ -313,10 +392,16 @@ fn deblock_plane(rng: &mut Rng, kind: u32, max: i32, alpha: i32, beta: i32, stri
             let scale = (m + 1) / 256;
             let base = rng.below(m + 1);
             let spread = 1 + rng.below(64 * scale);
-            (0..len).map(|_| (base + rng.below(spread)).min(m) as u16).collect()
+            (0..len)
+                .map(|_| (base + rng.below(spread)).min(m) as u16)
+                .collect()
         }
-        3 => (0..len).map(|_| rng.below(2 + beta as u32).min(m) as u16).collect(),
-        4 => (0..len).map(|_| (m - rng.below(2 + beta as u32).min(m)) as u16).collect(),
+        3 => (0..len)
+            .map(|_| rng.below(2 + beta as u32).min(m) as u16)
+            .collect(),
+        4 => (0..len)
+            .map(|_| (m - rng.below(2 + beta as u32).min(m)) as u16)
+            .collect(),
         _ => {
             let gap = (alpha - 1).clamp(0, max) as u32;
             let lo = rng.below(m - gap + 1);
@@ -351,8 +436,16 @@ pub fn h264_deblock(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
         let scale = 1i32 << (bd - 8);
         let mut filtered = 0;
         for trial in 0..TRIALS {
-            let alpha = if trial % 9 == 0 { 255 * scale } else { rng.below(256) as i32 * scale };
-            let beta = if trial % 9 == 1 { 18 * scale } else { rng.below(19) as i32 * scale };
+            let alpha = if trial % 9 == 0 {
+                255 * scale
+            } else {
+                rng.below(256) as i32 * scale
+            };
+            let beta = if trial % 9 == 1 {
+                18 * scale
+            } else {
+                rng.below(19) as i32 * scale
+            };
             let mut tc0 = [0i16; 4];
             for t in tc0.iter_mut() {
                 // −1 is bS 0, left unscaled; tC0 itself runs to 25 (Table 8-17).
@@ -375,14 +468,18 @@ pub fn h264_deblock(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
                 _ => (d.deblock_chroma_h_intra)(p, off, stride, alpha, beta, max),
             };
             let changed = same(tables, &s, &plane, &mut n, call, whole, || {
-                format!("deblock entry {which}, {bd} bits, plane kind {kind}, alpha {alpha} beta {beta} tc0 {tc0:?} (trial {trial})")
+                format!(
+                    "deblock entry {which}, {bd} bits, plane kind {kind}, alpha {alpha} beta {beta} tc0 {tc0:?} (trial {trial})"
+                )
             })?;
             filtered += changed as u32;
         }
         // A sweep whose planes never pass the alpha / beta tests compares
         // unfiltered planes and proves nothing.
         if filtered < TRIALS / 6 {
-            return Err(format!("deblock sweep at {bd} bits: only {filtered} of {TRIALS} calls changed a sample"));
+            return Err(format!(
+                "deblock sweep at {bd} bits: only {filtered} of {TRIALS} calls changed a sample"
+            ));
         }
     }
     Ok(n)
@@ -459,15 +556,33 @@ pub fn h264_transforms(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
                 _ => (d.residual8)(p, stride, &c32, max),
             };
             same(tables, &s, &base, &mut n, call, whole, || {
-                format!("transform entry {which}, {bd} bits, coefficient mode {mode}, {nz} nonzero, dc {dc} (trial {trial})")
+                format!(
+                    "transform entry {which}, {bd} bits, coefficient mode {mode}, {nz} nonzero, dc {dc} (trial {trial})"
+                )
             })?;
         }
     }
     Ok(n)
 }
 
-const DIST_SIZES: [(usize, usize); 16] =
-    [(4, 4), (4, 8), (4, 16), (8, 4), (8, 8), (8, 16), (12, 8), (12, 12), (16, 4), (16, 8), (16, 16), (20, 8), (24, 16), (32, 32), (48, 16), (64, 64)];
+const DIST_SIZES: [(usize, usize); 16] = [
+    (4, 4),
+    (4, 8),
+    (4, 16),
+    (8, 4),
+    (8, 8),
+    (8, 16),
+    (12, 8),
+    (12, 12),
+    (16, 4),
+    (16, 8),
+    (16, 16),
+    (20, 8),
+    (24, 16),
+    (32, 32),
+    (48, 16),
+    (64, 64),
+];
 
 /// Two `96 x 96` planes, by `kind`: rows of the 8-bit tests' kinds — 0
 /// against `max`, `max` against 0, uniform against `max`, uniform against
@@ -490,7 +605,13 @@ fn dist_planes(rng: &mut Rng, kind: u32, max: i32) -> (Vec<u16>, Vec<u16>) {
                     _ => (rng.sample(max), rng.sample(max)),
                 },
                 1 => {
-                    let small = |rng: &mut Rng| if rng.below(200) == 0 { m } else { rng.sample(max.min(2047)) };
+                    let small = |rng: &mut Rng| {
+                        if rng.below(200) == 0 {
+                            m
+                        } else {
+                            rng.sample(max.min(2047))
+                        }
+                    };
                     (small(rng), small(rng))
                 }
                 _ => (rng.sample(max), rng.sample(max)),
@@ -520,12 +641,22 @@ pub fn distortion(tables: &[(&str, DistortionDsp<u16>)]) -> Result<u64, String> 
                 let oa = rng.below(64) as usize;
                 let ob = rng.below(64) as usize;
                 let (pa, pb) = (&a[oa..], &b[ob..]);
-                let want = ((s.sad)(pa, sa, pb, sb, w, h), (s.satd)(pa, sa, pb, sb, w, h), (s.ssd)(pa, sa, pb, sb, w, h));
+                let want = (
+                    (s.sad)(pa, sa, pb, sb, w, h),
+                    (s.satd)(pa, sa, pb, sb, w, h),
+                    (s.ssd)(pa, sa, pb, sb, w, h),
+                );
                 for (name, d) in tables {
-                    let got = ((d.sad)(pa, sa, pb, sb, w, h), (d.satd)(pa, sa, pb, sb, w, h), (d.ssd)(pa, sa, pb, sb, w, h));
+                    let got = (
+                        (d.sad)(pa, sa, pb, sb, w, h),
+                        (d.satd)(pa, sa, pb, sb, w, h),
+                        (d.ssd)(pa, sa, pb, sb, w, h),
+                    );
                     n += 1;
                     if got != want {
-                        return Err(format!("{name}: {w}x{h} at {bd} bits, planes of kind {kind}: (sad, satd, ssd) {got:?}, scalar {want:?}"));
+                        return Err(format!(
+                            "{name}: {w}x{h} at {bd} bits, planes of kind {kind}: (sad, satd, ssd) {got:?}, scalar {want:?}"
+                        ));
                     }
                 }
             }
@@ -536,13 +667,23 @@ pub fn distortion(tables: &[(&str, DistortionDsp<u16>)]) -> Result<u64, String> 
         let m = max as u32;
         let zero = vec![0u16; 64 * 64];
         let full = vec![max as u16; 64 * 64];
-        let want = (m * 4096, 256 * ((16 * m + 1) >> 1), m as u64 * m as u64 * 4096);
+        let want = (
+            m * 4096,
+            256 * ((16 * m + 1) >> 1),
+            m as u64 * m as u64 * 4096,
+        );
         for (name, d) in tables {
             for (x, y) in [(&zero, &full), (&full, &zero)] {
-                let got = ((d.sad)(x, 64, y, 64, 64, 64), (d.satd)(x, 64, y, 64, 64, 64), (d.ssd)(x, 64, y, 64, 64, 64));
+                let got = (
+                    (d.sad)(x, 64, y, 64, 64, 64),
+                    (d.satd)(x, 64, y, 64, 64, 64),
+                    (d.ssd)(x, 64, y, 64, 64, 64),
+                );
                 n += 1;
                 if got != want {
-                    return Err(format!("{name}: 64x64 of 0 against {max}: (sad, satd, ssd) {got:?}, closed form {want:?}"));
+                    return Err(format!(
+                        "{name}: 64x64 of 0 against {max}: (sad, satd, ssd) {got:?}, closed form {want:?}"
+                    ));
                 }
             }
         }

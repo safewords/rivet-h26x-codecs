@@ -7,8 +7,9 @@ use crate::bitwriter::BitWriter;
 use crate::{Error, Result};
 
 use super::frame::Mv;
-use super::mb::{MbDequant, 
-    MbKind, MbLayer, MbNeighbours, PRED_BI, PRED_L0, PRED_L1, PicInfo, SliceCtx, SubMbShape,
+use super::mb::{
+    MbDequant, MbKind, MbLayer, MbNeighbours, PRED_BI, PRED_L0, PRED_L1, PicInfo, SliceCtx,
+    SubMbShape,
 };
 use super::slice::SliceType;
 use super::tables::*;
@@ -251,8 +252,30 @@ fn residual_block(
     // through the many small reads below, then hand the position back.
     let mut rd = r.clone();
     let res = match dq {
-        Some((table, shift)) => residual_block_inner::<true>(&mut rd, t, nc, out, scan, start_idx, end_idx, max_num_coeff, table, shift),
-        None => residual_block_inner::<false>(&mut rd, t, nc, out, scan, start_idx, end_idx, max_num_coeff, &[], 0),
+        Some((table, shift)) => residual_block_inner::<true>(
+            &mut rd,
+            t,
+            nc,
+            out,
+            scan,
+            start_idx,
+            end_idx,
+            max_num_coeff,
+            table,
+            shift,
+        ),
+        None => residual_block_inner::<false>(
+            &mut rd,
+            t,
+            nc,
+            out,
+            scan,
+            start_idx,
+            end_idx,
+            max_num_coeff,
+            &[],
+            0,
+        ),
     };
     *r = rd;
     res
@@ -280,7 +303,11 @@ fn residual_block_inner<const DQ: bool>(
 ) -> Result<usize> {
     // Write one level to its raster position, scaled when the block is.
     let put = |out: &mut [i32], idx: usize, level: i32| {
-        out[idx] = if DQ { super::mb::dequant_level(level, dq_table[idx], dq_shift) } else { level };
+        out[idx] = if DQ {
+            super::mb::dequant_level(level, dq_table[idx], dq_shift)
+        } else {
+            level
+        };
     };
     let (total_coeff, trailing_ones) = read_coeff_token(r, t, nc)?;
     if total_coeff > end_idx - start_idx + 1 {
@@ -327,7 +354,11 @@ fn residual_block_inner<const DQ: bool>(
         let mut level_code: i32 = if prefix < 14 {
             ((prefix << sl0) + if sl0 > 0 { r.bits(sl0) } else { 0 }) as i32
         } else if prefix == 14 {
-            if sl0 == 0 { 14 + r.bits(4) as i32 } else { (14 << sl0) as i32 + r.bits(sl0) as i32 }
+            if sl0 == 0 {
+                14 + r.bits(4) as i32
+            } else {
+                (14 << sl0) as i32 + r.bits(sl0) as i32
+            }
         } else {
             // prefix >= 15: a (prefix - 3)-bit suffix, escape from 15 (and
             // 15 more when suffixLength is 0): 30 either way.
@@ -390,7 +421,9 @@ fn residual_block_inner<const DQ: bool>(
     // Scan position (from start_idx) of the highest-frequency coefficient.
     let mut coeff_num = zeros_left + total_coeff - 1;
     if start_idx + coeff_num > end_idx {
-        return Err(Error::bitstream("CAVLC: coefficient position past the block"));
+        return Err(Error::bitstream(
+            "CAVLC: coefficient position past the block",
+        ));
     }
     put(out, scan[start_idx + coeff_num] as usize, level_val[0]);
     let mut i = 1;
@@ -1074,7 +1107,10 @@ fn sub_block_counts_8x8_in(levels: &[i16], scan: &[[u8; 16]; 4]) -> [u8; 4] {
     debug_assert_eq!(levels.len(), 64, "an 8x8 block has sixty-four coefficients");
     let mut n = [0u8; 4];
     for (sub, count) in n.iter_mut().enumerate() {
-        *count = scan[sub].iter().filter(|&&pos| levels[pos as usize] != 0).count() as u8;
+        *count = scan[sub]
+            .iter()
+            .filter(|&&pos| levels[pos as usize] != 0)
+            .count() as u8;
     }
     n
 }
@@ -1116,9 +1152,29 @@ fn parse_residual_luma_like(
                 let base = raster * 16;
                 let pos0 = r.position();
                 let n = if layer.kind == MbKind::I16x16 {
-                    residual_block(r, t, nc, &mut layer.coef[p][base..base + 16], scan4, 1, 15, 15, dq4)?
+                    residual_block(
+                        r,
+                        t,
+                        nc,
+                        &mut layer.coef[p][base..base + 16],
+                        scan4,
+                        1,
+                        15,
+                        15,
+                        dq4,
+                    )?
                 } else {
-                    residual_block(r, t, nc, &mut layer.coef[p][base..base + 16], scan4, 0, 15, 16, dq4)?
+                    residual_block(
+                        r,
+                        t,
+                        nc,
+                        &mut layer.coef[p][base..base + 16],
+                        scan4,
+                        0,
+                        15,
+                        16,
+                        dq4,
+                    )?
                 };
                 if trace {
                     eprintln!(
@@ -1210,8 +1266,17 @@ fn parse_residual_cavlc(
                 for blk in 0..2 * rows {
                     let (bx, by) = (blk & 1, blk >> 1);
                     let nc = chroma_nc(layer, nb, comp, bx, by);
-                    let n =
-                        residual_block(r, t, nc, &mut layer.chroma_ac[comp][blk], scan4, 1, 15, 15, dq.map(|d| (&d.q4[1 + comp].0[..], d.q4[1 + comp].1)))?;
+                    let n = residual_block(
+                        r,
+                        t,
+                        nc,
+                        &mut layer.chroma_ac[comp][blk],
+                        scan4,
+                        1,
+                        15,
+                        15,
+                        dq.map(|d| (&d.q4[1 + comp].0[..], d.q4[1 + comp].1)),
+                    )?;
                     layer.chroma_nz[comp][blk] = n as u8;
                 }
             }
@@ -1281,7 +1346,10 @@ pub(crate) fn write_residual_block_cavlc(
             COEFF_TOKEN_BITS[cls][total_coeff][t1] as u32,
         ),
     };
-    debug_assert!(len > 0, "no coeff_token for class {cls} total {total_coeff} t1 {t1}");
+    debug_assert!(
+        len > 0,
+        "no coeff_token for class {cls} total {total_coeff} t1 {t1}"
+    );
     w.bits(len as u32, code);
     if total_coeff == 0 {
         return 0;
@@ -1307,7 +1375,10 @@ pub(crate) fn write_residual_block_cavlc(
             // trailing one — so the code number is shifted down by two.
             let sl0 = (total_coeff > 10 && t1 < 3) as u32;
             if t1 < 3 {
-                debug_assert!(level_code >= 2, "first level of magnitude one with room for a trailing one");
+                debug_assert!(
+                    level_code >= 2,
+                    "first level of magnitude one with room for a trailing one"
+                );
                 level_code -= 2;
             }
             if (level_code >> sl0) < 14 {
@@ -1318,7 +1389,11 @@ pub(crate) fn write_residual_block_cavlc(
             } else {
                 // `level_prefix` 14 is its own escape, with a four-bit
                 // suffix when suffixLength is zero and `sl0` bits otherwise.
-                let (base, width) = if sl0 == 0 { (14u32, 4u32) } else { (14 << sl0, sl0) };
+                let (base, width) = if sl0 == 0 {
+                    (14u32, 4u32)
+                } else {
+                    (14 << sl0, sl0)
+                };
                 if level_code < base + (1 << width) {
                     write_level_prefix(w, 14);
                     w.bits(width, level_code - base);
@@ -1334,7 +1409,10 @@ pub(crate) fn write_residual_block_cavlc(
         } else {
             if (level_code >> suffix_length) < 15 {
                 write_level_prefix(w, level_code >> suffix_length);
-                w.bits(suffix_length as u32, level_code & ((1 << suffix_length) - 1));
+                w.bits(
+                    suffix_length as u32,
+                    level_code & ((1 << suffix_length) - 1),
+                );
             } else {
                 write_level_escape(w, level_code, 15 << suffix_length);
             }
@@ -1364,10 +1442,16 @@ pub(crate) fn write_residual_block_cavlc(
                 TOTAL_ZEROS_BITS[total_coeff - 1][total_zeros] as u32,
             )
         };
-        debug_assert!(len > 0, "no total_zeros code for {total_coeff} coefficients, {total_zeros} zeros");
+        debug_assert!(
+            len > 0,
+            "no total_zeros code for {total_coeff} coefficients, {total_zeros} zeros"
+        );
         w.bits(len as u32, code);
     } else {
-        debug_assert_eq!(total_zeros, 0, "a full block cannot have zeros before its last coefficient");
+        debug_assert_eq!(
+            total_zeros, 0,
+            "a full block cannot have zeros before its last coefficient"
+        );
     }
 
     // run_before, again highest frequency first, and only while zeros remain
@@ -1413,7 +1497,11 @@ fn write_level_escape(w: &mut BitWriter, level_code: u32, base15: u32) {
     let mut prefix = 15u32;
     loop {
         let width = prefix - 3;
-        let base = if prefix == 15 { base15 } else { base15 + (1 << width) - 4096 };
+        let base = if prefix == 15 {
+            base15
+        } else {
+            base15 + (1 << width) - 4096
+        };
         if level_code < base + (1 << width) {
             write_level_prefix(w, prefix);
             w.bits(width, level_code - base);
@@ -1439,9 +1527,11 @@ fn write_run_before(w: &mut BitWriter, run: usize, zeros_left: usize) {
         RUN_BEFORE_LEN[row][run] > 0,
         "no run_before code for run {run} with {zeros_left} left"
     );
-    w.bits(RUN_BEFORE_LEN[row][run] as u32, RUN_BEFORE_BITS[row][run] as u32);
+    w.bits(
+        RUN_BEFORE_LEN[row][run] as u32,
+        RUN_BEFORE_BITS[row][run] as u32,
+    );
 }
-
 
 #[cfg(test)]
 mod cavlc_round_trip {
@@ -1489,7 +1579,10 @@ mod cavlc_round_trip {
         nb.gather_nz(&info, 1, 2);
         let mut layer = MbLayer::new(MbKind::I4x4);
         let dq = crate::h264::transform::Dequant::new(&crate::h264::sps::ScalingLists::flat());
-        let mut qps = crate::h264::recon::QpState { prev_qp, chroma_offset: [0; 2] };
+        let mut qps = crate::h264::recon::QpState {
+            prev_qp,
+            chroma_offset: [0; 2],
+        };
         parse_mb_cavlc(&mut r, &ctx, &info, &nb, 3, &mut layer, &dq, &mut qps)?;
         Ok((layer.qp_delta, layer.qp))
     }
@@ -1508,7 +1601,10 @@ mod cavlc_round_trip {
         assert_eq!(parse_lone_i16x16(8, 20, 25).unwrap(), (25, 45));
         assert_eq!(parse_lone_i16x16(8, 20, -26).unwrap(), (-26, 46));
         for (depth, delta) in [(8, 26), (8, -27), (10, 32), (10, -33)] {
-            assert!(parse_lone_i16x16(depth, 20, delta).is_err(), "{delta} at {depth} bits");
+            assert!(
+                parse_lone_i16x16(depth, 20, delta).is_err(),
+                "{delta} at {depth} bits"
+            );
         }
     }
 
@@ -1519,21 +1615,40 @@ mod cavlc_round_trip {
     fn round_trip(nc: i32, start_idx: usize, end_idx: usize, max_num_coeff: usize, levels: &[i32]) {
         let scan: Vec<u8> = (0..16).map(|i| i as u8).collect();
         let mut w = BitWriter::new();
-        let n_w = write_residual_block_cavlc(&mut w, nc, levels, &scan, start_idx, end_idx, max_num_coeff);
+        let n_w = write_residual_block_cavlc(
+            &mut w,
+            nc,
+            levels,
+            &scan,
+            start_idx,
+            end_idx,
+            max_num_coeff,
+        );
         w.rbsp_trailing_bits();
         let data = w.into_rbsp();
 
         let mut r = BitReader::new(&data);
         let mut out = vec![0i32; 16];
         let n_r = residual_block(
-            &mut r, tables(), nc, &mut out, &scan, start_idx, end_idx, max_num_coeff, None,
+            &mut r,
+            tables(),
+            nc,
+            &mut out,
+            &scan,
+            start_idx,
+            end_idx,
+            max_num_coeff,
+            None,
         )
         .unwrap_or_else(|e| panic!("reader rejected nc={nc} levels={levels:?}: {e}"));
 
         assert_eq!(n_r, n_w, "nc={nc} TotalCoeff differs for {levels:?}");
         for k in start_idx..=end_idx {
             let idx = scan[k] as usize;
-            assert_eq!(out[idx], levels[idx], "nc={nc} coefficient {idx} differs for {levels:?}");
+            assert_eq!(
+                out[idx], levels[idx],
+                "nc={nc} coefficient {idx} differs for {levels:?}"
+            );
         }
         assert!(!r.overrun(), "nc={nc} reader overran for {levels:?}");
     }
@@ -1543,6 +1658,7 @@ mod cavlc_round_trip {
     #[test]
     fn round_trips_every_class_and_shape() {
         // (nc, start, end, max_num_coeff)
+        #[rustfmt::skip]
         let shapes: [(i32, usize, usize, usize); 8] = [
             (0, 0, 15, 16),   // class 0
             (2, 0, 15, 16),   // class 1
@@ -1564,7 +1680,9 @@ mod cavlc_round_trip {
                 if k >= span {
                     continue;
                 }
-                for a in [1i32, 2, 3, 4, 7, 8, 15, 16, 17, 30, 31, 60, 100, 2000, 4000, 4200, 20000] {
+                for a in [
+                    1i32, 2, 3, 4, 7, 8, 15, 16, 17, 30, 31, 60, 100, 2000, 4000, 4200, 20000,
+                ] {
                     for sign in [1i32, -1] {
                         let mut v = z.clone();
                         v[scan_idx(start + k)] = a * sign;

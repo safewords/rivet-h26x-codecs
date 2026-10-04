@@ -29,13 +29,16 @@ use super::Cpu;
 use crate::sample::Sample;
 
 /// Sum of absolute differences over a `w` by `h` block.
-pub type SadFn<S> = fn(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u32;
+pub type SadFn<S> =
+    fn(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u32;
 /// Sum of absolute Hadamard-transformed differences over a `w` by `h`
 /// block, both multiples of four.
-pub type SatdFn<S> = fn(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u32;
+pub type SatdFn<S> =
+    fn(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u32;
 /// Sum of squared differences over a `w` by `h` block. Wider than the
 /// others because at 12 bits a 64x64 block overflows 32 bits.
-pub type SsdFn<S> = fn(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u64;
+pub type SsdFn<S> =
+    fn(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u64;
 
 /// The encoder's SAO edge-offset statistics (its side of 8.7.3) over a `w
 /// x h` region of `rec` starting at index `origin`, row stride `stride`,
@@ -83,7 +86,14 @@ pub struct WpMoments {
 /// [`WpMoments`] of the source `cur` (stride `cur_stride`) against the
 /// reference `refp` (stride `ref_stride`), both starting at the region's
 /// first sample.
-pub type WpMomentsFn<S> = fn(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize) -> WpMoments;
+pub type WpMomentsFn<S> = fn(
+    cur: &[S],
+    cur_stride: usize,
+    refp: &[S],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> WpMoments;
 
 /// The zero-motion SAD of `cur` against `refp` weighted the way both
 /// standards' explicit weighting predicts a whole-sample vector:
@@ -92,7 +102,18 @@ pub type WpMomentsFn<S> = fn(cur: &[S], cur_stride: usize, refp: &[S], ref_strid
 /// `0..=max`. `weight` is within -128..=255, `round` and `offset` are the
 /// caller's (`offset` already scaled to the sample depth), `shift` is at
 /// most 7.
-pub type WeightedSadFn<S> = fn(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32, max: i32) -> u64;
+pub type WeightedSadFn<S> = fn(
+    cur: &[S],
+    cur_stride: usize,
+    refp: &[S],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+    weight: i32,
+    shift: u32,
+    offset: i32,
+    max: i32,
+) -> u64;
 
 /// The distortion kernels, filled at run time from what the CPU has.
 #[derive(Clone)]
@@ -180,7 +201,14 @@ impl<S: Sample> Default for DistortionDsp<S> {
     }
 }
 
-pub(crate) fn wp_moments_scalar<S: Sample>(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize) -> WpMoments {
+pub(crate) fn wp_moments_scalar<S: Sample>(
+    cur: &[S],
+    cur_stride: usize,
+    refp: &[S],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> WpMoments {
     let mut m = WpMoments::default();
     for y in 0..h {
         let (rr, cr) = (&refp[y * ref_stride..][..w], &cur[y * cur_stride..][..w]);
@@ -197,7 +225,18 @@ pub(crate) fn wp_moments_scalar<S: Sample>(cur: &[S], cur_stride: usize, refp: &
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn weighted_sad_scalar<S: Sample>(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32, max: i32) -> u64 {
+pub(crate) fn weighted_sad_scalar<S: Sample>(
+    cur: &[S],
+    cur_stride: usize,
+    refp: &[S],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+    weight: i32,
+    shift: u32,
+    offset: i32,
+    max: i32,
+) -> u64 {
     let round = if shift >= 1 { 1 << (shift - 1) } else { 0 };
     let mut sad = 0u64;
     for y in 0..h {
@@ -210,7 +249,14 @@ pub(crate) fn weighted_sad_scalar<S: Sample>(cur: &[S], cur_stride: usize, refp:
     sad
 }
 
-pub(crate) fn sad_scalar<S: Sample>(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u32 {
+pub(crate) fn sad_scalar<S: Sample>(
+    a: &[S],
+    a_stride: usize,
+    b: &[S],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u32 {
     let mut sum = 0u32;
     for y in 0..h {
         let (ra, rb) = (&a[y * a_stride..], &b[y * b_stride..]);
@@ -254,7 +300,14 @@ pub(crate) fn sao_edge_stats_scalar<S: Sample>(
     }
 }
 
-pub(crate) fn ssd_scalar<S: Sample>(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u64 {
+pub(crate) fn ssd_scalar<S: Sample>(
+    a: &[S],
+    a_stride: usize,
+    b: &[S],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u64 {
     let mut sum = 0u64;
     for y in 0..h {
         let (ra, rb) = (&a[y * a_stride..], &b[y * b_stride..]);
@@ -292,14 +345,24 @@ fn hadamard4x4(d: &mut [i32; 16]) {
 /// scale as the SAD of the same block and the two can share a Lagrangian
 /// constant; it matters only that it is consistent, and it is stated here
 /// so nobody has to infer it from a magic number later.
-pub(crate) fn satd_scalar<S: Sample>(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u32 {
+pub(crate) fn satd_scalar<S: Sample>(
+    a: &[S],
+    a_stride: usize,
+    b: &[S],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u32 {
     debug_assert!(w % 4 == 0 && h % 4 == 0, "SATD wants a multiple of four");
     let mut total = 0u32;
     for by in (0..h).step_by(4) {
         for bx in (0..w).step_by(4) {
             let mut d = [0i32; 16];
             for y in 0..4 {
-                let (ra, rb) = (&a[(by + y) * a_stride + bx..], &b[(by + y) * b_stride + bx..]);
+                let (ra, rb) = (
+                    &a[(by + y) * a_stride + bx..],
+                    &b[(by + y) * b_stride + bx..],
+                );
                 for x in 0..4 {
                     d[y * 4 + x] = ra[x].to_i32() - rb[x].to_i32();
                 }
@@ -330,7 +393,17 @@ mod tests {
             let mut seed = 0x77u64;
             let mut checked = 0;
             for trial in 0..4 {
-                for &(w, h) in &[(1usize, 1usize), (7, 3), (16, 2), (31, 5), (32, 4), (33, 3), (64, 9), (100, 7), (200, 3)] {
+                for &(w, h) in &[
+                    (1usize, 1usize),
+                    (7, 3),
+                    (16, 2),
+                    (31, 5),
+                    (32, 4),
+                    (33, 3),
+                    (64, 9),
+                    (100, 7),
+                    (200, 3),
+                ] {
                     let stride = w + 13;
                     let plane = |seed: &mut u64| -> Vec<S> {
                         (0..stride * h)
@@ -345,14 +418,25 @@ mod tests {
                             .collect()
                     };
                     let (cur, refp) = (plane(&mut seed), plane(&mut seed));
-                    assert_eq!((d.wp_moments)(&cur, stride, &refp, stride, w, h), (s.wp_moments)(&cur, stride, &refp, stride, w, h), "moments {w}x{h} trial {trial}");
+                    assert_eq!(
+                        (d.wp_moments)(&cur, stride, &refp, stride, w, h),
+                        (s.wp_moments)(&cur, stride, &refp, stride, w, h),
+                        "moments {w}x{h} trial {trial}"
+                    );
                     let depth_scale = if max > 255 { 4 } else { 1 };
                     for weight in [-128, -77, -1, 0, 1, 31, 32, 63, 64, 65, 127, 191, 255] {
                         for shift in 0..=7u32 {
                             for offset in [-128 * depth_scale, -3, 0, 5, 127 * depth_scale] {
-                                let want = (s.weighted_sad)(&cur, stride, &refp, stride, w, h, weight, shift, offset, max);
-                                let got = (d.weighted_sad)(&cur, stride, &refp, stride, w, h, weight, shift, offset, max);
-                                assert_eq!(got, want, "weighted_sad {w}x{h} weight {weight} shift {shift} offset {offset} trial {trial}");
+                                let want = (s.weighted_sad)(
+                                    &cur, stride, &refp, stride, w, h, weight, shift, offset, max,
+                                );
+                                let got = (d.weighted_sad)(
+                                    &cur, stride, &refp, stride, w, h, weight, shift, offset, max,
+                                );
+                                assert_eq!(
+                                    got, want,
+                                    "weighted_sad {w}x{h} weight {weight} shift {shift} offset {offset} trial {trial}"
+                                );
                                 checked += 1;
                             }
                         }
@@ -367,7 +451,9 @@ mod tests {
     }
 
     fn lcg(s: &mut u64) -> u64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *s >> 33
     }
 
@@ -395,9 +481,15 @@ mod tests {
             for &(w, h) in &[(4, 4), (8, 8), (16, 16), (16, 4)] {
                 let area = (w * h) as u32;
                 assert_eq!(sad_scalar(&a, 64, &b, 64, w, h), d as u32 * area);
-                assert_eq!(ssd_scalar(&a, 64, &b, 64, w, h), (d * d) as u64 * area as u64);
+                assert_eq!(
+                    ssd_scalar(&a, 64, &b, 64, w, h),
+                    (d * d) as u64 * area as u64
+                );
                 let tiles = area / 16;
-                assert_eq!(satd_scalar(&a, 64, &b, 64, w, h), tiles * ((16 * d as u32 + 1) >> 1));
+                assert_eq!(
+                    satd_scalar(&a, 64, &b, 64, w, h),
+                    tiles * ((16 * d as u32 + 1) >> 1)
+                );
             }
         }
     }
@@ -450,9 +542,18 @@ mod tests {
         }
         let a = &wide[3 * 64 + 5..];
         let b = &other[3 * 64 + 5..];
-        assert_eq!(sad_scalar(a, 64, b, 64, 8, 8), sad_scalar(&packed_a, 8, &packed_b, 8, 8, 8));
-        assert_eq!(ssd_scalar(a, 64, b, 64, 8, 8), ssd_scalar(&packed_a, 8, &packed_b, 8, 8, 8));
-        assert_eq!(satd_scalar(a, 64, b, 64, 8, 8), satd_scalar(&packed_a, 8, &packed_b, 8, 8, 8));
+        assert_eq!(
+            sad_scalar(a, 64, b, 64, 8, 8),
+            sad_scalar(&packed_a, 8, &packed_b, 8, 8, 8)
+        );
+        assert_eq!(
+            ssd_scalar(a, 64, b, 64, 8, 8),
+            ssd_scalar(&packed_a, 8, &packed_b, 8, 8, 8)
+        );
+        assert_eq!(
+            satd_scalar(a, 64, b, 64, 8, 8),
+            satd_scalar(&packed_a, 8, &packed_b, 8, 8, 8)
+        );
     }
 
     /// Ten bits per sample must not overflow, and a 64x64 SSD at full
@@ -463,7 +564,10 @@ mod tests {
         let b = vec![1023u16; 64 * 64];
         assert_eq!(sad_scalar(&a, 64, &b, 64, 64, 64), 1023 * 4096);
         assert_eq!(ssd_scalar(&a, 64, &b, 64, 64, 64), 1023u64 * 1023 * 4096);
-        assert_eq!(satd_scalar(&a, 64, &b, 64, 64, 64), 256 * ((16 * 1023 + 1) >> 1));
+        assert_eq!(
+            satd_scalar(&a, 64, &b, 64, 64, 64),
+            256 * ((16 * 1023 + 1) >> 1)
+        );
     }
 }
 #[cfg(test)]
@@ -478,7 +582,10 @@ mod wp_bench {
         let (w, h) = (1920usize, 1080usize);
         let a: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
         let b: Vec<u8> = (0..w * h).map(|i| (i * 13 % 247) as u8).collect();
-        for (name, d) in [("scalar", DistortionDsp::<u8>::scalar()), ("host", DistortionDsp::<u8>::new(Cpu::detect()))] {
+        for (name, d) in [
+            ("scalar", DistortionDsp::<u8>::scalar()),
+            ("host", DistortionDsp::<u8>::new(Cpu::detect())),
+        ] {
             let t = std::time::Instant::now();
             for _ in 0..10 {
                 std::hint::black_box((d.wp_moments)(&a, w, &b, w, w, h));

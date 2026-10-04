@@ -85,10 +85,28 @@ pub extern "C" fn h26x_decode(ptr: *const u8, len: usize, hevc: u32, out_hash: *
     let mut frames = 0u32;
     let ok = if hevc != 0 {
         let mut d = h26x::hevc::HevcDecoder::new();
-        run(data, &mut frames, &mut h, &mut d, |d, n| d.push_nal(n).is_ok(), |d| d.try_next_picture(), |d| d.flush().is_ok(), |d| d.next_picture())
+        run(
+            data,
+            &mut frames,
+            &mut h,
+            &mut d,
+            |d, n| d.push_nal(n).is_ok(),
+            |d| d.try_next_picture(),
+            |d| d.flush().is_ok(),
+            |d| d.next_picture(),
+        )
     } else {
         let mut d = h26x::h264::H264Decoder::new();
-        run(data, &mut frames, &mut h, &mut d, |d, n| d.push_nal(n).is_ok(), |d| d.try_next_picture(), |d| d.flush().is_ok(), |d| d.next_picture())
+        run(
+            data,
+            &mut frames,
+            &mut h,
+            &mut d,
+            |d, n| d.push_nal(n).is_ok(),
+            |d| d.try_next_picture(),
+            |d| d.flush().is_ok(),
+            |d| d.next_picture(),
+        )
     };
     if !ok {
         return u32::MAX;
@@ -134,7 +152,9 @@ fn run<D>(
 
 /// The LCG the dsp tests use, so the sweep here draws the same kind of data.
 fn lcg(seed: &mut u64) -> u32 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     (*seed >> 33) as u32
 }
 
@@ -142,13 +162,22 @@ fn lcg(seed: &mut u64) -> u32 {
 /// sample trait is the crate's own).
 macro_rules! intra_check {
     ($s:expr, $d:expr, $max:expr, $t:ty) => {{
-        const ANGLES: [i32; 33] = [32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32];
-        let (s, d, max): (&h26x::dsp::hevc::HevcDsp<$t>, &h26x::dsp::hevc::HevcDsp<$t>, u32) = ($s, $d, $max);
+        const ANGLES: [i32; 33] = [
+            32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17,
+            -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32,
+        ];
+        let (s, d, max): (
+            &h26x::dsp::hevc::HevcDsp<$t>,
+            &h26x::dsp::hevc::HevcDsp<$t>,
+            u32,
+        ) = ($s, $d, $max);
         let mut fails = 0u32;
         let mut seed = 0x1a7a_u64 + max as u64;
         let stride = 40;
         for n in [4usize, 8, 16, 32] {
-            let refs: Vec<u16> = (0..3 * 64 + 1 + 32).map(|_| (lcg(&mut seed) % (max + 1)) as u16).collect();
+            let refs: Vec<u16> = (0..3 * 64 + 1 + 32)
+                .map(|_| (lcg(&mut seed) % (max + 1)) as u16)
+                .collect();
             let (left, top) = (&refs[..64], &refs[64..128]);
             let mut a = vec![<$t>::default(); stride * 33];
             let mut b = vec![<$t>::default(); stride * 33];
@@ -192,7 +221,20 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
     let mut fails = 0u32;
     // Every PU width the dispatch serves, including the AMP widths (12, 24,
     // 48) and the odd chroma one (6).
-    const SIZES: [(usize, usize); 12] = [(2, 4), (4, 4), (4, 8), (6, 8), (8, 4), (8, 8), (12, 16), (16, 16), (24, 32), (32, 8), (48, 64), (64, 64)];
+    const SIZES: [(usize, usize); 12] = [
+        (2, 4),
+        (4, 4),
+        (4, 8),
+        (6, 8),
+        (8, 4),
+        (8, 8),
+        (12, 16),
+        (16, 16),
+        (24, 32),
+        (32, 8),
+        (48, 64),
+        (64, 64),
+    ];
 
     // Interpolation: first stage over bytes, second stage over 14-bit
     // intermediates — the latter in both the contiguous (stride == w, the
@@ -210,11 +252,15 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             (s.qpel_v)(&mut a, &src, stride, w, h, frac, 0);
             (d.qpel_v)(&mut b, &src, stride, w, h, frac, 0);
             fails += (a != b) as u32;
-            let mid: Vec<i16> = (0..stride * 96).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+            let mid: Vec<i16> = (0..stride * 96)
+                .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                .collect();
             (s.qpel_v2)(&mut a, &mid, stride, w, h, frac);
             (d.qpel_v2)(&mut b, &mid, stride, w, h, frac);
             fails += (a != b) as u32;
-            let flat: Vec<i16> = (0..w * (h + 7)).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+            let flat: Vec<i16> = (0..w * (h + 7))
+                .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                .collect();
             (s.qpel_v2)(&mut a, &flat, w, w, h, frac);
             (d.qpel_v2)(&mut b, &flat, w, w, h, frac);
             fails += (a != b) as u32;
@@ -226,11 +272,15 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             (s.epel_v)(&mut a, &src, stride, w, h, frac, 0);
             (d.epel_v)(&mut b, &src, stride, w, h, frac, 0);
             fails += (a != b) as u32;
-            let mid: Vec<i16> = (0..stride * 96).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+            let mid: Vec<i16> = (0..stride * 96)
+                .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                .collect();
             (s.epel_v2)(&mut a, &mid, stride, w, h, frac);
             (d.epel_v2)(&mut b, &mid, stride, w, h, frac);
             fails += (a != b) as u32;
-            let flat: Vec<i16> = (0..w * (h + 3)).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+            let flat: Vec<i16> = (0..w * (h + 3))
+                .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                .collect();
             (s.epel_v2)(&mut a, &flat, w, w, h, frac);
             (d.epel_v2)(&mut b, &flat, w, w, h, frac);
             fails += (a != b) as u32;
@@ -244,11 +294,17 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
     // saturation corners (the extreme palette drives the saturating-add
     // shortcut through every branch of its exactness argument).
     let mut seed = 41u64;
-    const CORNERS: [i16; 12] = [-32768, -32767, -16384, -64, -1, 0, 1, 63, 16383, 16384, 32766, 32767];
+    const CORNERS: [i16; 12] = [
+        -32768, -32767, -16384, -64, -1, 0, 1, 63, 16383, 16384, 32766, 32767,
+    ];
     for &(w, h) in &SIZES {
         for corner in [false, true] {
             let draw = |seed: &mut u64| -> i16 {
-                if corner { CORNERS[(lcg(seed) as usize) % CORNERS.len()] } else { (lcg(seed) % 32768) as i16 - 16384 }
+                if corner {
+                    CORNERS[(lcg(seed) as usize) % CORNERS.len()]
+                } else {
+                    (lcg(seed) % 32768) as i16 - 16384
+                }
             };
             let pa: Vec<i16> = (0..w * h).map(|_| draw(&mut seed)).collect();
             let pb: Vec<i16> = (0..w * h).map(|_| draw(&mut seed)).collect();
@@ -261,7 +317,13 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             (s.bi)(&mut a, stride, &pa, &pb, w, h, 7, 255);
             (d.bi)(&mut b, stride, &pa, &pb, w, h, 7, 255);
             fails += (a != b) as u32;
-            for &(lwd, wt, o) in &[(6i32, 64i32, 0i32), (0, 1, 3), (5, -20, -7), (7, 127, 100), (7, -128, -128)] {
+            for &(lwd, wt, o) in &[
+                (6i32, 64i32, 0i32),
+                (0, 1, 3),
+                (5, -20, -7),
+                (7, 127, 100),
+                (7, -128, -128),
+            ] {
                 (s.weighted_uni)(&mut a, stride, &pa, w, h, lwd, wt, o, 255);
                 (d.weighted_uni)(&mut b, stride, &pa, w, h, lwd, wt, o, 255);
                 fails += (a != b) as u32;
@@ -280,7 +342,13 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             let stride = n + 7;
             let base: Vec<u8> = (0..stride * n).map(|_| lcg(&mut seed) as u8).collect();
             let res: Vec<i16> = (0..n * n)
-                .map(|_| if corner { CORNERS[(lcg(&mut seed) as usize) % CORNERS.len()] } else { (lcg(&mut seed) % 512) as i16 - 256 })
+                .map(|_| {
+                    if corner {
+                        CORNERS[(lcg(&mut seed) as usize) % CORNERS.len()]
+                    } else {
+                        (lcg(&mut seed) % 512) as i16 - 256
+                    }
+                })
                 .collect();
             let mut a = base.clone();
             let mut b = base.clone();
@@ -295,7 +363,11 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
     for &(n, log2) in &[(4usize, 2u32), (8, 3), (16, 4), (32, 5)] {
         for trial in 0..120 {
             let mut c = vec![0i16; n * n];
-            let (mx, my) = if trial % 4 == 0 { (n - 1, n - 1) } else { ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n) };
+            let (mx, my) = if trial % 4 == 0 {
+                (n - 1, n - 1)
+            } else {
+                ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n)
+            };
             for y in 0..=my {
                 for x in 0..=mx {
                     if lcg(&mut seed) % 2 == 0 {
@@ -339,7 +411,12 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         for k in [0usize, 1, 3, 4] {
             off[k] = (lcg(&mut seed) % 15) as i16 - 7;
         }
-        for &(na, nb) in &[(-1isize, 1isize), (-(stride as isize), stride as isize), (-(stride as isize) - 1, stride as isize + 1), (-(stride as isize) + 1, stride as isize - 1)] {
+        for &(na, nb) in &[
+            (-1isize, 1isize),
+            (-(stride as isize), stride as isize),
+            (-(stride as isize) - 1, stride as isize + 1),
+            (-(stride as isize) + 1, stride as isize - 1),
+        ] {
             let origin = 4 * stride + 4;
             let mut a = src.clone();
             let mut b = src.clone();
@@ -357,7 +434,9 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         let mut ta = vec![0i16; h26x::dsp::hevc::MC_TMP_LEN];
         let mut tb = vec![0i16; h26x::dsp::hevc::MC_TMP_LEN];
         for &(w, h) in &SIZES {
-            let other: Vec<i16> = (0..w * h).map(|_| (lcg(&mut seed) % 32768) as i16 - 16384).collect();
+            let other: Vec<i16> = (0..w * h)
+                .map(|_| (lcg(&mut seed) % 32768) as i16 - 16384)
+                .collect();
             let ds = w + 9;
             let mut a = vec![0u8; ds * h];
             let mut b = vec![0u8; ds * h];
@@ -391,13 +470,20 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
     for trial in 0..500 {
         let base = lcg(&mut seed) % 256;
         let spread = 1 + lcg(&mut seed) % 48;
-        let plane: Vec<u8> = (0..stride * 32).map(|_| ((base + lcg(&mut seed) % spread).min(255)) as u8).collect();
+        let plane: Vec<u8> = (0..stride * 32)
+            .map(|_| ((base + lcg(&mut seed) % spread).min(255)) as u8)
+            .collect();
         let beta = [(lcg(&mut seed) % 64) as i32, (lcg(&mut seed) % 64) as i32];
         let tc = [(lcg(&mut seed) % 20) as i32, (lcg(&mut seed) % 20) as i32];
         let bl = |v: u32| v % 2 == 0;
         let no_p = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
         let no_q = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
-        let tc4 = [tc[0], tc[1], (lcg(&mut seed) % 20) as i32, (lcg(&mut seed) % 20) as i32];
+        let tc4 = [
+            tc[0],
+            tc[1],
+            (lcg(&mut seed) % 20) as i32,
+            (lcg(&mut seed) % 20) as i32,
+        ];
         let np4 = [no_p[0], no_p[1], bl(lcg(&mut seed)), bl(lcg(&mut seed))];
         let nq4 = [no_q[0], no_q[1], bl(lcg(&mut seed)), bl(lcg(&mut seed))];
         let off = 8 * stride + 8;
@@ -438,7 +524,9 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         // Interpolation.
         let mut seed = 61u64 + bd as u64;
         let stride = 96;
-        let src: Vec<u16> = (0..stride * 96).map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16).collect();
+        let src: Vec<u16> = (0..stride * 96)
+            .map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16)
+            .collect();
         for &(w, h) in &SIZES {
             let mut a = vec![0i16; w * h];
             let mut b = vec![0i16; w * h];
@@ -449,7 +537,9 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
                 (s.qpel_v)(&mut a, &src, stride, w, h, frac, shift1);
                 (d.qpel_v)(&mut b, &src, stride, w, h, frac, shift1);
                 fails += (a != b) as u32;
-                let mid: Vec<i16> = (0..stride * 96).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+                let mid: Vec<i16> = (0..stride * 96)
+                    .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                    .collect();
                 (s.qpel_v2)(&mut a, &mid, stride, w, h, frac);
                 (d.qpel_v2)(&mut b, &mid, stride, w, h, frac);
                 fails += (a != b) as u32;
@@ -461,7 +551,9 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
                 (s.epel_v)(&mut a, &src, stride, w, h, frac, shift1);
                 (d.epel_v)(&mut b, &src, stride, w, h, frac, shift1);
                 fails += (a != b) as u32;
-                let mid: Vec<i16> = (0..stride * 96).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+                let mid: Vec<i16> = (0..stride * 96)
+                    .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                    .collect();
                 (s.epel_v2)(&mut a, &mid, stride, w, h, frac);
                 (d.epel_v2)(&mut b, &mid, stride, w, h, frac);
                 fails += (a != b) as u32;
@@ -476,7 +568,11 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         for &(w, h) in &SIZES {
             for corner in [false, true] {
                 let draw = |seed: &mut u64| -> i16 {
-                    if corner { CORNERS[(lcg(seed) as usize) % CORNERS.len()] } else { (lcg(seed) % 32768) as i16 - 16384 }
+                    if corner {
+                        CORNERS[(lcg(seed) as usize) % CORNERS.len()]
+                    } else {
+                        (lcg(seed) % 32768) as i16 - 16384
+                    }
                 };
                 let pa: Vec<i16> = (0..w * h).map(|_| draw(&mut seed)).collect();
                 let pb: Vec<i16> = (0..w * h).map(|_| draw(&mut seed)).collect();
@@ -489,7 +585,13 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
                 (s.bi)(&mut a, stride, &pa, &pb, w, h, 15 - bd as i32, max);
                 (d.bi)(&mut b, stride, &pa, &pb, w, h, 15 - bd as i32, max);
                 fails += (a != b) as u32;
-                for &(lwd, wt, o) in &[(6i32, 64i32, 0i32), (0, 1, 3), (5, -20, -7), (7, 127, 100), (7, -128, -128)] {
+                for &(lwd, wt, o) in &[
+                    (6i32, 64i32, 0i32),
+                    (0, 1, 3),
+                    (5, -20, -7),
+                    (7, 127, 100),
+                    (7, -128, -128),
+                ] {
                     let lwd = lwd + 14 - bd as i32;
                     (s.weighted_uni)(&mut a, stride, &pa, w, h, lwd, wt, o, max);
                     (d.weighted_uni)(&mut b, stride, &pa, w, h, lwd, wt, o, max);
@@ -506,9 +608,17 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         for &n in &[4usize, 8, 16, 32] {
             for corner in [false, true] {
                 let stride = n + 7;
-                let base: Vec<u16> = (0..stride * n).map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16).collect();
+                let base: Vec<u16> = (0..stride * n)
+                    .map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16)
+                    .collect();
                 let res: Vec<i16> = (0..n * n)
-                    .map(|_| if corner { CORNERS[(lcg(&mut seed) as usize) % CORNERS.len()] } else { (lcg(&mut seed) % 512) as i16 - 256 })
+                    .map(|_| {
+                        if corner {
+                            CORNERS[(lcg(&mut seed) as usize) % CORNERS.len()]
+                        } else {
+                            (lcg(&mut seed) % 512) as i16 - 256
+                        }
+                    })
                     .collect();
                 let mut a = base.clone();
                 let mut b = base;
@@ -522,11 +632,15 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         let mut seed = 73u64 + bd as u64;
         {
             let stride = 128;
-            let src: Vec<u16> = (0..stride * 128).map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16).collect();
+            let src: Vec<u16> = (0..stride * 128)
+                .map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16)
+                .collect();
             let mut ta = vec![0i16; h26x::dsp::hevc::MC_TMP_LEN];
             let mut tb = vec![0i16; h26x::dsp::hevc::MC_TMP_LEN];
             for &(w, h) in &SIZES {
-                let other: Vec<i16> = (0..w * h).map(|_| (lcg(&mut seed) % 32768) as i16 - 16384).collect();
+                let other: Vec<i16> = (0..w * h)
+                    .map(|_| (lcg(&mut seed) % 32768) as i16 - 16384)
+                    .collect();
                 let ds = w + 9;
                 let mut a = vec![0u16; ds * h];
                 let mut b = vec![0u16; ds * h];
@@ -556,7 +670,9 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         // SAO.
         let mut seed = 79u64 + bd as u64;
         let stride = 72;
-        let src: Vec<u16> = (0..stride * 80).map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16).collect();
+        let src: Vec<u16> = (0..stride * 80)
+            .map(|_| (lcg(&mut seed) % (max as u32 + 1)) as u16)
+            .collect();
         for &(w, h) in &SIZES {
             let mut table = [0i16; 32];
             let start = (lcg(&mut seed) % 28) as usize;
@@ -565,14 +681,38 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             }
             let mut a = vec![0u16; src.len()];
             let mut b = vec![0u16; src.len()];
-            (s.sao_band)(&mut a, stride, &src, stride, w, h, &table, bd as i32 - 5, max);
-            (d.sao_band)(&mut b, stride, &src, stride, w, h, &table, bd as i32 - 5, max);
+            (s.sao_band)(
+                &mut a,
+                stride,
+                &src,
+                stride,
+                w,
+                h,
+                &table,
+                bd as i32 - 5,
+                max,
+            );
+            (d.sao_band)(
+                &mut b,
+                stride,
+                &src,
+                stride,
+                w,
+                h,
+                &table,
+                bd as i32 - 5,
+                max,
+            );
             fails += (a != b) as u32;
             let mut off = [0i16; 5];
             for k in [0usize, 1, 3, 4] {
                 off[k] = (lcg(&mut seed) % 15) as i16 - 7;
             }
-            for &(na, nb) in &[(-1isize, 1isize), (-(stride as isize), stride as isize), (-(stride as isize) - 1, stride as isize + 1)] {
+            for &(na, nb) in &[
+                (-1isize, 1isize),
+                (-(stride as isize), stride as isize),
+                (-(stride as isize) - 1, stride as isize + 1),
+            ] {
                 let origin = 4 * stride + 4;
                 let mut a = src.clone();
                 let mut b = src.clone();
@@ -589,7 +729,9 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
         for trial in 0..300 {
             let base = lcg(&mut seed) % (max as u32 + 1);
             let spread = 1 + lcg(&mut seed) % (48 << sh);
-            let plane: Vec<u16> = (0..stride * 32).map(|_| ((base + lcg(&mut seed) % spread).min(max as u32)) as u16).collect();
+            let plane: Vec<u16> = (0..stride * 32)
+                .map(|_| ((base + lcg(&mut seed) % spread).min(max as u32)) as u16)
+                .collect();
             let v = |seed: &mut u64, n: u32| ((lcg(seed) % n) as i32) << sh;
             let beta = [v(&mut seed, 64), v(&mut seed, 64)];
             let tc = [v(&mut seed, 25), v(&mut seed, 25)];
@@ -627,9 +769,19 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
     // The intra predictors, in both tables: every size, every angle both
     // ways round, planar, and DC with and without its edge filter, over
     // references uniform across each depth.
-    fails += intra_check!(&HevcDsp::<u8>::SCALAR, &HevcDsp::<u8>::new(h26x::dsp::Cpu::detect()), 255, u8);
+    fails += intra_check!(
+        &HevcDsp::<u8>::SCALAR,
+        &HevcDsp::<u8>::new(h26x::dsp::Cpu::detect()),
+        255,
+        u8
+    );
     for max in [1023, 4095] {
-        fails += intra_check!(&HevcDsp::<u16>::SCALAR, &HevcDsp::<u16>::new(h26x::dsp::Cpu::detect()), max, u16);
+        fails += intra_check!(
+            &HevcDsp::<u16>::SCALAR,
+            &HevcDsp::<u16>::new(h26x::dsp::Cpu::detect()),
+            max,
+            u16
+        );
     }
 
     fails
@@ -675,8 +827,20 @@ pub extern "C" fn h26x_selftest() -> u32 {
         let mut seed = 5u64;
         let stride = 64;
         let src: Vec<u8> = (0..stride * 64).map(|_| lcg(&mut seed) as u8).collect();
-        for &(w, h) in &[(4usize, 4usize), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16)] {
-            let block = |v: &[u8]| -> Vec<u8> { (0..h).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec()).collect() };
+        for &(w, h) in &[
+            (4usize, 4usize),
+            (4, 8),
+            (8, 4),
+            (8, 8),
+            (8, 16),
+            (16, 8),
+            (16, 16),
+        ] {
+            let block = |v: &[u8]| -> Vec<u8> {
+                (0..h)
+                    .flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec())
+                    .collect()
+            };
             for pos in 0..16 {
                 let mut a = vec![0u8; 16 * PRED_STRIDE];
                 let mut b = vec![0u8; 16 * PRED_STRIDE];
@@ -693,14 +857,22 @@ pub extern "C" fn h26x_selftest() -> u32 {
                     let mut b = vec![0u8; 16 * PRED_STRIDE];
                     (s.chroma)(&mut a, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
                     (d.chroma)(&mut b, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
-                    let cb = |v: &[u8]| -> Vec<u8> { (0..ch).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec()).collect() };
+                    let cb = |v: &[u8]| -> Vec<u8> {
+                        (0..ch)
+                            .flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec())
+                            .collect()
+                    };
                     if cb(&a) != cb(&b) {
                         fail |= 1;
                     }
                 }
             }
-            let a: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
-            let b: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
+            let a: Vec<u8> = (0..16 * PRED_STRIDE)
+                .map(|_| lcg(&mut seed) as u8)
+                .collect();
+            let b: Vec<u8> = (0..16 * PRED_STRIDE)
+                .map(|_| lcg(&mut seed) as u8)
+                .collect();
             let ds = w + 3;
             let mut d1 = vec![0u8; ds * h];
             let mut d2 = vec![0u8; ds * h];
@@ -714,7 +886,13 @@ pub extern "C" fn h26x_selftest() -> u32 {
             if d1 != d2 {
                 fail |= 1;
             }
-            for &(lwd, wt, o) in &[(6, 64, 0), (0, 1, 3), (5, -20, -7), (7, 127, 127), (2, 33, -128)] {
+            for &(lwd, wt, o) in &[
+                (6, 64, 0),
+                (0, 1, 3),
+                (5, -20, -7),
+                (7, 127, 127),
+                (2, 33, -128),
+            ] {
                 (s.weighted_uni)(&mut d1, ds, &a, w, h, lwd, wt, o, 255);
                 (d.weighted_uni)(&mut d2, ds, &a, w, h, lwd, wt, o, 255);
                 if d1 != d2 {
@@ -737,7 +915,9 @@ pub extern "C" fn h26x_selftest() -> u32 {
             // Smooth-ish content so the alpha/beta tests pass often.
             let base = lcg(&mut seed) % 256;
             let spread = 1 + lcg(&mut seed) % 64;
-            let plane: Vec<u8> = (0..stride * 40).map(|_| (base + lcg(&mut seed) % spread).min(255) as u8).collect();
+            let plane: Vec<u8> = (0..stride * 40)
+                .map(|_| (base + lcg(&mut seed) % spread).min(255) as u8)
+                .collect();
             let alpha = (lcg(&mut seed) % 256) as i32;
             let beta = (lcg(&mut seed) % 20) as i32;
             let mut tc0 = [0i16; 4];
@@ -806,7 +986,11 @@ pub extern "C" fn h26x_selftest() -> u32 {
             let mut c32 = [0i32; 64];
             let nz = 1 + lcg(&mut seed) % 64;
             for k in 0..64 {
-                let v = if k < nz as usize { (lcg(&mut seed) % 512) as i32 - 256 } else { 0 };
+                let v = if k < nz as usize {
+                    (lcg(&mut seed) % 512) as i32 - 256
+                } else {
+                    0
+                };
                 c16[k] = v as i16;
                 c32[k] = v;
             }
@@ -921,9 +1105,13 @@ pub extern "C" fn h26x_enc_installed() -> u32 {
     m |= ((d16.ssd as usize != d16s.ssd as usize) as u32) << 8;
     let es = h264_enc_table(h26x::dsp::Cpu::SCALAR);
     let e = h264_enc_table(cpu);
-    let t = e.fdct4 as usize != es.fdct4 as usize && e.fdct8 as usize != es.fdct8 as usize && e.hadamard4 as usize != es.hadamard4 as usize;
+    let t = e.fdct4 as usize != es.fdct4 as usize
+        && e.fdct8 as usize != es.fdct8 as usize
+        && e.hadamard4 as usize != es.hadamard4 as usize;
     m |= (t as u32) << 9;
-    m |= ((e.quant4 as usize != es.quant4 as usize && e.quant8 as usize != es.quant8 as usize) as u32) << 10;
+    m |= ((e.quant4 as usize != es.quant4 as usize && e.quant8 as usize != es.quant8 as usize)
+        as u32)
+        << 10;
     m
 }
 
@@ -1048,7 +1236,8 @@ pub extern "C" fn h26x_enc_dsp_check() -> u32 {
             let ob = lcg(&mut seed) as usize % 64;
             let (pa, pb) = (&a[oa..], &b[ob..]);
             fail |= ((d.sad)(pa, sa, pb, sb, w, h) != (s.sad)(pa, sa, pb, sb, w, h)) as u32;
-            fail |= (((d.satd)(pa, sa, pb, sb, w, h) != (s.satd)(pa, sa, pb, sb, w, h)) as u32) << 1;
+            fail |=
+                (((d.satd)(pa, sa, pb, sb, w, h) != (s.satd)(pa, sa, pb, sb, w, h)) as u32) << 1;
             fail |= (((d.ssd)(pa, sa, pb, sb, w, h) != (s.ssd)(pa, sa, pb, sb, w, h)) as u32) << 2;
         }
     }
@@ -1128,7 +1317,8 @@ pub extern "C" fn h26x_enc_dsp_check() -> u32 {
                 };
                 let r4: [i16; 16] = std::array::from_fn(|_| r());
                 let r8: [i16; 64] = std::array::from_fn(|_| r());
-                let (mut w4, mut g4, mut w8, mut g8) = ([0i32; 16], [0i32; 16], [0i32; 64], [0i32; 64]);
+                let (mut w4, mut g4, mut w8, mut g8) =
+                    ([0i32; 16], [0i32; 16], [0i32; 64], [0i32; 64]);
                 (s.fdct4)(&r4, &mut w4);
                 (d.fdct4)(&r4, &mut g4);
                 (s.fdct8)(&r8, &mut w8);
@@ -1151,10 +1341,13 @@ pub extern "C" fn h26x_enc_dsp_check() -> u32 {
                         _ => lcg(&mut seed) as i32 % 600_000,
                     });
                     let c8: [i32; 64] = std::array::from_fn(|_| lcg(&mut seed) as i32 % 2_400_000);
-                    let mf4: [i32; 16] = std::array::from_fn(|_| scale * (2893 + (lcg(&mut seed) % 18080) as i32));
-                    let mf8: [i32; 64] = std::array::from_fn(|_| scale * (2893 + (lcg(&mut seed) % 18080) as i32));
+                    let mf4: [i32; 16] =
+                        std::array::from_fn(|_| scale * (2893 + (lcg(&mut seed) % 18080) as i32));
+                    let mf8: [i32; 64] =
+                        std::array::from_fn(|_| scale * (2893 + (lcg(&mut seed) % 18080) as i32));
                     let (mf4, mf8) = (&mf4, &mf8);
-                    let (mut w4, mut g4, mut w8, mut g8) = ([0i16; 16], [0i16; 16], [0i16; 64], [0i16; 64]);
+                    let (mut w4, mut g4, mut w8, mut g8) =
+                        ([0i16; 16], [0i16; 16], [0i16; 64], [0i16; 64]);
                     let nw4 = (s.quant4)(&c4, &mut w4, mf4, qb4, quant_offset(qb4, intra));
                     let ng4 = (d.quant4)(&c4, &mut g4, mf4, qb4, quant_offset(qb4, intra));
                     let nw8 = (s.quant8)(&c8, &mut w8, mf8, qb8, quant_offset(qb8, intra));
@@ -1201,7 +1394,14 @@ pub extern "C" fn h26x_enc_bench(group: u32, shape: u32, iters: u32) -> u32 {
         for _ in 0..iters {
             work.copy_from_slice(&src);
             (d.fdct[(log2 - 2) as usize])(&mut work, log2, 8);
-            sink = sink.wrapping_add((d.quant)(&work, &mut levels, n, 20560, qbits(26, log2, 8), 1 << 10) as u64);
+            sink = sink.wrapping_add((d.quant)(
+                &work,
+                &mut levels,
+                n,
+                20560,
+                qbits(26, log2, 8),
+                1 << 10,
+            ) as u64);
         }
     }
     (sink ^ (sink >> 32)) as u32
@@ -1295,10 +1495,28 @@ pub extern "C" fn h26x_encode(
     let mut frames = 0u32;
     let ok = if hevc != 0 {
         let mut d = h26x::hevc::HevcDecoder::new();
-        run(&stream, &mut frames, &mut hd, &mut d, |d, n| d.push_nal(n).is_ok(), |d| d.try_next_picture(), |d| d.flush().is_ok(), |d| d.next_picture())
+        run(
+            &stream,
+            &mut frames,
+            &mut hd,
+            &mut d,
+            |d, n| d.push_nal(n).is_ok(),
+            |d| d.try_next_picture(),
+            |d| d.flush().is_ok(),
+            |d| d.next_picture(),
+        )
     } else {
         let mut d = h26x::h264::H264Decoder::new();
-        run(&stream, &mut frames, &mut hd, &mut d, |d, n| d.push_nal(n).is_ok(), |d| d.try_next_picture(), |d| d.flush().is_ok(), |d| d.next_picture())
+        run(
+            &stream,
+            &mut frames,
+            &mut hd,
+            &mut d,
+            |d, n| d.push_nal(n).is_ok(),
+            |d| d.try_next_picture(),
+            |d| d.flush().is_ok(),
+            |d| d.next_picture(),
+        )
     };
     if !ok {
         return u32::MAX;

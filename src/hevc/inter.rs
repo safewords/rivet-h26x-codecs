@@ -26,7 +26,10 @@ impl<S: Sample> McScratch<S> {
     pub fn new() -> Self {
         let n = 64 * 64;
         McScratch {
-            pred: [[vec![0; n], vec![0; n], vec![0; n]], [vec![0; n], vec![0; n], vec![0; n]]],
+            pred: [
+                [vec![0; n], vec![0; n], vec![0; n]],
+                [vec![0; n], vec![0; n], vec![0; n]],
+            ],
             tmp: vec![0; crate::dsp::hevc::MC_TMP_LEN],
             window: vec![S::default(); (64 + 7) * (64 + 7)],
             pred_wide: Default::default(),
@@ -38,7 +41,10 @@ impl<S: Sample> McScratch<S> {
     fn ensure_wide(&mut self) {
         if self.tmp_wide.is_empty() {
             let n = 64 * 64;
-            self.pred_wide = [[vec![0; n], vec![0; n], vec![0; n]], [vec![0; n], vec![0; n], vec![0; n]]];
+            self.pred_wide = [
+                [vec![0; n], vec![0; n], vec![0; n]],
+                [vec![0; n], vec![0; n], vec![0; n]],
+            ];
             self.tmp_wide = vec![0; 64 * (64 + 7)];
         }
     }
@@ -47,7 +53,16 @@ impl<S: Sample> McScratch<S> {
 impl<S: Sample> Default for McScratch<S> {
     /// Empty (a placeholder while the real one is lent out).
     fn default() -> Self {
-        McScratch { pred: [[Vec::new(), Vec::new(), Vec::new()], [Vec::new(), Vec::new(), Vec::new()]], tmp: Vec::new(), window: Vec::new(), pred_wide: Default::default(), tmp_wide: Vec::new() }
+        McScratch {
+            pred: [
+                [Vec::new(), Vec::new(), Vec::new()],
+                [Vec::new(), Vec::new(), Vec::new()],
+            ],
+            tmp: Vec::new(),
+            window: Vec::new(),
+            pred_wide: Default::default(),
+            tmp_wide: Vec::new(),
+        }
     }
 }
 
@@ -74,7 +89,15 @@ pub enum Weighting {
 /// the window's origin plus its stride. Windows that leave the padded plane
 /// are gathered with clamping into `window`.
 #[inline]
-fn source<'a, S: Sample>(window: &'a mut [S], plane: &'a Plane16<S>, xi: i32, yi: i32, w: usize, h: usize, luma: bool) -> (&'a [S], usize) {
+fn source<'a, S: Sample>(
+    window: &'a mut [S],
+    plane: &'a Plane16<S>,
+    xi: i32,
+    yi: i32,
+    w: usize,
+    h: usize,
+    luma: bool,
+) -> (&'a [S], usize) {
     let reach: usize = if luma { 3 } else { 1 };
     let taps = if luma { 8 } else { 4 };
     let x0 = xi - reach as i32;
@@ -83,9 +106,13 @@ fn source<'a, S: Sample>(window: &'a mut [S], plane: &'a Plane16<S>, xi: i32, yi
     let hh = h + taps - 1;
     let pad = plane.pad as i32;
     let (pw, ph) = (plane.width as i32, plane.height as i32);
-    let inside = x0 >= -pad && y0 >= -pad && x0 + ww as i32 <= pw + pad && y0 + hh as i32 <= ph + pad;
+    let inside =
+        x0 >= -pad && y0 >= -pad && x0 + ww as i32 <= pw + pad && y0 + hh as i32 <= ph + pad;
     if inside {
-        (&plane.data[plane.offset(x0 as isize, y0 as isize)..], plane.stride)
+        (
+            &plane.data[plane.offset(x0 as isize, y0 as isize)..],
+            plane.stride,
+        )
     } else {
         // Vectors far outside the picture: gather with clamping.
         for yy in 0..hh {
@@ -125,12 +152,43 @@ fn interp<S: Sample>(
     // From the window origin to the block's own top-left.
     let at_block = reach * stride + reach;
     match (xf, yf) {
-        (0, 0) => (if luma { dsp.qpel_copy } else { dsp.epel_copy })(out, &src[at_block..], stride, w, h, shift3),
-        (_, 0) => (if luma { dsp.qpel_h } else { dsp.epel_h })(out, &src[reach * stride..], stride, w, h, xf, shift1),
-        (0, _) => (if luma { dsp.qpel_v } else { dsp.epel_v })(out, &src[reach..], stride, w, h, yf, shift1),
+        (0, 0) => (if luma { dsp.qpel_copy } else { dsp.epel_copy })(
+            out,
+            &src[at_block..],
+            stride,
+            w,
+            h,
+            shift3,
+        ),
+        (_, 0) => (if luma { dsp.qpel_h } else { dsp.epel_h })(
+            out,
+            &src[reach * stride..],
+            stride,
+            w,
+            h,
+            xf,
+            shift1,
+        ),
+        (0, _) => (if luma { dsp.qpel_v } else { dsp.epel_v })(
+            out,
+            &src[reach..],
+            stride,
+            w,
+            h,
+            yf,
+            shift1,
+        ),
         _ => {
             // Horizontal over h + taps - 1 rows, then vertical over the 14-bit rows.
-            (if luma { dsp.qpel_h } else { dsp.epel_h })(scratch_tmp, src, stride, w, hh, xf, shift1);
+            (if luma { dsp.qpel_h } else { dsp.epel_h })(
+                scratch_tmp,
+                src,
+                stride,
+                w,
+                hh,
+                xf,
+                shift1,
+            );
             (if luma { dsp.qpel_v2 } else { dsp.epel_v2 })(out, scratch_tmp, w, w, h, yf);
         }
     }
@@ -140,13 +198,34 @@ fn interp<S: Sample>(
 /// copied with fixed-size moves (a `memcpy` call per 8-byte row costs more
 /// than the row).
 #[inline]
-fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize) {
+fn copy_block<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
     #[inline(always)]
-    fn rows<S: Sample, const W: usize>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, h: usize) {
-        assert!(h > 0 && (h - 1) * dst_stride + W <= dst.len() && (h - 1) * src_stride + W <= src.len());
+    fn rows<S: Sample, const W: usize>(
+        dst: &mut [S],
+        dst_stride: usize,
+        src: &[S],
+        src_stride: usize,
+        h: usize,
+    ) {
+        assert!(
+            h > 0 && (h - 1) * dst_stride + W <= dst.len() && (h - 1) * src_stride + W <= src.len()
+        );
         for r in 0..h {
             // SAFETY: the assert above covers every row.
-            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr().add(r * src_stride), dst.as_mut_ptr().add(r * dst_stride), W) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(r * src_stride),
+                    dst.as_mut_ptr().add(r * dst_stride),
+                    W,
+                )
+            };
         }
     }
     match w {
@@ -162,7 +241,8 @@ fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride
         64 => rows::<S, 64>(dst, dst_stride, src, src_stride, h),
         _ => {
             for r in 0..h {
-                dst[r * dst_stride..r * dst_stride + w].copy_from_slice(&src[r * src_stride..r * src_stride + w]);
+                dst[r * dst_stride..r * dst_stride + w]
+                    .copy_from_slice(&src[r * src_stride..r * src_stride + w]);
             }
         }
     }
@@ -174,14 +254,34 @@ fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride
 /// say whether it did.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn copy_rows<S: Sample>(src: &Plane16<S>, dst: &mut Plane16<S>, sx: i32, sy: i32, dx: usize, dy: usize, bw: usize, bh: usize) -> bool {
+fn copy_rows<S: Sample>(
+    src: &Plane16<S>,
+    dst: &mut Plane16<S>,
+    sx: i32,
+    sy: i32,
+    dx: usize,
+    dy: usize,
+    bw: usize,
+    bh: usize,
+) -> bool {
     let pad = src.pad as i32;
-    if sx < -pad || sy < -pad || sx + bw as i32 > src.width as i32 + pad || sy + bh as i32 > src.height as i32 + pad {
+    if sx < -pad
+        || sy < -pad
+        || sx + bw as i32 > src.width as i32 + pad
+        || sy + bh as i32 > src.height as i32 + pad
+    {
         return false;
     }
     let so = src.offset(sx as isize, sy as isize);
     let d = dst.offset(dx as isize, dy as isize);
-    copy_block(&mut dst.data[d..], dst.stride, &src.data[so..], src.stride, bw, bh);
+    copy_block(
+        &mut dst.data[d..],
+        dst.stride,
+        &src.data[so..],
+        src.stride,
+        bw,
+        bh,
+    );
     true
 }
 
@@ -191,15 +291,36 @@ fn copy_rows<S: Sample>(src: &Plane16<S>, dst: &mut Plane16<S>, sx: i32, sy: i32
 /// prediction, and the filter sums, past `i16`. Scalar; `tmp` holds
 /// `w * (h + 7)` entries.
 #[allow(clippy::too_many_arguments)]
-fn interp_wide<S: Sample>(tmp: &mut [i32], window: &mut [S], plane: &Plane16<S>, xi: i32, yi: i32, xf: usize, yf: usize, w: usize, h: usize, luma: bool, bit_depth: u32, out: &mut [i32]) {
+fn interp_wide<S: Sample>(
+    tmp: &mut [i32],
+    window: &mut [S],
+    plane: &Plane16<S>,
+    xi: i32,
+    yi: i32,
+    xf: usize,
+    yf: usize,
+    w: usize,
+    h: usize,
+    luma: bool,
+    bit_depth: u32,
+    out: &mut [i32],
+) {
     let (reach, taps) = if luma { (3usize, 8usize) } else { (1, 4) };
     let shift1 = (bit_depth as i32 - 8).min(4);
     let shift3 = (14 - bit_depth as i32).max(2);
     let mut fh = [0i32; 8];
     let mut fv = [0i32; 8];
     for k in 0..taps {
-        fh[k] = if luma { QPEL_FILTERS[xf][k] } else { EPEL_FILTERS[xf][k] } as i32;
-        fv[k] = if luma { QPEL_FILTERS[yf][k] } else { EPEL_FILTERS[yf][k] } as i32;
+        fh[k] = if luma {
+            QPEL_FILTERS[xf][k]
+        } else {
+            EPEL_FILTERS[xf][k]
+        } as i32;
+        fv[k] = if luma {
+            QPEL_FILTERS[yf][k]
+        } else {
+            EPEL_FILTERS[yf][k]
+        } as i32;
     }
     let (src, stride) = source(window, plane, xi, yi, w, h, luma);
     // From the window origin to the block's own top-left.
@@ -279,13 +400,37 @@ pub fn predict_block_wide<S: Sample>(
     weighting: [Weighting; 3],
 ) {
     scratch.ensure_wide();
-    let bd_of = |c: usize| if c == 0 { cur.bit_depth } else { cur.bit_depth_chroma };
+    let bd_of = |c: usize| {
+        if c == 0 {
+            cur.bit_depth
+        } else {
+            cur.bit_depth_chroma
+        }
+    };
     let (sw, sh) = cur.chroma.subsampling();
     let (sw, sh) = (sw as usize, sh as usize);
     let mono = cur.chroma == crate::picture::ChromaFormat::Monochrome;
     let (cw, ch) = (w / sw, h / sh);
-    let mvc = |mv: Mv| -> (i32, i32) { (if sw == 2 { mv.x as i32 } else { mv.x as i32 * 2 }, if sh == 2 { mv.y as i32 } else { mv.y as i32 * 2 }) };
-    let McScratch { pred_wide: pred, tmp_wide: tmp, window, .. } = scratch;
+    let mvc = |mv: Mv| -> (i32, i32) {
+        (
+            if sw == 2 {
+                mv.x as i32
+            } else {
+                mv.x as i32 * 2
+            },
+            if sh == 2 {
+                mv.y as i32
+            } else {
+                mv.y as i32 * 2
+            },
+        )
+    };
+    let McScratch {
+        pred_wide: pred,
+        tmp_wide: tmp,
+        window,
+        ..
+    } = scratch;
     let both = ref0.is_some() && ref1.is_some();
     let mut direct = [false, mono, mono];
     if !both {
@@ -312,18 +457,50 @@ pub fn predict_block_wide<S: Sample>(
             }
             let luma = c == 0;
             let (plane_ref, xi, yi, fx, fy, bw, bh) = if luma {
-                (&rf.y, x as i32 + (mv.x as i32 >> 2), y as i32 + (mv.y as i32 >> 2), (mv.x & 3) as usize, (mv.y & 3) as usize, w, h)
+                (
+                    &rf.y,
+                    x as i32 + (mv.x as i32 >> 2),
+                    y as i32 + (mv.y as i32 >> 2),
+                    (mv.x & 3) as usize,
+                    (mv.y & 3) as usize,
+                    w,
+                    h,
+                )
             } else {
                 let plane_ref = if c == 1 { &rf.cb } else { &rf.cr };
                 let (mcx, mcy) = mvc(mv);
-                (plane_ref, (x / sw) as i32 + (mcx >> 3), (y / sh) as i32 + (mcy >> 3), (mcx & 7) as usize, (mcy & 7) as usize, cw, ch)
+                (
+                    plane_ref,
+                    (x / sw) as i32 + (mcx >> 3),
+                    (y / sh) as i32 + (mcy >> 3),
+                    (mcx & 7) as usize,
+                    (mcy & 7) as usize,
+                    cw,
+                    ch,
+                )
             };
-            interp_wide(tmp, window, plane_ref, xi, yi, fx, fy, bw, bh, luma, bd_of(c), &mut pred[list][c]);
+            interp_wide(
+                tmp,
+                window,
+                plane_ref,
+                xi,
+                yi,
+                fx,
+                fy,
+                bw,
+                bh,
+                luma,
+                bd_of(c),
+                &mut pred[list][c],
+            );
         }
     }
     let (bd_y, bd_c) = (cur.bit_depth, cur.bit_depth_chroma);
-    let planes: [(&mut Plane16<S>, usize, usize, usize, usize); 3] =
-        [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / sw, y / sh, cw, ch), (&mut cur.cr, x / sw, y / sh, cw, ch)];
+    let planes: [(&mut Plane16<S>, usize, usize, usize, usize); 3] = [
+        (&mut cur.y, x, y, w, h),
+        (&mut cur.cb, x / sw, y / sh, cw, ch),
+        (&mut cur.cr, x / sw, y / sh, cw, ch),
+    ];
     for (c, (plane, px, py, pwid, phei)) in planes.into_iter().enumerate() {
         if direct[c] {
             continue;
@@ -365,7 +542,9 @@ pub fn predict_block_wide<S: Sample>(
             }
             (true, Weighting::Explicit { log2_wd, w: wt, o }) => {
                 let round = (o[0] + o[1] + 1) << log2_wd;
-                put(dst, &|i| (a[i] * wt[0] + b[i] * wt[1] + round) >> (log2_wd + 1));
+                put(dst, &|i| {
+                    (a[i] * wt[0] + b[i] * wt[1] + round) >> (log2_wd + 1)
+                });
             }
         }
     }
@@ -386,15 +565,36 @@ pub fn predict_block<S: Sample>(
     weighting: [Weighting; 3],
 ) {
     // Per component: the range extensions allow unequal luma / chroma depths.
-    let bd_of = |c: usize| if c == 0 { cur.bit_depth } else { cur.bit_depth_chroma };
+    let bd_of = |c: usize| {
+        if c == 0 {
+            cur.bit_depth
+        } else {
+            cur.bit_depth_chroma
+        }
+    };
     let (sw, sh) = cur.chroma.subsampling();
     let (sw, sh) = (sw as usize, sh as usize);
     let mono = cur.chroma == crate::picture::ChromaFormat::Monochrome;
     let (cw, ch) = (w / sw, h / sh);
     // Chroma vectors in eighth-sample units of the chroma grid (8.5.3.2.10):
     // `mv * 2 / SubWidthC`, exact for both subsampling factors.
-    let mvc = |mv: Mv| -> (i32, i32) { (if sw == 2 { mv.x as i32 } else { mv.x as i32 * 2 }, if sh == 2 { mv.y as i32 } else { mv.y as i32 * 2 }) };
-    let McScratch { pred, tmp, window, .. } = scratch;
+    let mvc = |mv: Mv| -> (i32, i32) {
+        (
+            if sw == 2 {
+                mv.x as i32
+            } else {
+                mv.x as i32 * 2
+            },
+            if sh == 2 {
+                mv.y as i32
+            } else {
+                mv.y as i32 * 2
+            },
+        )
+    };
+    let McScratch {
+        pred, tmp, window, ..
+    } = scratch;
     let both = ref0.is_some() && ref1.is_some();
     // Uni-prediction, default weighting, whole-sample vector: the prediction
     // is the reference block itself — copy it straight across instead of
@@ -429,14 +629,31 @@ pub fn predict_block<S: Sample>(
             }
             let luma = c == 0;
             let (plane_ref, xi, yi, fx, fy, bw, bh) = if luma {
-                (&rf.y, x as i32 + (mv.x as i32 >> 2), y as i32 + (mv.y as i32 >> 2), (mv.x & 3) as usize, (mv.y & 3) as usize, w, h)
+                (
+                    &rf.y,
+                    x as i32 + (mv.x as i32 >> 2),
+                    y as i32 + (mv.y as i32 >> 2),
+                    (mv.x & 3) as usize,
+                    (mv.y & 3) as usize,
+                    w,
+                    h,
+                )
             } else {
                 // Chroma: eighth-sample vectors in chroma units.
                 let plane_ref = if c == 1 { &rf.cb } else { &rf.cr };
                 let (mcx, mcy) = mvc(mv);
-                (plane_ref, (x / sw) as i32 + (mcx >> 3), (y / sh) as i32 + (mcy >> 3), (mcx & 7) as usize, (mcy & 7) as usize, cw, ch)
+                (
+                    plane_ref,
+                    (x / sw) as i32 + (mcx >> 3),
+                    (y / sh) as i32 + (mcy >> 3),
+                    (mcx & 7) as usize,
+                    (mcy & 7) as usize,
+                    cw,
+                    ch,
+                )
             };
-            let fuse = dsp.fused_mc && matches!(weighting[c], Weighting::Default) && (!both || list == 1);
+            let fuse =
+                dsp.fused_mc && matches!(weighting[c], Weighting::Default) && (!both || list == 1);
             let bd = bd_of(c);
             if fuse {
                 let (src, sstride) = source(window, plane_ref, xi, yi, bw, bh, luma);
@@ -450,19 +667,50 @@ pub fn predict_block<S: Sample>(
                 let stride = cur_plane.stride;
                 let dst = &mut cur_plane.data[off..];
                 if both {
-                    (if luma { dsp.qpel_bi } else { dsp.epel_bi })(dst, stride, src, sstride, bw, bh, fx, fy, tmp, &pred[0][c], bd);
+                    (if luma { dsp.qpel_bi } else { dsp.epel_bi })(
+                        dst,
+                        stride,
+                        src,
+                        sstride,
+                        bw,
+                        bh,
+                        fx,
+                        fy,
+                        tmp,
+                        &pred[0][c],
+                        bd,
+                    );
                 } else {
-                    (if luma { dsp.qpel_uni } else { dsp.epel_uni })(dst, stride, src, sstride, bw, bh, fx, fy, tmp, bd);
+                    (if luma { dsp.qpel_uni } else { dsp.epel_uni })(
+                        dst, stride, src, sstride, bw, bh, fx, fy, tmp, bd,
+                    );
                 }
                 done[c] = true;
             } else {
-                interp(dsp, tmp, window, plane_ref, xi, yi, fx, fy, bw, bh, luma, bd, &mut pred[list][c]);
+                interp(
+                    dsp,
+                    tmp,
+                    window,
+                    plane_ref,
+                    xi,
+                    yi,
+                    fx,
+                    fy,
+                    bw,
+                    bh,
+                    luma,
+                    bd,
+                    &mut pred[list][c],
+                );
             }
         }
     }
     let (bd_y, bd_c) = (cur.bit_depth, cur.bit_depth_chroma);
-    let planes: [(&mut Plane16<S>, usize, usize, usize, usize); 3] =
-        [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / sw, y / sh, cw, ch), (&mut cur.cr, x / sw, y / sh, cw, ch)];
+    let planes: [(&mut Plane16<S>, usize, usize, usize, usize); 3] = [
+        (&mut cur.y, x, y, w, h),
+        (&mut cur.cb, x / sw, y / sh, cw, ch),
+        (&mut cur.cr, x / sw, y / sh, cw, ch),
+    ];
     for (c, (plane, px, py, pwid, phei)) in planes.into_iter().enumerate() {
         if direct[c] || done[c] {
             continue;
@@ -479,14 +727,16 @@ pub fn predict_block<S: Sample>(
                 let src = if ref0.is_some() { a } else { b };
                 (dsp.uni)(dst, stride, src, pwid, phei, 14 - bd as i32, max);
             }
-            (true, Weighting::Default) => (dsp.bi)(dst, stride, a, b, pwid, phei, 15 - bd as i32, max),
+            (true, Weighting::Default) => {
+                (dsp.bi)(dst, stride, a, b, pwid, phei, 15 - bd as i32, max)
+            }
             (false, Weighting::Explicit { log2_wd, w: wt, o }) => {
                 let (src, l) = if ref0.is_some() { (a, 0) } else { (b, 1) };
                 (dsp.weighted_uni)(dst, stride, src, pwid, phei, log2_wd, wt[l], o[l], max);
             }
-            (true, Weighting::Explicit { log2_wd, w: wt, o }) => {
-                (dsp.weighted_bi)(dst, stride, a, b, pwid, phei, log2_wd, wt[0], wt[1], o[0], o[1], max)
-            }
+            (true, Weighting::Explicit { log2_wd, w: wt, o }) => (dsp.weighted_bi)(
+                dst, stride, a, b, pwid, phei, log2_wd, wt[0], wt[1], o[0], o[1], max,
+            ),
         }
     }
 }

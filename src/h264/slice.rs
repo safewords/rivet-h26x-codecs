@@ -212,8 +212,12 @@ impl SliceHeader {
         let pps_id = r.ue();
         let pps = pps_lookup(pps_id)
             .ok_or_else(|| Error::bitstream(format!("slice references unknown PPS {pps_id}")))?;
-        let sps = sps_lookup(pps.sps_id)
-            .ok_or_else(|| Error::bitstream(format!("PPS {pps_id} references unknown SPS {}", pps.sps_id)))?;
+        let sps = sps_lookup(pps.sps_id).ok_or_else(|| {
+            Error::bitstream(format!(
+                "PPS {pps_id} references unknown SPS {}",
+                pps.sps_id
+            ))
+        })?;
 
         let mut colour_plane_id = 0;
         if sps.separate_colour_plane {
@@ -297,7 +301,9 @@ impl SliceHeader {
                             }
                         }
                         if mods.len() > 64 || r.overrun() {
-                            return Err(Error::bitstream("slice: runaway ref_pic_list_modification"));
+                            return Err(Error::bitstream(
+                                "slice: runaway ref_pic_list_modification",
+                            ));
                         }
                     }
                 }
@@ -306,7 +312,9 @@ impl SliceHeader {
 
         // pred_weight_table()
         let mut pred_weights = None;
-        if (pps.weighted_pred && slice_type.is_p()) || (pps.weighted_bipred_idc == 1 && slice_type.is_b()) {
+        if (pps.weighted_pred && slice_type.is_p())
+            || (pps.weighted_bipred_idc == 1 && slice_type.is_b())
+        {
             let luma_log2_denom = r.ue();
             let mut chroma_log2_denom = 0;
             if sps.chroma_format_idc != 0 {
@@ -341,7 +349,9 @@ impl SliceHeader {
                                 let w = r.se();
                                 let o = r.se();
                                 if !(-128..=127).contains(&w) || !(-128..=127).contains(&o) {
-                                    return Err(Error::bitstream("slice: chroma weight/offset out of range"));
+                                    return Err(Error::bitstream(
+                                        "slice: chroma weight/offset out of range",
+                                    ));
                                 }
                                 e.chroma[c] = (w, o);
                             }
@@ -350,7 +360,11 @@ impl SliceHeader {
                     list.push(e);
                 }
             }
-            pred_weights = Some(PredWeightTable { luma_log2_denom, chroma_log2_denom, lists });
+            pred_weights = Some(PredWeightTable {
+                luma_log2_denom,
+                chroma_log2_denom,
+                lists,
+            });
         }
 
         // dec_ref_pic_marking()
@@ -400,7 +414,9 @@ impl SliceHeader {
         let slice_qp_delta = r.se();
         let slice_qp = pps.pic_init_qp + slice_qp_delta;
         if !(0..=51).contains(&slice_qp) && sps.bit_depth_luma == 8 {
-            return Err(Error::bitstream(format!("slice: SliceQPY {slice_qp} out of range")));
+            return Err(Error::bitstream(format!(
+                "slice: SliceQPY {slice_qp} out of range"
+            )));
         }
         let mut sp_for_switch = false;
         let mut slice_qs = 0;
@@ -416,7 +432,9 @@ impl SliceHeader {
         if pps.deblocking_filter_control_present {
             disable_deblocking_filter_idc = r.ue();
             if disable_deblocking_filter_idc > 2 {
-                return Err(Error::bitstream("slice: disable_deblocking_filter_idc out of range"));
+                return Err(Error::bitstream(
+                    "slice: disable_deblocking_filter_idc out of range",
+                ));
             }
             if disable_deblocking_filter_idc != 1 {
                 let a = r.se();

@@ -202,7 +202,10 @@ impl H264NalHeader {
         if b & 0x80 != 0 {
             return None;
         }
-        Some(Self { ref_idc: (b >> 5) & 3, unit_type: b & 0x1f })
+        Some(Self {
+            ref_idc: (b >> 5) & 3,
+            unit_type: b & 0x1f,
+        })
     }
 }
 
@@ -268,12 +271,20 @@ mod tests {
         for _ in 0..200 {
             // Heavily biased to zero, so runs actually occur.
             let n = 1 + (lcg() as usize % 40);
-            cases.push((0..n).map(|_| if lcg() % 3 == 0 { lcg() % 5 } else { 0 }).collect());
+            cases.push(
+                (0..n)
+                    .map(|_| if lcg() % 3 == 0 { lcg() % 5 } else { 0 })
+                    .collect(),
+            );
         }
 
         for rbsp in &cases {
             let escaped = escape_rbsp(rbsp);
-            assert_eq!(&unescape_rbsp(&escaped), rbsp, "round trip failed for {rbsp:?}");
+            assert_eq!(
+                &unescape_rbsp(&escaped),
+                rbsp,
+                "round trip failed for {rbsp:?}"
+            );
             // And the escaped form must not contain a start code, which is
             // the whole point of the exercise.
             assert!(
@@ -294,9 +305,18 @@ mod tests {
 
     #[test]
     fn splits_three_and_four_byte_start_codes() {
-        let data = [0, 0, 0, 1, 0x67, 0xaa, 0, 0, 1, 0x68, 0xbb, 0xcc, 0, 0, 0, 1, 0x65, 1, 2, 0, 0];
+        let data = [
+            0, 0, 0, 1, 0x67, 0xaa, 0, 0, 1, 0x68, 0xbb, 0xcc, 0, 0, 0, 1, 0x65, 1, 2, 0, 0,
+        ];
         let nals: Vec<&[u8]> = annexb_nals(&data).collect();
-        assert_eq!(nals, vec![&[0x67, 0xaa][..], &[0x68, 0xbb, 0xcc][..], &[0x65, 1, 2][..]]);
+        assert_eq!(
+            nals,
+            vec![
+                &[0x67, 0xaa][..],
+                &[0x68, 0xbb, 0xcc][..],
+                &[0x65, 1, 2][..]
+            ]
+        );
     }
 
     #[test]
@@ -308,7 +328,10 @@ mod tests {
 
     #[test]
     fn unescapes_emulation_prevention() {
-        assert_eq!(unescape_rbsp(&[0x65, 0, 0, 3, 1, 0, 0, 3, 0, 5]), vec![0x65, 0, 0, 1, 0, 0, 0, 5]);
+        assert_eq!(
+            unescape_rbsp(&[0x65, 0, 0, 3, 1, 0, 0, 3, 0, 5]),
+            vec![0x65, 0, 0, 1, 0, 0, 0, 5]
+        );
         // 00 00 03 03: the second 03 is data.
         assert_eq!(unescape_rbsp(&[0, 0, 3, 3]), vec![0, 0, 3]);
         // A lone 03 is data.
@@ -317,13 +340,29 @@ mod tests {
 
     #[test]
     fn nal_headers() {
-        assert_eq!(H264NalHeader::parse(&[0x65]), Some(H264NalHeader { ref_idc: 3, unit_type: 5 }));
-        assert_eq!(H264NalHeader::parse(&[0x41]), Some(H264NalHeader { ref_idc: 2, unit_type: 1 }));
+        assert_eq!(
+            H264NalHeader::parse(&[0x65]),
+            Some(H264NalHeader {
+                ref_idc: 3,
+                unit_type: 5
+            })
+        );
+        assert_eq!(
+            H264NalHeader::parse(&[0x41]),
+            Some(H264NalHeader {
+                ref_idc: 2,
+                unit_type: 1
+            })
+        );
         assert!(H264NalHeader::parse(&[0x85]).is_none());
         // HEVC IDR_W_RADL (19), layer 0, tid 0: 0x26 0x01
         assert_eq!(
             HevcNalHeader::parse(&[0x26, 0x01]),
-            Some(HevcNalHeader { unit_type: 19, layer_id: 0, temporal_id: 0 })
+            Some(HevcNalHeader {
+                unit_type: 19,
+                layer_id: 0,
+                temporal_id: 0
+            })
         );
         // VPS (32): 0x40 0x01
         assert_eq!(HevcNalHeader::parse(&[0x40, 0x01]).unwrap().unit_type, 32);

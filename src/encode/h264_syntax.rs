@@ -20,10 +20,13 @@
 use crate::bitwriter::BitWriter;
 use crate::cabac_enc::CabacEncoder;
 use crate::encode::gop::Kind;
+use crate::encode::{
+    BWeighting, ColourDescription, Config, ContentLightLevel, Entropy, MasteringDisplay,
+    RateControl,
+};
 use crate::h264::SliceType;
-use crate::h264::slice::PredWeightTable;
 use crate::h264::cabac_mb::{CabacState, MB_TYPE_I_PCM, write_mb_type_i_cabac};
-use crate::encode::{BWeighting, ColourDescription, Config, ContentLightLevel, Entropy, MasteringDisplay, RateControl};
+use crate::h264::slice::PredWeightTable;
 use crate::picture::ChromaFormat;
 use crate::sample::Sample;
 
@@ -344,7 +347,11 @@ impl Geometry {
     pub fn new(cfg: &Config) -> Self {
         let interlaced = cfg.interlace.is_some();
         let mbs_wide = cfg.width.div_ceil(16);
-        let mbs_high = if interlaced { cfg.height.div_ceil(32) * 2 } else { cfg.height.div_ceil(16) };
+        let mbs_high = if interlaced {
+            cfg.height.div_ceil(32) * 2
+        } else {
+            cfg.height.div_ceil(16)
+        };
         Self {
             mbs_wide,
             mbs_high,
@@ -366,7 +373,9 @@ impl Geometry {
     /// half the displayed height (the height is even — the encoder refuses
     /// one that is not).
     pub fn field(&self) -> Geometry {
-        debug_assert!(self.interlaced && self.mbs_high.is_multiple_of(2) && self.height.is_multiple_of(2));
+        debug_assert!(
+            self.interlaced && self.mbs_high.is_multiple_of(2) && self.height.is_multiple_of(2)
+        );
         Geometry {
             mbs_high: self.mbs_high / 2,
             coded_height: self.coded_height / 2,
@@ -412,7 +421,10 @@ pub(crate) fn profile_idc(g: &Geometry) -> u8 {
 /// Whether the SPS carries the chroma/depth extension fields. Everything from
 /// High upwards does.
 fn has_chroma_extension(profile: u8) -> bool {
-    matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135)
+    matches!(
+        profile,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    )
 }
 
 /// Sequence parameter set, with a VUI on every stream: the frame clock
@@ -434,7 +446,10 @@ pub fn write_sps(
     // encoder refuses a stream no level admits before writing anything; a
     // test driving this writer with such a configuration gets 6.2, the
     // highest.
-    w.bits(8, u32::from(crate::encode::level::h264(cfg, g).map_or(62, |l| l.idc)));
+    w.bits(
+        8,
+        u32::from(crate::encode::level::h264(cfg, g).map_or(62, |l| l.idc)),
+    );
     w.ue(0); // seq_parameter_set_id
     if has_chroma_extension(profile) {
         w.ue(match g.chroma {
@@ -485,7 +500,10 @@ pub fn write_sps(
         ChromaFormat::Yuv444 => (1, 1),
     };
     let ch = if g.interlaced { 2 * ch } else { ch };
-    debug_assert!((g.coded_height - g.height).is_multiple_of(ch), "the encoder refuses a height its crop unit cannot reach");
+    debug_assert!(
+        (g.coded_height - g.height).is_multiple_of(ch),
+        "the encoder refuses a height its crop unit cannot reach"
+    );
     let right = (g.coded_width - g.width) / cw;
     let bottom = (g.coded_height - g.height) / ch;
     if right != 0 || bottom != 0 {
@@ -498,7 +516,14 @@ pub fn write_sps(
         w.flag(false);
     }
     w.flag(true); // vui_parameters_present_flag
-    write_vui(&mut w, cfg.colour.as_ref(), cfg.chroma_loc, cpb, cfg.frame_rate(), !g.interlaced);
+    write_vui(
+        &mut w,
+        cfg.colour.as_ref(),
+        cfg.chroma_loc,
+        cpb,
+        cfg.frame_rate(),
+        !g.interlaced,
+    );
     w.rbsp_trailing_bits();
     w.into_nal()
 }
@@ -655,7 +680,10 @@ pub fn write_slice_header(h: &SliceHeader, pps_qp: u8, w: &mut BitWriter) {
         }
     } else {
         // frame_mbs_only_flag is 1, so no field_pic_flag here.
-        debug_assert!(h.bottom_field.is_none(), "a progressive stream has no field pictures");
+        debug_assert!(
+            h.bottom_field.is_none(),
+            "a progressive stream has no field pictures"
+        );
     }
     if h.kind == Kind::Idr {
         w.ue(h.idr_pic_id);
@@ -678,7 +706,10 @@ pub fn write_slice_header(h: &SliceHeader, pps_qp: u8, w: &mut BitWriter) {
     // pred_weight_table(), between the list modifications and the reference
     // marking (7.3.3).
     if let Some(pw) = h.pred_weights.as_ref() {
-        debug_assert!(matches!(h.kind, Kind::P | Kind::B), "only an inter slice carries a table");
+        debug_assert!(
+            matches!(h.kind, Kind::P | Kind::B),
+            "only an inter slice carries a table"
+        );
         write_pred_weight_table(pw, h.kind == Kind::B, w);
     }
     if h.reference {
@@ -934,7 +965,12 @@ mod tests {
     use crate::encode::Config;
 
     fn geom(w: u32, h: u32, c: ChromaFormat) -> (Config, Geometry) {
-        let cfg = Config { width: w, height: h, chroma: c, ..Config::default() };
+        let cfg = Config {
+            width: w,
+            height: h,
+            chroma: c,
+            ..Config::default()
+        };
         let g = Geometry::new(&cfg);
         (cfg, g)
     }
@@ -956,12 +992,15 @@ mod tests {
             let parsed = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&sps))
                 .unwrap_or_else(|e| panic!("{w}x{h} {c:?}: SPS rejected: {e}"));
             assert_eq!(parsed.pic_width_in_mbs * 16, g.coded_width, "{w}x{h} {c:?}");
-            assert_eq!(parsed.chroma_format_idc, match c {
-                ChromaFormat::Monochrome => 0,
-                ChromaFormat::Yuv420 => 1,
-                ChromaFormat::Yuv422 => 2,
-                ChromaFormat::Yuv444 => 3,
-            });
+            assert_eq!(
+                parsed.chroma_format_idc,
+                match c {
+                    ChromaFormat::Monochrome => 0,
+                    ChromaFormat::Yuv420 => 1,
+                    ChromaFormat::Yuv422 => 2,
+                    ChromaFormat::Yuv444 => 3,
+                }
+            );
         }
     }
 
@@ -995,7 +1034,10 @@ mod tests {
         )))
         .expect("SPS");
         for t8x8 in [false, true] {
-            let cfg = Config { transform_8x8: t8x8, ..cfg.clone() };
+            let cfg = Config {
+                transform_8x8: t8x8,
+                ..cfg.clone()
+            };
             let pps = write_pps(&cfg, 26);
             let look = |_id: u32| Some(sps.clone());
             let parsed = crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&pps), &look)
@@ -1007,10 +1049,26 @@ mod tests {
         // And the PPS of a stream that does not ask for the 8x8 transform
         // is byte-identical to one from before the field existed: the
         // extension is absent, not present-and-zero.
-        let off = write_pps(&Config { transform_8x8: false, ..cfg.clone() }, 26);
-        let on = write_pps(&Config { transform_8x8: true, ..cfg }, 26);
+        let off = write_pps(
+            &Config {
+                transform_8x8: false,
+                ..cfg.clone()
+            },
+            26,
+        );
+        let on = write_pps(
+            &Config {
+                transform_8x8: true,
+                ..cfg
+            },
+            26,
+        );
         assert_ne!(off, on, "the flag has to reach the bitstream");
-        assert_eq!(off.len(), 3, "no extension means the historical three-byte PPS");
+        assert_eq!(
+            off.len(),
+            3,
+            "no extension means the historical three-byte PPS"
+        );
     }
 
     /// The HRD the SPS declares must survive the parser that, until this
@@ -1032,15 +1090,26 @@ mod tests {
                 ..Config::default()
             };
             let g = Geometry::new(&cfg);
-            let Some(cpb) = Cpb::new(bps, ms) else { panic!("{bps}bps/{ms}ms: representable") };
+            let Some(cpb) = Cpb::new(bps, ms) else {
+                panic!("{bps}bps/{ms}ms: representable")
+            };
             let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
-                &cfg, &g, 16, 16, Some(&cpb),
+                &cfg,
+                &g,
+                16,
+                16,
+                Some(&cpb),
             )))
             .unwrap_or_else(|e| panic!("{bps}bps/{ms}ms: SPS rejected: {e}"));
-            let vui = sps.vui.as_ref().unwrap_or_else(|| panic!("{bps}bps/{ms}ms: no VUI"));
+            let vui = sps
+                .vui
+                .as_ref()
+                .unwrap_or_else(|| panic!("{bps}bps/{ms}ms: no VUI"));
             assert_eq!(vui.timing, Some((1, 60)), "{bps}bps/{ms}ms: clock");
             assert!(vui.fixed_frame_rate);
-            let hrd = vui.nal_hrd.unwrap_or_else(|| panic!("{bps}bps/{ms}ms: no NAL HRD"));
+            let hrd = vui
+                .nal_hrd
+                .unwrap_or_else(|| panic!("{bps}bps/{ms}ms: no NAL HRD"));
             assert_eq!(hrd.bit_rate, cpb.bit_rate, "{bps}bps/{ms}ms: bit rate");
             assert_eq!(hrd.cpb_size, cpb.size, "{bps}bps/{ms}ms: buffer size");
             assert!(!hrd.cbr);
@@ -1056,7 +1125,10 @@ mod tests {
         .unwrap();
         let vui = sps.vui.expect("a VUI on every stream");
         assert_eq!(vui.timing, Some((1, 60)), "no buffer, the clock alone");
-        assert!(vui.nal_hrd.is_none() && vui.colour_description.is_none(), "no buffer, no HRD");
+        assert!(
+            vui.nal_hrd.is_none() && vui.colour_description.is_none(),
+            "no buffer, no HRD"
+        );
     }
 
     /// A deep SPS survives the production parser with the depth it was
@@ -1070,14 +1142,31 @@ mod tests {
     #[test]
     fn a_deep_sps_carries_its_depth_through_the_decoders_parser() {
         for depth in [8u32, 9, 10, 12, 14] {
-            for c in [ChromaFormat::Monochrome, ChromaFormat::Yuv420, ChromaFormat::Yuv422, ChromaFormat::Yuv444] {
-                let cfg = Config { width: 64, height: 64, chroma: c, bit_depth: depth, ..Config::default() };
+            for c in [
+                ChromaFormat::Monochrome,
+                ChromaFormat::Yuv420,
+                ChromaFormat::Yuv422,
+                ChromaFormat::Yuv444,
+            ] {
+                let cfg = Config {
+                    width: 64,
+                    height: 64,
+                    chroma: c,
+                    bit_depth: depth,
+                    ..Config::default()
+                };
                 let g = Geometry::new(&cfg);
                 let sps = write_sps(&cfg, &g, 16, 16, None);
                 let parsed = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&sps))
                     .unwrap_or_else(|e| panic!("{depth}-bit {c:?}: SPS rejected: {e}"));
-                assert_eq!(parsed.bit_depth_luma, depth, "{depth}-bit {c:?}: luma depth");
-                assert_eq!(parsed.bit_depth_chroma, depth, "{depth}-bit {c:?}: chroma depth");
+                assert_eq!(
+                    parsed.bit_depth_luma, depth,
+                    "{depth}-bit {c:?}: luma depth"
+                );
+                assert_eq!(
+                    parsed.bit_depth_chroma, depth,
+                    "{depth}-bit {c:?}: chroma depth"
+                );
                 let want_profile = match (c, depth) {
                     (_, d) if d > 10 => 244,
                     (ChromaFormat::Yuv444, _) => 244,
@@ -1085,11 +1174,23 @@ mod tests {
                     (_, d) if d > 8 => 110,
                     _ => 100,
                 };
-                assert_eq!(parsed.profile_idc, want_profile, "{depth}-bit {c:?}: profile");
+                assert_eq!(
+                    parsed.profile_idc, want_profile,
+                    "{depth}-bit {c:?}: profile"
+                );
                 // The decoder's own admission test, which is what a stream
                 // has to pass before a single slice is read.
                 if depth == 8 {
-                    let eight = write_sps(&Config { bit_depth: 8, ..cfg.clone() }, &Geometry::new(&cfg), 16, 16, None);
+                    let eight = write_sps(
+                        &Config {
+                            bit_depth: 8,
+                            ..cfg.clone()
+                        },
+                        &Geometry::new(&cfg),
+                        16,
+                        16,
+                        None,
+                    );
                     assert_eq!(sps, eight, "{c:?}: the 8-bit SPS moved");
                 }
             }
@@ -1123,28 +1224,58 @@ mod tests {
                     ..Config::default()
                 };
                 let g = Geometry::new(&cfg);
-                assert!(g.mbs_high.is_multiple_of(2), "{tag}: whole macroblock pairs");
-                let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, None)))
-                    .unwrap_or_else(|e| panic!("{tag}: SPS rejected: {e}"));
+                assert!(
+                    g.mbs_high.is_multiple_of(2),
+                    "{tag}: whole macroblock pairs"
+                );
+                let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                    &cfg, &g, 16, 16, None,
+                )))
+                .unwrap_or_else(|e| panic!("{tag}: SPS rejected: {e}"));
                 assert!(!sps.frame_mbs_only, "{tag}");
-                assert_eq!(sps.mb_adaptive_frame_field, coding == FieldCoding::Mbaff, "{tag}");
+                assert_eq!(
+                    sps.mb_adaptive_frame_field,
+                    coding == FieldCoding::Mbaff,
+                    "{tag}"
+                );
                 assert_eq!(sps.frame_height_in_mbs() * 16, g.coded_height, "{tag}");
                 let (_, _, top, bottom) = sps.crop;
                 assert_eq!(g.coded_height - top - bottom, h, "{tag}: displayed height");
                 let f = g.field();
-                assert_eq!((f.mbs_high * 2, f.coded_height * 2, f.height * 2), (g.mbs_high, g.coded_height, g.height), "{tag}: a field is half the frame");
+                assert_eq!(
+                    (f.mbs_high * 2, f.coded_height * 2, f.height * 2),
+                    (g.mbs_high, g.coded_height, g.height),
+                    "{tag}: a field is half the frame"
+                );
                 assert!(f.field_pic && !g.field_pic && !f.mbaff, "{tag}");
                 let pps = write_pps(&cfg, 26);
                 let look = |_id: u32| Some(sps.clone());
-                let pps = crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&pps), &look).unwrap();
+                let pps =
+                    crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&pps), &look).unwrap();
                 assert!(pps.bottom_field_pic_order_in_frame_present, "{tag}");
             }
-            let progressive = Config { width: w, height: h, chroma: c, ..Config::default() };
+            let progressive = Config {
+                width: w,
+                height: h,
+                chroma: c,
+                ..Config::default()
+            };
             let pg = Geometry::new(&progressive);
             assert!(!pg.interlaced && !pg.mbaff);
-            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&progressive, &pg, 16, 16, None))).unwrap();
+            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                &progressive,
+                &pg,
+                16,
+                16,
+                None,
+            )))
+            .unwrap();
             assert!(sps.frame_mbs_only);
-            assert_eq!(write_pps(&progressive, 26).len(), 3, "{w}x{h} {c:?}: the progressive PPS is the historical three bytes");
+            assert_eq!(
+                write_pps(&progressive, 26).len(),
+                3,
+                "{w}x{h} {c:?}: the progressive PPS is the historical three bytes"
+            );
         }
     }
 
@@ -1157,27 +1288,47 @@ mod tests {
     #[test]
     fn interlaced_slice_headers_round_trip() {
         use crate::encode::{FieldCoding, FieldOrder};
-        for (coding, cabac) in [(FieldCoding::Paff, false), (FieldCoding::Paff, true), (FieldCoding::Mbaff, false), (FieldCoding::Mbaff, true)] {
+        for (coding, cabac) in [
+            (FieldCoding::Paff, false),
+            (FieldCoding::Paff, true),
+            (FieldCoding::Mbaff, false),
+            (FieldCoding::Mbaff, true),
+        ] {
             // The header's `cabac` has to be the PPS's entropy coder: the
             // reader takes `cabac_init_idc` from the PPS's word for it.
             let cfg = Config {
                 width: 64,
                 height: 64,
                 bframes: 2,
-                entropy: if cabac { Entropy::Cabac } else { Entropy::Cavlc },
+                entropy: if cabac {
+                    Entropy::Cabac
+                } else {
+                    Entropy::Cavlc
+                },
                 interlace: Some(FieldOrder::BottomFirst),
                 field_coding: coding,
                 ..Config::default()
             };
             let g = Geometry::new(&cfg);
-            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, None))).unwrap();
+            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                &cfg, &g, 16, 16, None,
+            )))
+            .unwrap();
             let sps_look = |_id: u32| Some(sps.clone());
-            let pps = crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&write_pps(&cfg, 26)), &sps_look).unwrap();
+            let pps = crate::h264::pps::Pps::parse(
+                &crate::nal::unescape_rbsp(&write_pps(&cfg, 26)),
+                &sps_look,
+            )
+            .unwrap();
             let pps_look = |_id: u32| Some(pps.clone());
             for kind in [Kind::Idr, Kind::I, Kind::P, Kind::B] {
-                for (bottom_field, delta) in [(None, -1), (None, 1), (Some(false), 0), (Some(true), 0)] {
+                for (bottom_field, delta) in
+                    [(None, -1), (None, 1), (Some(false), 0), (Some(true), 0)]
+                {
                     {
-                        let tag = format!("{coding:?} {kind:?} field {bottom_field:?} delta {delta} cabac {cabac}");
+                        let tag = format!(
+                            "{coding:?} {kind:?} field {bottom_field:?} delta {delta} cabac {cabac}"
+                        );
                         let mut w = BitWriter::new();
                         write_slice_header(
                             &SliceHeader {
@@ -1201,17 +1352,36 @@ mod tests {
                             &mut w,
                         );
                         w.rbsp_trailing_bits();
-                        let nal_type = if kind == Kind::Idr { NAL_IDR } else { NAL_SLICE };
-                        let nal = annexb(nal_type, if kind != Kind::B { 3 } else { 0 }, &w.into_nal());
+                        let nal_type = if kind == Kind::Idr {
+                            NAL_IDR
+                        } else {
+                            NAL_SLICE
+                        };
+                        let nal =
+                            annexb(nal_type, if kind != Kind::B { 3 } else { 0 }, &w.into_nal());
                         let rbsp = crate::nal::unescape_rbsp(&nal[4..]);
                         let hdr = crate::nal::H264NalHeader::parse(&nal[4..]).unwrap();
-                        let (parsed, _, _) = crate::h264::slice::SliceHeader::parse(&rbsp, hdr, &pps_look, &sps_look)
-                            .unwrap_or_else(|e| panic!("{tag}: slice header rejected: {e}"));
+                        let (parsed, _, _) = crate::h264::slice::SliceHeader::parse(
+                            &rbsp, hdr, &pps_look, &sps_look,
+                        )
+                        .unwrap_or_else(|e| panic!("{tag}: slice header rejected: {e}"));
                         assert_eq!(parsed.field_pic, bottom_field.is_some(), "{tag}");
                         assert_eq!(parsed.bottom_field, bottom_field == Some(true), "{tag}");
-                        assert_eq!(parsed.delta_poc_bottom, if bottom_field.is_none() { delta } else { 0 }, "{tag}");
-                        assert_eq!(parsed.mbaff(&sps), coding == FieldCoding::Mbaff && bottom_field.is_none(), "{tag}");
-                        assert_eq!((parsed.frame_num, parsed.poc_lsb, parsed.slice_qp), (5, 9, 31), "{tag}");
+                        assert_eq!(
+                            parsed.delta_poc_bottom,
+                            if bottom_field.is_none() { delta } else { 0 },
+                            "{tag}"
+                        );
+                        assert_eq!(
+                            parsed.mbaff(&sps),
+                            coding == FieldCoding::Mbaff && bottom_field.is_none(),
+                            "{tag}"
+                        );
+                        assert_eq!(
+                            (parsed.frame_num, parsed.poc_lsb, parsed.slice_qp),
+                            (5, 9, 31),
+                            "{tag}"
+                        );
                     }
                 }
             }
@@ -1228,14 +1398,28 @@ mod tests {
     #[test]
     fn a_deep_slice_header_round_trips_its_quantiser() {
         for depth in [8u32, 10, 12, 14] {
-            for (kind, qp) in [(Kind::Idr, 0u8), (Kind::Idr, 40), (Kind::P, 23), (Kind::B, 51)] {
-                let cfg = Config { width: 64, height: 64, bit_depth: depth, bframes: 2, ..Config::default() };
+            for (kind, qp) in [
+                (Kind::Idr, 0u8),
+                (Kind::Idr, 40),
+                (Kind::P, 23),
+                (Kind::B, 51),
+            ] {
+                let cfg = Config {
+                    width: 64,
+                    height: 64,
+                    bit_depth: depth,
+                    bframes: 2,
+                    ..Config::default()
+                };
                 let g = Geometry::new(&cfg);
                 let sps_nal = write_sps(&cfg, &g, 16, 16, None);
-                let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&sps_nal)).unwrap();
+                let sps =
+                    crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&sps_nal)).unwrap();
                 let pps_nal = write_pps(&cfg, 26);
                 let sps_look = |_id: u32| Some(sps.clone());
-                let pps = crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&pps_nal), &sps_look).unwrap();
+                let pps =
+                    crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&pps_nal), &sps_look)
+                        .unwrap();
                 let mut w = BitWriter::new();
                 write_slice_header(
                     &SliceHeader {
@@ -1259,7 +1443,11 @@ mod tests {
                     &mut w,
                 );
                 w.rbsp_trailing_bits();
-                let nal_type = if kind == Kind::Idr { NAL_IDR } else { NAL_SLICE };
+                let nal_type = if kind == Kind::Idr {
+                    NAL_IDR
+                } else {
+                    NAL_SLICE
+                };
                 // `nal_ref_idc` as the encoder writes it: the marking
                 // syntax exists only in a reference picture's header.
                 let nal = annexb(nal_type, if kind != Kind::B { 3 } else { 0 }, &w.into_nal());
@@ -1267,9 +1455,15 @@ mod tests {
                 let rbsp = crate::nal::unescape_rbsp(&nal[4..]);
                 let hdr = crate::nal::H264NalHeader::parse(&nal[4..]).unwrap();
                 let pps_look = |_id: u32| Some(pps.clone());
-                let (parsed, _, _) = crate::h264::slice::SliceHeader::parse(&rbsp, hdr, &pps_look, &sps_look)
-                    .unwrap_or_else(|e| panic!("{depth}-bit {kind:?} qp {qp}: slice header rejected: {e}"));
-                assert_eq!(parsed.slice_qp, qp as i32, "{depth}-bit {kind:?}: SliceQP_Y");
+                let (parsed, _, _) =
+                    crate::h264::slice::SliceHeader::parse(&rbsp, hdr, &pps_look, &sps_look)
+                        .unwrap_or_else(|e| {
+                            panic!("{depth}-bit {kind:?} qp {qp}: slice header rejected: {e}")
+                        });
+                assert_eq!(
+                    parsed.slice_qp, qp as i32,
+                    "{depth}-bit {kind:?}: SliceQP_Y"
+                );
                 assert_eq!(parsed.frame_num, 3);
                 assert_eq!(parsed.poc_lsb, 6);
                 assert_eq!(parsed.disable_deblocking_filter_idc, 0);
@@ -1300,11 +1494,20 @@ mod tests {
             min_luminance: 1,
         };
         let x265_mdcv = "891833c286c41d4c0bb884d03e803d13404200989680000003000180";
-        let ours: String = write_mastering_display_sei(&m).iter().map(|b| format!("{b:02x}")).collect();
+        let ours: String = write_mastering_display_sei(&m)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(ours, x265_mdcv, "mastering display SEI");
-        let c = ContentLightLevel { max_cll: 1000, max_fall: 400 };
+        let c = ContentLightLevel {
+            max_cll: 1000,
+            max_fall: 400,
+        };
         let x265_cll = "900403e8019080";
-        let ours: String = write_content_light_level_sei(&c).iter().map(|b| format!("{b:02x}")).collect();
+        let ours: String = write_content_light_level_sei(&c)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(ours, x265_cll, "content light level SEI");
     }
 
@@ -1321,24 +1524,58 @@ mod tests {
     fn the_colour_description_survives_the_decoders_own_sps_parser() {
         use crate::encode::ColourDescription;
         let colours = [
-            ColourDescription { primaries: 9, transfer: 16, matrix: 9, full_range: false }, // HDR10
-            ColourDescription { primaries: 9, transfer: 18, matrix: 9, full_range: false }, // HLG
-            ColourDescription { primaries: 1, transfer: 1, matrix: 1, full_range: true }, // BT.709 full
-            ColourDescription { primaries: 12, transfer: 17, matrix: 6, full_range: false }, // P3 / SMPTE 428 / 601
+            ColourDescription {
+                primaries: 9,
+                transfer: 16,
+                matrix: 9,
+                full_range: false,
+            }, // HDR10
+            ColourDescription {
+                primaries: 9,
+                transfer: 18,
+                matrix: 9,
+                full_range: false,
+            }, // HLG
+            ColourDescription {
+                primaries: 1,
+                transfer: 1,
+                matrix: 1,
+                full_range: true,
+            }, // BT.709 full
+            ColourDescription {
+                primaries: 12,
+                transfer: 17,
+                matrix: 6,
+                full_range: false,
+            }, // P3 / SMPTE 428 / 601
         ];
         let (base, g) = geom(64, 64, ChromaFormat::Yuv420);
         for c in colours {
-            let cfg = Config { colour: Some(c), ..base.clone() };
-            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, None)))
-                .unwrap_or_else(|e| panic!("{c:?}: SPS rejected: {e}"));
+            let cfg = Config {
+                colour: Some(c),
+                ..base.clone()
+            };
+            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                &cfg, &g, 16, 16, None,
+            )))
+            .unwrap_or_else(|e| panic!("{c:?}: SPS rejected: {e}"));
             let vui = sps.vui.as_ref().unwrap_or_else(|| panic!("{c:?}: no VUI"));
-            let (p, t, m) = vui.colour_description.unwrap_or_else(|| panic!("{c:?}: no colour description"));
+            let (p, t, m) = vui
+                .colour_description
+                .unwrap_or_else(|| panic!("{c:?}: no colour description"));
             assert_eq!(p, c.primaries, "{c:?}: primaries");
             assert_eq!(t, c.transfer, "{c:?}: transfer");
             assert_eq!(m, c.matrix, "{c:?}: matrix");
             assert_eq!(vui.full_range, c.full_range, "{c:?}: range");
-            assert_eq!(vui.chroma_loc, None, "{c:?}: no siting asked for, none written");
-            assert_eq!(vui.timing, Some((1, 60)), "{c:?}: the clock on every stream");
+            assert_eq!(
+                vui.chroma_loc, None,
+                "{c:?}: no siting asked for, none written"
+            );
+            assert_eq!(
+                vui.timing,
+                Some((1, 60)),
+                "{c:?}: the clock on every stream"
+            );
             assert_eq!(vui.nal_hrd, None, "{c:?}: no buffer, no HRD");
             assert!(!vui.bitstream_restriction);
         }
@@ -1350,34 +1587,66 @@ mod tests {
             cpb_ms: 125,
             ..base.clone()
         };
-        let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, Some(&cpb))))
-            .expect("SPS");
+        let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+            &cfg,
+            &g,
+            16,
+            16,
+            Some(&cpb),
+        )))
+        .expect("SPS");
         let vui = sps.vui.as_ref().expect("VUI");
         assert_eq!(vui.colour_description, Some((9, 16, 9)));
         assert_eq!(vui.timing, Some((1, 60)));
         assert_eq!(vui.nal_hrd.map(|h| h.bit_rate), Some(cpb.bit_rate));
         // A buffer alone says nothing about colour.
-        let cfg = Config { colour: None, ..cfg };
-        let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, Some(&cpb))))
-            .expect("SPS");
+        let cfg = Config {
+            colour: None,
+            ..cfg
+        };
+        let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+            &cfg,
+            &g,
+            16,
+            16,
+            Some(&cpb),
+        )))
+        .expect("SPS");
         let vui = sps.vui.as_ref().expect("VUI");
-        assert_eq!(vui.colour_description, None, "a buffer alone must not invent a colour");
+        assert_eq!(
+            vui.colour_description, None,
+            "a buffer alone must not invent a colour"
+        );
         assert!(!vui.full_range);
         assert_eq!(vui.timing, Some((1, 60)));
         // The chroma siting: alone it is a VUI that says nothing about
         // colour, and every code comes back for both fields.
         for t in 0..=5u8 {
-            let cfg = Config { chroma_loc: Some(t), ..base.clone() };
-            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, None)))
-                .expect("SPS");
+            let cfg = Config {
+                chroma_loc: Some(t),
+                ..base.clone()
+            };
+            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                &cfg, &g, 16, 16, None,
+            )))
+            .expect("SPS");
             let vui = sps.vui.as_ref().expect("a siting alone is a VUI");
             assert_eq!(vui.chroma_loc, Some((t, t)), "chroma_sample_loc_type {t}");
-            assert_eq!(vui.colour_description, None, "a siting alone must not invent a colour");
+            assert_eq!(
+                vui.colour_description, None,
+                "a siting alone must not invent a colour"
+            );
         }
         // Beside a colour: both there, neither disturbing the other.
-        let cfg = Config { colour: Some(colours[0]), chroma_loc: Some(1), ..base.clone() };
-        let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, None)))
-            .expect("SPS");
+        let cfg = Config {
+            colour: Some(colours[0]),
+            chroma_loc: Some(1),
+            ..base.clone()
+        };
+        let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+            &cfg, &g, 16, 16, None,
+        )))
+        .expect("SPS");
         let vui = sps.vui.as_ref().expect("VUI");
         assert_eq!(vui.colour_description, Some((9, 16, 9)));
         assert_eq!(vui.chroma_loc, Some((1, 1)));
@@ -1385,10 +1654,40 @@ mod tests {
         let plain = write_sps(&base, &g, 16, 16, None);
         let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&plain)).expect("SPS");
         let vui = sps.vui.as_ref().expect("a VUI on every stream");
-        assert_eq!(vui.timing, Some((1, 60)), "no buffer, no colour and no siting: the clock alone");
-        assert!(vui.colour_description.is_none() && vui.chroma_loc.is_none() && vui.nal_hrd.is_none());
-        assert_ne!(plain, write_sps(&Config { colour: Some(colours[0]), ..base.clone() }, &g, 16, 16, None));
-        assert_ne!(plain, write_sps(&Config { chroma_loc: Some(0), ..base }, &g, 16, 16, None));
+        assert_eq!(
+            vui.timing,
+            Some((1, 60)),
+            "no buffer, no colour and no siting: the clock alone"
+        );
+        assert!(
+            vui.colour_description.is_none() && vui.chroma_loc.is_none() && vui.nal_hrd.is_none()
+        );
+        assert_ne!(
+            plain,
+            write_sps(
+                &Config {
+                    colour: Some(colours[0]),
+                    ..base.clone()
+                },
+                &g,
+                16,
+                16,
+                None
+            )
+        );
+        assert_ne!(
+            plain,
+            write_sps(
+                &Config {
+                    chroma_loc: Some(0),
+                    ..base
+                },
+                &g,
+                16,
+                16,
+                None
+            )
+        );
     }
 
     /// A chroma siting describes a 4:2:0 grid and nothing else: E.2.1
@@ -1399,15 +1698,44 @@ mod tests {
     #[test]
     fn a_chroma_siting_is_refused_off_420_and_above_5() {
         let (base, _) = geom(64, 64, ChromaFormat::Yuv420);
-        assert!(Config { chroma_loc: Some(2), ..base.clone() }.validate().is_ok(), "4:2:0 takes a siting");
-        assert!(Config { chroma_loc: None, chroma: ChromaFormat::Yuv444, ..base.clone() }.validate().is_ok());
-        for c in [ChromaFormat::Monochrome, ChromaFormat::Yuv422, ChromaFormat::Yuv444] {
-            let e = Config { chroma_loc: Some(0), chroma: c, ..base.clone() }
-                .validate()
-                .expect_err("a siting off 4:2:0 must be refused");
+        assert!(
+            Config {
+                chroma_loc: Some(2),
+                ..base.clone()
+            }
+            .validate()
+            .is_ok(),
+            "4:2:0 takes a siting"
+        );
+        assert!(
+            Config {
+                chroma_loc: None,
+                chroma: ChromaFormat::Yuv444,
+                ..base.clone()
+            }
+            .validate()
+            .is_ok()
+        );
+        for c in [
+            ChromaFormat::Monochrome,
+            ChromaFormat::Yuv422,
+            ChromaFormat::Yuv444,
+        ] {
+            let e = Config {
+                chroma_loc: Some(0),
+                chroma: c,
+                ..base.clone()
+            }
+            .validate()
+            .expect_err("a siting off 4:2:0 must be refused");
             assert!(e.to_string().contains("chroma_loc"), "{c:?}: {e}");
         }
-        let e = Config { chroma_loc: Some(6), ..base }.validate().expect_err("6 is not a chroma_sample_loc_type");
+        let e = Config {
+            chroma_loc: Some(6),
+            ..base
+        }
+        .validate()
+        .expect_err("6 is not a chroma_sample_loc_type");
         assert!(e.to_string().contains("0..=5"), "{e}");
     }
 
@@ -1430,26 +1758,84 @@ mod tests {
     fn a_pred_weight_table_round_trips_through_the_slice_parser() {
         use crate::h264::slice::WeightEntry;
         let entries = [
-            WeightEntry { luma: (48, -3), chroma: [(64, 0), (64, 0)], luma_flag: true, chroma_flag: false },
-            WeightEntry { luma: (64, 0), chroma: [(70, 5), (60, -128)], luma_flag: false, chroma_flag: true },
-            WeightEntry { luma: (127, 127), chroma: [(-128, -7), (64, 1)], luma_flag: true, chroma_flag: true },
-            WeightEntry { luma: (-128, -128), chroma: [(64, 0), (0, 0)], luma_flag: true, chroma_flag: true },
-            WeightEntry { luma: (64, 0), chroma: [(64, 0), (64, 0)], luma_flag: false, chroma_flag: false },
+            WeightEntry {
+                luma: (48, -3),
+                chroma: [(64, 0), (64, 0)],
+                luma_flag: true,
+                chroma_flag: false,
+            },
+            WeightEntry {
+                luma: (64, 0),
+                chroma: [(70, 5), (60, -128)],
+                luma_flag: false,
+                chroma_flag: true,
+            },
+            WeightEntry {
+                luma: (127, 127),
+                chroma: [(-128, -7), (64, 1)],
+                luma_flag: true,
+                chroma_flag: true,
+            },
+            WeightEntry {
+                luma: (-128, -128),
+                chroma: [(64, 0), (0, 0)],
+                luma_flag: true,
+                chroma_flag: true,
+            },
+            WeightEntry {
+                luma: (64, 0),
+                chroma: [(64, 0), (64, 0)],
+                luma_flag: false,
+                chroma_flag: false,
+            },
         ];
-        for chroma in [ChromaFormat::Yuv420, ChromaFormat::Yuv444, ChromaFormat::Monochrome] {
+        for chroma in [
+            ChromaFormat::Yuv420,
+            ChromaFormat::Yuv444,
+            ChromaFormat::Monochrome,
+        ] {
             for depth in [8u32, 10] {
-                let cfg = Config { width: 64, height: 64, chroma, bit_depth: depth, weighted_pred: true, ..Config::default() };
+                let cfg = Config {
+                    width: 64,
+                    height: 64,
+                    chroma,
+                    bit_depth: depth,
+                    weighted_pred: true,
+                    ..Config::default()
+                };
                 let g = Geometry::new(&cfg);
-                let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, None))).unwrap();
+                let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                    &cfg, &g, 16, 16, None,
+                )))
+                .unwrap();
                 let sps_look = |_id: u32| Some(sps.clone());
-                let pps = crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&write_pps(&cfg, 26)), &sps_look).unwrap();
+                let pps = crate::h264::pps::Pps::parse(
+                    &crate::nal::unescape_rbsp(&write_pps(&cfg, 26)),
+                    &sps_look,
+                )
+                .unwrap();
                 assert!(pps.weighted_pred, "{chroma:?}: weighted_pred_flag");
-                assert_eq!(pps.weighted_bipred_idc, 0, "{chroma:?}: B slices stay default-weighted");
+                assert_eq!(
+                    pps.weighted_bipred_idc, 0,
+                    "{chroma:?}: B slices stay default-weighted"
+                );
                 let pps_look = |_id: u32| Some(pps.clone());
                 let has_chroma = chroma != ChromaFormat::Monochrome;
                 for e in entries {
-                    let e = if has_chroma { e } else { WeightEntry { chroma: [(64, 0); 2], chroma_flag: false, ..e } };
-                    let table = PredWeightTable { luma_log2_denom: 6, chroma_log2_denom: 6, lists: [vec![e], Vec::new()] };
+                    let e = if has_chroma {
+                        e
+                    } else {
+                        WeightEntry {
+                            chroma: [(64, 0); 2],
+                            chroma_flag: false,
+                            ..e
+                        }
+                    };
+                    let table = PredWeightTable {
+                        luma_log2_denom: 6,
+                        chroma_log2_denom: 6,
+                        lists: [vec![e], Vec::new()],
+                    };
                     let mut w = BitWriter::new();
                     write_slice_header(
                         &SliceHeader {
@@ -1464,7 +1850,10 @@ mod tests {
                             deblock: true,
                             cabac: true,
                             direct_spatial: false,
-                            pred_weights: Some(PredWeights { table, chroma: has_chroma }),
+                            pred_weights: Some(PredWeights {
+                                table,
+                                chroma: has_chroma,
+                            }),
                             interlaced: false,
                             bottom_field: None,
                             delta_poc_bottom: 0,
@@ -1476,28 +1865,62 @@ mod tests {
                     let nal = annexb(NAL_SLICE, 3, &w.into_nal());
                     let rbsp = crate::nal::unescape_rbsp(&nal[4..]);
                     let hdr = crate::nal::H264NalHeader::parse(&nal[4..]).unwrap();
-                    let (parsed, _, _) = crate::h264::slice::SliceHeader::parse(&rbsp, hdr, &pps_look, &sps_look)
-                        .unwrap_or_else(|err| panic!("{chroma:?} {depth}-bit {e:?}: slice header rejected: {err}"));
-                    let got = parsed.pred_weights.as_ref().unwrap_or_else(|| panic!("{chroma:?} {depth}-bit: no table read"));
+                    let (parsed, _, _) =
+                        crate::h264::slice::SliceHeader::parse(&rbsp, hdr, &pps_look, &sps_look)
+                            .unwrap_or_else(|err| {
+                                panic!("{chroma:?} {depth}-bit {e:?}: slice header rejected: {err}")
+                            });
+                    let got = parsed
+                        .pred_weights
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{chroma:?} {depth}-bit: no table read"));
                     assert_eq!(got.luma_log2_denom, 6);
                     assert_eq!(got.lists[0].len(), 1, "one active reference, one entry");
                     assert!(got.lists[1].is_empty(), "a P slice has no list-1 half");
                     let r = got.lists[0][0];
-                    assert_eq!((r.luma, r.luma_flag), (e.luma, e.luma_flag), "{chroma:?} {depth}-bit: luma of {e:?}");
+                    assert_eq!(
+                        (r.luma, r.luma_flag),
+                        (e.luma, e.luma_flag),
+                        "{chroma:?} {depth}-bit: luma of {e:?}"
+                    );
                     if has_chroma {
                         assert_eq!(got.chroma_log2_denom, 6);
-                        assert_eq!((r.chroma, r.chroma_flag), (e.chroma, e.chroma_flag), "{chroma:?} {depth}-bit: chroma of {e:?}");
+                        assert_eq!(
+                            (r.chroma, r.chroma_flag),
+                            (e.chroma, e.chroma_flag),
+                            "{chroma:?} {depth}-bit: chroma of {e:?}"
+                        );
                     } else {
                         assert!(!r.chroma_flag, "monochrome: no chroma half on the wire");
                     }
-                    assert_eq!(parsed.slice_qp, 31, "{chroma:?} {depth}-bit: the quantiser after the table");
+                    assert_eq!(
+                        parsed.slice_qp, 31,
+                        "{chroma:?} {depth}-bit: the quantiser after the table"
+                    );
                     assert_eq!(parsed.frame_num, 3);
                 }
             }
         }
-        let plain = Config { width: 64, height: 64, ..Config::default() };
-        assert_eq!(write_pps(&plain, 26).len(), 3, "no switch, the historical PPS");
-        assert_ne!(write_pps(&plain, 26), write_pps(&Config { weighted_pred: true, ..plain.clone() }, 26));
+        let plain = Config {
+            width: 64,
+            height: 64,
+            ..Config::default()
+        };
+        assert_eq!(
+            write_pps(&plain, 26).len(),
+            3,
+            "no switch, the historical PPS"
+        );
+        assert_ne!(
+            write_pps(&plain, 26),
+            write_pps(
+                &Config {
+                    weighted_pred: true,
+                    ..plain.clone()
+                },
+                26
+            )
+        );
     }
 
     /// A B slice header carrying a two-list `pred_weight_table` — each
@@ -1521,28 +1944,77 @@ mod tests {
         let pairs = |luma_d: u32, chroma_d: u32| {
             let def = |d: u32| (1i32 << d, 0i32);
             [
-                (at(luma_d, (30, -3), [(34, 5), (29, -9)]), at(luma_d, (37, 4), [(31, -2), (36, 7)])),
-                (at(luma_d, (27, 12), [(33, -1), def(chroma_d)]), at(luma_d, def(luma_d), [def(chroma_d); 2])),
-                (at(luma_d, def(luma_d), [def(chroma_d); 2]), at(luma_d, (-40, -128), [(90, 127), (-128, -7)])),
-                (at(luma_d, def(luma_d), [def(chroma_d); 2]), at(luma_d, def(luma_d), [def(chroma_d); 2])),
+                (
+                    at(luma_d, (30, -3), [(34, 5), (29, -9)]),
+                    at(luma_d, (37, 4), [(31, -2), (36, 7)]),
+                ),
+                (
+                    at(luma_d, (27, 12), [(33, -1), def(chroma_d)]),
+                    at(luma_d, def(luma_d), [def(chroma_d); 2]),
+                ),
+                (
+                    at(luma_d, def(luma_d), [def(chroma_d); 2]),
+                    at(luma_d, (-40, -128), [(90, 127), (-128, -7)]),
+                ),
+                (
+                    at(luma_d, def(luma_d), [def(chroma_d); 2]),
+                    at(luma_d, def(luma_d), [def(chroma_d); 2]),
+                ),
             ]
         };
-        for chroma in [ChromaFormat::Yuv420, ChromaFormat::Yuv422, ChromaFormat::Yuv444, ChromaFormat::Monochrome] {
+        for chroma in [
+            ChromaFormat::Yuv420,
+            ChromaFormat::Yuv422,
+            ChromaFormat::Yuv444,
+            ChromaFormat::Monochrome,
+        ] {
             for depth in [8u32, 10] {
-                let cfg = Config { width: 64, height: 64, chroma, bit_depth: depth, bframes: 2, weighted_pred: true, ..Config::default() };
+                let cfg = Config {
+                    width: 64,
+                    height: 64,
+                    chroma,
+                    bit_depth: depth,
+                    bframes: 2,
+                    weighted_pred: true,
+                    ..Config::default()
+                };
                 let g = Geometry::new(&cfg);
-                let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, 16, None))).unwrap();
+                let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                    &cfg, &g, 16, 16, None,
+                )))
+                .unwrap();
                 let sps_look = |_id: u32| Some(sps.clone());
-                let pps = crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&write_pps(&cfg, 26)), &sps_look).unwrap();
+                let pps = crate::h264::pps::Pps::parse(
+                    &crate::nal::unescape_rbsp(&write_pps(&cfg, 26)),
+                    &sps_look,
+                )
+                .unwrap();
                 assert!(pps.weighted_pred, "{chroma:?}: weighted_pred_flag");
-                assert_eq!(pps.weighted_bipred_idc, 1, "{chroma:?}: B slices are explicitly weighted");
+                assert_eq!(
+                    pps.weighted_bipred_idc, 1,
+                    "{chroma:?}: B slices are explicitly weighted"
+                );
                 let pps_look = |_id: u32| Some(pps.clone());
                 let has_chroma = chroma != ChromaFormat::Monochrome;
                 let (luma_d, chroma_d) = (5u32, if has_chroma { 5 } else { 0 });
                 for (e0, e1) in pairs(luma_d, chroma_d) {
-                    let strip = |e: WeightEntry| if has_chroma { e } else { WeightEntry { chroma: [(1, 0); 2], chroma_flag: false, ..e } };
+                    let strip = |e: WeightEntry| {
+                        if has_chroma {
+                            e
+                        } else {
+                            WeightEntry {
+                                chroma: [(1, 0); 2],
+                                chroma_flag: false,
+                                ..e
+                            }
+                        }
+                    };
                     let (e0, e1) = (strip(e0), strip(e1));
-                    let table = PredWeightTable { luma_log2_denom: luma_d, chroma_log2_denom: chroma_d, lists: [vec![e0], vec![e1]] };
+                    let table = PredWeightTable {
+                        luma_log2_denom: luma_d,
+                        chroma_log2_denom: chroma_d,
+                        lists: [vec![e0], vec![e1]],
+                    };
                     let tag = format!("{chroma:?} {depth}-bit {e0:?} / {e1:?}");
                     let mut w = BitWriter::new();
                     write_slice_header(
@@ -1558,7 +2030,10 @@ mod tests {
                             deblock: true,
                             cabac: true,
                             direct_spatial: true,
-                            pred_weights: Some(PredWeights { table: table.clone(), chroma: has_chroma }),
+                            pred_weights: Some(PredWeights {
+                                table: table.clone(),
+                                chroma: has_chroma,
+                            }),
                             interlaced: false,
                             bottom_field: None,
                             delta_poc_bottom: 0,
@@ -1570,25 +2045,71 @@ mod tests {
                     let nal = annexb(NAL_SLICE, 0, &w.into_nal());
                     let rbsp = crate::nal::unescape_rbsp(&nal[4..]);
                     let hdr = crate::nal::H264NalHeader::parse(&nal[4..]).unwrap();
-                    let (parsed, _, _) = crate::h264::slice::SliceHeader::parse(&rbsp, hdr, &pps_look, &sps_look)
-                        .unwrap_or_else(|err| panic!("{tag}: slice header rejected: {err}"));
-                    let got = parsed.pred_weights.as_ref().unwrap_or_else(|| panic!("{tag}: no table read"));
+                    let (parsed, _, _) =
+                        crate::h264::slice::SliceHeader::parse(&rbsp, hdr, &pps_look, &sps_look)
+                            .unwrap_or_else(|err| panic!("{tag}: slice header rejected: {err}"));
+                    let got = parsed
+                        .pred_weights
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{tag}: no table read"));
                     assert_eq!(got, &table, "{tag}: the table read back");
-                    assert_eq!((got.lists[0].len(), got.lists[1].len()), (1, 1), "{tag}: one entry per list");
-                    assert!(parsed.direct_spatial_mv_pred, "{tag}: the flag before the table");
+                    assert_eq!(
+                        (got.lists[0].len(), got.lists[1].len()),
+                        (1, 1),
+                        "{tag}: one entry per list"
+                    );
+                    assert!(
+                        parsed.direct_spatial_mv_pred,
+                        "{tag}: the flag before the table"
+                    );
                     assert_eq!(parsed.slice_qp, 33, "{tag}: the quantiser after the table");
                 }
             }
         }
-        let b = Config { width: 64, height: 64, bframes: 2, ..Config::default() };
+        let b = Config {
+            width: 64,
+            height: 64,
+            bframes: 2,
+            ..Config::default()
+        };
         let parse = |cfg: &Config| {
             let g = Geometry::new(cfg);
-            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(cfg, &g, 16, 16, None))).unwrap();
-            crate::h264::pps::Pps::parse(&crate::nal::unescape_rbsp(&write_pps(cfg, 26)), &|_id: u32| Some(sps.clone())).unwrap()
+            let sps = crate::h264::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+                cfg, &g, 16, 16, None,
+            )))
+            .unwrap();
+            crate::h264::pps::Pps::parse(
+                &crate::nal::unescape_rbsp(&write_pps(cfg, 26)),
+                &|_id: u32| Some(sps.clone()),
+            )
+            .unwrap()
         };
-        assert_eq!(parse(&b).weighted_bipred_idc, 0, "B pictures without weighting");
-        assert_eq!(parse(&Config { weighted_pred: true, bframes: 0, ..b.clone() }).weighted_bipred_idc, 0, "weighting without B pictures");
-        assert_eq!(write_pps(&b, 26), write_pps(&Config { bframes: 0, ..b.clone() }, 26), "no weighting, no change");
+        assert_eq!(
+            parse(&b).weighted_bipred_idc,
+            0,
+            "B pictures without weighting"
+        );
+        assert_eq!(
+            parse(&Config {
+                weighted_pred: true,
+                bframes: 0,
+                ..b.clone()
+            })
+            .weighted_bipred_idc,
+            0,
+            "weighting without B pictures"
+        );
+        assert_eq!(
+            write_pps(&b, 26),
+            write_pps(
+                &Config {
+                    bframes: 0,
+                    ..b.clone()
+                },
+                26
+            ),
+            "no weighting, no change"
+        );
         // `b_weighting` asked for by name: implicit with or without weighted
         // P slices, and default B slices beside weighted P ones.
         use crate::encode::BWeighting;
@@ -1599,10 +2120,29 @@ mod tests {
             (true, Some(BWeighting::Explicit), 1),
             (false, Some(BWeighting::Default), 0),
         ] {
-            let pps = parse(&Config { weighted_pred: wp, b_weighting: bw, ..b.clone() });
-            assert_eq!((pps.weighted_pred, pps.weighted_bipred_idc), (wp, idc), "weighted_pred {wp}, {bw:?}");
+            let pps = parse(&Config {
+                weighted_pred: wp,
+                b_weighting: bw,
+                ..b.clone()
+            });
+            assert_eq!(
+                (pps.weighted_pred, pps.weighted_bipred_idc),
+                (wp, idc),
+                "weighted_pred {wp}, {bw:?}"
+            );
         }
-        let implicit = Config { b_weighting: Some(BWeighting::Implicit), ..b.clone() };
-        assert_eq!(parse(&Config { bframes: 0, ..implicit }).weighted_bipred_idc, 0, "implicit without B pictures");
+        let implicit = Config {
+            b_weighting: Some(BWeighting::Implicit),
+            ..b.clone()
+        };
+        assert_eq!(
+            parse(&Config {
+                bframes: 0,
+                ..implicit
+            })
+            .weighted_bipred_idc,
+            0,
+            "implicit without B pictures"
+        );
     }
 }

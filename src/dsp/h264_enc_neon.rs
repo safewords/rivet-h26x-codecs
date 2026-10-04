@@ -43,7 +43,12 @@ unsafe fn transpose4(r: [int32x4_t; 4]) -> [int32x4_t; 4] {
         let t3 = vtrn2q_s32(r[2], r[3]);
         let w = |v: int32x4_t| vreinterpretq_s64_s32(v);
         let n = |v: int64x2_t| vreinterpretq_s32_s64(v);
-        [n(vtrn1q_s64(w(t0), w(t2))), n(vtrn1q_s64(w(t1), w(t3))), n(vtrn2q_s64(w(t0), w(t2))), n(vtrn2q_s64(w(t1), w(t3)))]
+        [
+            n(vtrn1q_s64(w(t0), w(t2))),
+            n(vtrn1q_s64(w(t1), w(t3))),
+            n(vtrn2q_s64(w(t0), w(t2))),
+            n(vtrn2q_s64(w(t1), w(t3))),
+        ]
     }
 }
 
@@ -55,7 +60,12 @@ unsafe fn fdct4_lanes(x: [int32x4_t; 4]) -> [int32x4_t; 4] {
         let s1 = vaddq_s32(x[1], x[2]);
         let s2 = vsubq_s32(x[1], x[2]);
         let s3 = vsubq_s32(x[0], x[3]);
-        [vaddq_s32(s0, s1), vaddq_s32(vaddq_s32(s3, s3), s2), vsubq_s32(s0, s1), vsubq_s32(s3, vaddq_s32(s2, s2))]
+        [
+            vaddq_s32(s0, s1),
+            vaddq_s32(vaddq_s32(s3, s3), s2),
+            vsubq_s32(s0, s1),
+            vsubq_s32(s3, vaddq_s32(s2, s2)),
+        ]
     }
 }
 
@@ -67,7 +77,12 @@ unsafe fn had4_lanes(x: [int32x4_t; 4]) -> [int32x4_t; 4] {
         let s1 = vaddq_s32(x[1], x[2]);
         let s2 = vsubq_s32(x[1], x[2]);
         let s3 = vsubq_s32(x[0], x[3]);
-        [vaddq_s32(s0, s1), vaddq_s32(s3, s2), vsubq_s32(s0, s1), vsubq_s32(s3, s2)]
+        [
+            vaddq_s32(s0, s1),
+            vaddq_s32(s3, s2),
+            vsubq_s32(s0, s1),
+            vsubq_s32(s3, s2),
+        ]
     }
 }
 
@@ -139,7 +154,12 @@ unsafe fn transpose8x8(q: &[[int32x4_t; 8]; 2]) -> [[int32x4_t; 8]; 2] {
         let mut out = [[vdupq_n_s32(0); 8]; 2];
         for rh in 0..2 {
             for cb in 0..2 {
-                let t = transpose4([q[rh][4 * cb], q[rh][4 * cb + 1], q[rh][4 * cb + 2], q[rh][4 * cb + 3]]);
+                let t = transpose4([
+                    q[rh][4 * cb],
+                    q[rh][4 * cb + 1],
+                    q[rh][4 * cb + 2],
+                    q[rh][4 * cb + 3],
+                ]);
                 out[cb][4 * rh..4 * rh + 4].copy_from_slice(&t);
             }
         }
@@ -153,7 +173,8 @@ fn fdct8(residual: &[i16; 64], coeffs: &mut [i32; 64]) {
         // `c[half][k]`: column `k` of rows `4 * half..`, sign-extended.
         let mut c = [[vdupq_n_s32(0); 8]; 2];
         for (half, ch) in c.iter_mut().enumerate() {
-            let rows: [int16x8_t; 4] = std::array::from_fn(|i| vld1q_s16(p.add(8 * (4 * half + i))));
+            let rows: [int16x8_t; 4] =
+                std::array::from_fn(|i| vld1q_s16(p.add(8 * (4 * half + i))));
             let lo = transpose4(std::array::from_fn(|i| vmovl_s16(vget_low_s16(rows[i]))));
             let hi = transpose4(std::array::from_fn(|i| vmovl_high_s16(rows[i])));
             ch[..4].copy_from_slice(&lo);
@@ -176,10 +197,16 @@ unsafe fn quant_lanes(c: int32x4_t, mf: uint32x4_t, off: uint64x2_t, sh: int64x2
     unsafe {
         // `abs` of i32::MIN wraps to 0x8000_0000: 2^31 as u32, `unsigned_abs`.
         let a = vreinterpretq_u32_s32(vabsq_s32(c));
-        let lo = vshlq_u64(vaddq_u64(vmull_u32(vget_low_u32(a), vget_low_u32(mf)), off), sh);
+        let lo = vshlq_u64(
+            vaddq_u64(vmull_u32(vget_low_u32(a), vget_low_u32(mf)), off),
+            sh,
+        );
         let hi = vshlq_u64(vaddq_u64(vmull_high_u32(a, mf), off), sh);
         // The low 32 bits of each 64-bit result, in lane order.
-        let m = vreinterpretq_s32_u32(vuzp1q_u32(vreinterpretq_u32_u64(lo), vreinterpretq_u32_u64(hi)));
+        let m = vreinterpretq_s32_u32(vuzp1q_u32(
+            vreinterpretq_u32_u64(lo),
+            vreinterpretq_u32_u64(hi),
+        ));
         let s = vshrq_n_s32::<31>(c);
         vsubq_s32(veorq_s32(m, s), s)
     }
@@ -187,7 +214,14 @@ unsafe fn quant_lanes(c: int32x4_t, mf: uint32x4_t, off: uint64x2_t, sh: int64x2
 
 /// `None` when a multiplier is negative (not a u32 one): the caller redoes
 /// the block in the reference.
-unsafe fn quant_impl(coeffs: *const i32, levels: *mut i16, mf: *const i32, n: usize, qbits: u32, offset: i32) -> Option<u32> {
+unsafe fn quant_impl(
+    coeffs: *const i32,
+    levels: *mut i16,
+    mf: *const i32,
+    n: usize,
+    qbits: u32,
+    offset: i32,
+) -> Option<u32> {
     unsafe {
         let off = vdupq_n_u64(offset as u64);
         let sh = vdupq_n_s64(-(qbits as i64));
@@ -198,7 +232,12 @@ unsafe fn quant_impl(coeffs: *const i32, levels: *mut i16, mf: *const i32, n: us
             let (m0, m1) = (vld1q_s32(mf.add(i)), vld1q_s32(mf.add(i + 4)));
             signs = vorrq_s32(signs, vorrq_s32(m0, m1));
             let v0 = quant_lanes(vld1q_s32(coeffs.add(i)), vreinterpretq_u32_s32(m0), off, sh);
-            let v1 = quant_lanes(vld1q_s32(coeffs.add(i + 4)), vreinterpretq_u32_s32(m1), off, sh);
+            let v1 = quant_lanes(
+                vld1q_s32(coeffs.add(i + 4)),
+                vreinterpretq_u32_s32(m1),
+                off,
+                sh,
+            );
             // `xtn` keeps each lane's low half: the reference's `as i16`.
             vst1q_s16(levels.add(i), vcombine_s16(vmovn_s32(v0), vmovn_s32(v1)));
             // One per zero level: subtract the all-ones masks.
@@ -206,25 +245,59 @@ unsafe fn quant_impl(coeffs: *const i32, levels: *mut i16, mf: *const i32, n: us
             zeros = vsubq_u32(zeros, vceqzq_s32(v1));
             i += 8;
         }
-        if vmaxvq_u32(vreinterpretq_u32_s32(vshrq_n_s32::<31>(signs))) != 0 { None } else { Some(n as u32 - vaddvq_u32(zeros)) }
+        if vmaxvq_u32(vreinterpretq_u32_s32(vshrq_n_s32::<31>(signs))) != 0 {
+            None
+        } else {
+            Some(n as u32 - vaddvq_u32(zeros))
+        }
     }
 }
 
-fn quant4(coeffs: &[i32; 16], levels: &mut [i16; 16], mf: &[i32; 16], qbits: u32, offset: i32) -> u32 {
+fn quant4(
+    coeffs: &[i32; 16],
+    levels: &mut [i16; 16],
+    mf: &[i32; 16],
+    qbits: u32,
+    offset: i32,
+) -> u32 {
     if offset < 0 || qbits > 62 {
         return quant4_scalar(coeffs, levels, mf, qbits, offset);
     }
-    match unsafe { quant_impl(coeffs.as_ptr(), levels.as_mut_ptr(), mf.as_ptr(), 16, qbits, offset) } {
+    match unsafe {
+        quant_impl(
+            coeffs.as_ptr(),
+            levels.as_mut_ptr(),
+            mf.as_ptr(),
+            16,
+            qbits,
+            offset,
+        )
+    } {
         Some(nz) => nz,
         None => quant4_scalar(coeffs, levels, mf, qbits, offset),
     }
 }
 
-fn quant8(coeffs: &[i32; 64], levels: &mut [i16; 64], mf: &[i32; 64], qbits: u32, offset: i32) -> u32 {
+fn quant8(
+    coeffs: &[i32; 64],
+    levels: &mut [i16; 64],
+    mf: &[i32; 64],
+    qbits: u32,
+    offset: i32,
+) -> u32 {
     if offset < 0 || qbits > 62 {
         return quant8_scalar(coeffs, levels, mf, qbits, offset);
     }
-    match unsafe { quant_impl(coeffs.as_ptr(), levels.as_mut_ptr(), mf.as_ptr(), 64, qbits, offset) } {
+    match unsafe {
+        quant_impl(
+            coeffs.as_ptr(),
+            levels.as_mut_ptr(),
+            mf.as_ptr(),
+            64,
+            qbits,
+            offset,
+        )
+    } {
         Some(nz) => nz,
         None => quant8_scalar(coeffs, levels, mf, qbits, offset),
     }
@@ -237,7 +310,9 @@ mod tests {
     use crate::h264::sps::ScalingLists;
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -245,8 +320,17 @@ mod tests {
     /// vacuous on the architecture it compiles for.
     fn neon() -> H264EncDsp {
         let mut d = H264EncDsp::SCALAR;
-        install(&mut d, Cpu { neon: true, ..Cpu::SCALAR });
-        assert!(d.quant4 as usize != H264EncDsp::SCALAR.quant4 as usize, "NEON installed nothing");
+        install(
+            &mut d,
+            Cpu {
+                neon: true,
+                ..Cpu::SCALAR
+            },
+        );
+        assert!(
+            d.quant4 as usize != H264EncDsp::SCALAR.quant4 as usize,
+            "NEON installed nothing"
+        );
         d
     }
 
@@ -266,14 +350,16 @@ mod tests {
                 };
                 let r4: [i16; 16] = std::array::from_fn(|_| r());
                 let r8: [i16; 64] = std::array::from_fn(|_| r());
-                let (mut w4, mut g4, mut w8, mut g8) = ([0i32; 16], [0i32; 16], [0i32; 64], [0i32; 64]);
+                let (mut w4, mut g4, mut w8, mut g8) =
+                    ([0i32; 16], [0i32; 16], [0i32; 64], [0i32; 64]);
                 (s.fdct4)(&r4, &mut w4);
                 (d.fdct4)(&r4, &mut g4);
                 (s.fdct8)(&r8, &mut w8);
                 (d.fdct8)(&r8, &mut g8);
                 assert_eq!(g4, w4, "fdct4, {bit_depth} bits, round {round}");
                 assert_eq!(g8, w8, "fdct8, {bit_depth} bits, round {round}");
-                let dc: [i32; 16] = std::array::from_fn(|i| w4[i] * if round % 2 == 0 { 1 } else { 16 });
+                let dc: [i32; 16] =
+                    std::array::from_fn(|i| w4[i] * if round % 2 == 0 { 1 } else { 16 });
                 let (mut wh, mut gh) = (dc, dc);
                 (s.hadamard4)(&mut wh);
                 (d.hadamard4)(&mut gh);
@@ -287,8 +373,14 @@ mod tests {
         let s = H264EncDsp::SCALAR;
         let d = neon();
         let mut seed = 0x9a41_u64;
-        let flat = ScalingLists { list4x4: [[16; 16]; 6], list8x8: [[16; 64]; 6] };
-        let small = ScalingLists { list4x4: [[4; 16]; 6], list8x8: [[4; 64]; 6] };
+        let flat = ScalingLists {
+            list4x4: [[16; 16]; 6],
+            list8x8: [[16; 64]; 6],
+        };
+        let small = ScalingLists {
+            list4x4: [[4; 16]; 6],
+            list8x8: [[4; 64]; 6],
+        };
         for lists in [flat, small] {
             let q = Quant::new(&lists);
             for qp in 0..=87 {
@@ -306,13 +398,22 @@ mod tests {
                         };
                         let c4: [i32; 16] = std::array::from_fn(|_| c());
                         let c8: [i32; 64] = std::array::from_fn(|_| c());
-                        let (mut w4, mut g4, mut w8, mut g8) = ([0i16; 16], [0i16; 16], [0i16; 64], [0i16; 64]);
+                        let (mut w4, mut g4, mut w8, mut g8) =
+                            ([0i16; 16], [0i16; 16], [0i16; 64], [0i16; 64]);
                         let nw4 = (s.quant4)(&c4, &mut w4, mf4, qb4, o4);
                         let ng4 = (d.quant4)(&c4, &mut g4, mf4, qb4, o4);
                         let nw8 = (s.quant8)(&c8, &mut w8, mf8, qb8, o8);
                         let ng8 = (d.quant8)(&c8, &mut g8, mf8, qb8, o8);
-                        assert_eq!((g4, ng4), (w4, nw4), "quant4 qp {qp} intra {intra} span {span}");
-                        assert_eq!((g8, ng8), (w8, nw8), "quant8 qp {qp} intra {intra} span {span}");
+                        assert_eq!(
+                            (g4, ng4),
+                            (w4, nw4),
+                            "quant4 qp {qp} intra {intra} span {span}"
+                        );
+                        assert_eq!(
+                            (g8, ng8),
+                            (w8, nw8),
+                            "quant8 qp {qp} intra {intra} span {span}"
+                        );
                     }
                 }
             }

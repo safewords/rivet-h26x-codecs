@@ -103,4 +103,3 @@ pub static BLK4X4_FROM_RASTER: [u8; 16] = [
 pub static BLK4X4_X: [u8; 16] = [0, 1, 0, 1, 2, 3, 2, 3, 0, 1, 0, 1, 2, 3, 2, 3];
 /// See [`BLK4X4_X`].
 pub static BLK4X4_Y: [u8; 16] = [0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3];
-

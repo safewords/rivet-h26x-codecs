@@ -26,8 +26,8 @@ use super::dpb::MISSING_REF;
 use super::dpb::{DecodedPic, Dpb, PocState, RefEntry, RefMark, build_ref_lists, compute_poc};
 use super::fmo::SliceGroupMap;
 use super::frame::{Frame, FramePool, PARITY_FRAME, SharedFrame};
-use super::mb::{InfoPool, MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx};
 use super::mb::chroma_qp;
+use super::mb::{InfoPool, MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx};
 use super::pps::Pps;
 use super::recon::{DeriveScratch, QpState, ReconScratch, SliceRefs, derive, reconstruct};
 use super::slice::{Mmco, SliceHeader, SliceType};
@@ -281,7 +281,8 @@ impl<S: Sample> PictureDecoder<S> {
         // MBAFF: the pair's mb_field_decoding_flag (decoded, or inferred from
         // the left / above pair when the pair carries none — 7.4.4).
         let mut pair_field = false;
-        let infer_field = |info: &PicInfo, sa: usize| -> bool { infer_mb_field(info, sa, slice_num) };
+        let infer_field =
+            |info: &PicInfo, sa: usize| -> bool { infer_mb_field(info, sa, slice_num) };
         // Neighbours of the macroblock at storage address `sa`.
         // Luma-like planes and 4:2:0 / 4:2:2 chroma block rows whose
         // neighbouring nonzero counts the entropy decoders read.
@@ -294,7 +295,16 @@ impl<S: Sample> PictureDecoder<S> {
         // (A function rather than a closure so the ~200-byte result is
         // built in place instead of copied out of a non-inlined closure.)
         #[inline(always)]
-        fn derive_neighbours(nb: &mut MbNeighbours, info: &PicInfo, sa: usize, field: bool, mbaff: bool, slice_num: u16, planes: usize, chroma_rows: usize) {
+        fn derive_neighbours(
+            nb: &mut MbNeighbours,
+            info: &PicInfo,
+            sa: usize,
+            field: bool,
+            mbaff: bool,
+            slice_num: u16,
+            planes: usize,
+            chroma_rows: usize,
+        ) {
             if mbaff {
                 nb.derive_mbaff_into(info, sa, slice_num, field);
             } else {
@@ -304,7 +314,16 @@ impl<S: Sample> PictureDecoder<S> {
         }
         macro_rules! neighbours {
             ($nb:ident, $info:expr, $sa:expr, $field:expr) => {
-                derive_neighbours(&mut $nb, $info, $sa, $field, mbaff, slice_num, nz_planes, nz_chroma_rows)
+                derive_neighbours(
+                    &mut $nb,
+                    $info,
+                    $sa,
+                    $field,
+                    mbaff,
+                    slice_num,
+                    nz_planes,
+                    nz_chroma_rows,
+                )
             };
         }
         let mut nb = MbNeighbours::default();
@@ -414,7 +433,17 @@ impl<S: Sample> PictureDecoder<S> {
                         neighbours!(nb, info, sa, pair_field);
                     }
                     layer.field = pair_field;
-                    parse_mb_cabac(&mut cabac, &mut st, &ctx, info, &nb, &cur.motion, &mut layer, dq, &mut qps)?;
+                    parse_mb_cabac(
+                        &mut cabac,
+                        &mut st,
+                        &ctx,
+                        info,
+                        &nb,
+                        &cur.motion,
+                        &mut layer,
+                        dq,
+                        &mut qps,
+                    )?;
                 }
                 layer.field = pair_field;
                 derive(&ctx, &qps, cur, info, &nb, &mut layer, &refs, &mut dscratch)?;
@@ -474,7 +503,7 @@ impl<S: Sample> PictureDecoder<S> {
                         layer.qp = qps.prev_qp;
                         layer.field = pair_field;
                         derive(&ctx, &qps, cur, info, &nb, &mut layer, &refs, &mut dscratch)?;
-                reconstruct(&ctx, dq, cur, info, &nb, &layer, &refs, &mut rscratch)?;
+                        reconstruct(&ctx, dq, cur, info, &nb, &layer, &refs, &mut rscratch)?;
                         mb_done!();
                     }
                     prev_skipped = run > 0;
@@ -850,7 +879,12 @@ impl<S: Sample> H264DecoderImpl<S> {
     /// `None`: the same binary then decodes an ordinary stream through the
     /// slice-group path, which is how the cost of that path is measured
     /// against the `addr + 1` one.
-    fn slice_group_map(&mut self, pps: &Arc<Pps>, sps: &Sps, hdr: &SliceHeader) -> Result<Option<Arc<SliceGroupMap>>> {
+    fn slice_group_map(
+        &mut self,
+        pps: &Arc<Pps>,
+        sps: &Sps,
+        hdr: &SliceHeader,
+    ) -> Result<Option<Arc<SliceGroupMap>>> {
         static IDENTITY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let identity = *IDENTITY.get_or_init(|| std::env::var_os("H26X_FMO_IDENTITY").is_some());
         if pps.slice_groups.is_none() && !identity {
@@ -869,16 +903,32 @@ impl<S: Sample> H264DecoderImpl<S> {
         if let Some(c) = &self.fmo_cache {
             let k = &c.key;
             if Arc::ptr_eq(&k.pps, &key.pps)
-                && (k.width, k.height_units, k.frame_mbs_only, k.field_pic, k.mbaff, k.change_cycle)
-                    == (key.width, key.height_units, key.frame_mbs_only, key.field_pic, key.mbaff, key.change_cycle)
+                && (
+                    k.width,
+                    k.height_units,
+                    k.frame_mbs_only,
+                    k.field_pic,
+                    k.mbaff,
+                    k.change_cycle,
+                ) == (
+                    key.width,
+                    key.height_units,
+                    key.frame_mbs_only,
+                    key.field_pic,
+                    key.mbaff,
+                    key.change_cycle,
+                )
             {
                 return Ok(Some(c.map.clone()));
             }
         }
         let map = match &pps.slice_groups {
-            Some(sg) => super::fmo::build(sg, sps, hdr.field_pic, mbaff, hdr.slice_group_change_cycle)?,
+            Some(sg) => {
+                super::fmo::build(sg, sps, hdr.field_pic, mbaff, hdr.slice_group_change_cycle)?
+            }
             None => {
-                let total = (sps.pic_width_in_mbs * sps.frame_height_in_mbs() / if hdr.field_pic { 2 } else { 1 }) as usize;
+                let total = (sps.pic_width_in_mbs * sps.frame_height_in_mbs()
+                    / if hdr.field_pic { 2 } else { 1 }) as usize;
                 SliceGroupMap {
                     next: (1..=total as u32).collect(),
                     group: vec![0; total],
@@ -886,7 +936,10 @@ impl<S: Sample> H264DecoderImpl<S> {
             }
         };
         let map = Arc::new(map);
-        self.fmo_cache = Some(FmoCache { key, map: map.clone() });
+        self.fmo_cache = Some(FmoCache {
+            key,
+            map: map.clone(),
+        });
         Ok(Some(map))
     }
 
@@ -1039,7 +1092,10 @@ impl<S: Sample> H264DecoderImpl<S> {
         if let Some(p) = self.output.pop_front() {
             return Some(p);
         }
-        self.dpb.output.pop_front().map(|p| p.into_picture(&self.output_pool))
+        self.dpb
+            .output
+            .pop_front()
+            .map(|p| p.into_picture(&self.output_pool))
     }
 
     /// The next picture in output order if it has finished decoding.
@@ -1053,7 +1109,11 @@ impl<S: Sample> H264DecoderImpl<S> {
             .front()
             .is_some_and(|p| p.frame.is_complete())
         {
-            return self.dpb.output.pop_front().map(|p| p.into_picture(&self.output_pool));
+            return self
+                .dpb
+                .output
+                .pop_front()
+                .map(|p| p.into_picture(&self.output_pool));
         }
         None
     }
@@ -1179,7 +1239,9 @@ impl<S: Sample> H264DecoderImpl<S> {
                 )));
             }
             if pps.transform_8x8_mode {
-                return Err(Error::unsupported("H.264 SP/SI slices with the 8x8 transform"));
+                return Err(Error::unsupported(
+                    "H.264 SP/SI slices with the 8x8 transform",
+                ));
             }
         }
         Self::check_supported(&sps)?;

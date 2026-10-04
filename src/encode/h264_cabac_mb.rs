@@ -34,24 +34,25 @@
 
 use crate::bitwriter::BitWriter;
 use crate::cabac_enc::CabacEncoder;
-use crate::encode::h264_intra::{MbDecision, MbKind};
 use crate::encode::h264_cavlc_mb::sub_mb_type_p;
+use crate::encode::h264_intra::{MbDecision, MbKind};
 use crate::encode::h264_me::{BDecision, BMbKind, InterDecision, InterMbKind};
 use crate::encode::h264_pic::{
-    BMb, CodedPair, Colocated, IntraTools, PMb, PairMb, PicMotion, code_b_picture, code_intra_picture, code_p_picture,
+    BMb, CodedPair, Colocated, IntraTools, PMb, PairMb, PicMotion, code_b_picture,
+    code_intra_picture, code_p_picture,
 };
-use crate::h264::mb::MbNeighbours;
 use crate::encode::h264_syntax::{Geometry, Plane, Recon};
 use crate::h264::SliceType;
 use crate::h264::cabac_mb::{
-    CabacState, WrittenMb, intra_mb_type_code, write_cbp_cabac, write_intra_pred_modes_cabac,
-    write_intra_residual_cabac, write_inter_residual_cabac, write_inter_residual_fields_cabac,
-    CurMbMvd, write_mb_field_cabac, write_mb_qp_delta_cabac, write_mb_skip_cabac, write_mb_type_b_cabac,
-    write_ref_idx_16x16_cabac,
-    write_mb_type_i_cabac, write_mb_type_p_cabac, write_mvd_cabac,
-    write_sub_mb_type_b_cabac, write_sub_mb_type_p_cabac, write_transform_8x8_cabac,
+    CabacState, CurMbMvd, WrittenMb, intra_mb_type_code, write_cbp_cabac,
+    write_inter_residual_cabac, write_inter_residual_fields_cabac, write_intra_pred_modes_cabac,
+    write_intra_residual_cabac, write_mb_field_cabac, write_mb_qp_delta_cabac, write_mb_skip_cabac,
+    write_mb_type_b_cabac, write_mb_type_i_cabac, write_mb_type_p_cabac, write_mvd_cabac,
+    write_ref_idx_16x16_cabac, write_sub_mb_type_b_cabac, write_sub_mb_type_p_cabac,
+    write_transform_8x8_cabac,
 };
 use crate::h264::cavlc::part_index_of;
+use crate::h264::mb::MbNeighbours;
 use crate::picture::ChromaFormat;
 use crate::sample::Sample;
 
@@ -112,7 +113,10 @@ fn write_intra_body(
     if t8x8_mode && d.kind.is_nxn() {
         write_transform_8x8_cabac(e, st, lnb, anb, d.transform_8x8);
     }
-    debug_assert!(t8x8_mode || !d.transform_8x8, "no PPS flag, no 8x8 transform");
+    debug_assert!(
+        t8x8_mode || !d.transform_8x8,
+        "no PPS flag, no 8x8 transform"
+    );
     write_intra_pred_modes_cabac(e, st, d, chroma_nb);
     if d.kind.is_nxn() {
         write_cbp_cabac(e, st, lnb, anb, d.cbp_luma | (d.cbp_chroma << 4), chroma);
@@ -148,7 +152,10 @@ fn write_p16_body(
         !matches!(d.kind, InterMbKind::PSkip | InterMbKind::UseIntra),
         "only a coded P macroblock carries this syntax"
     );
-    debug_assert_eq!(d.ref_idx, 0, "more than one reference needs ref_idx writing");
+    debug_assert_eq!(
+        d.ref_idx, 0,
+        "more than one reference needs ref_idx writing"
+    );
     write_mb_type_p_cabac(e, st, d.kind.p_mb_type());
     let lnb = left.map(|m| &m.nb);
     let anb = above.map(|m| &m.nb);
@@ -166,7 +173,11 @@ fn write_p16_body(
     // neighbouring index this encoder writes (all 0), leaving no
     // condTermFlag set.
     if ref_idx_zeros {
-        let parts = if d.kind == InterMbKind::P8x8 { 4 } else { d.kind.parts().len() };
+        let parts = if d.kind == InterMbKind::P8x8 {
+            4
+        } else {
+            d.kind.parts().len()
+        };
         for _ in 0..parts {
             write_ref_idx_16x16_cabac(e, st, None, None, 0);
         }
@@ -184,7 +195,14 @@ fn write_p16_body(
         write_mvd_cabac(e, st, &cur, lnb, anb, 0, x / 4, y / 4, mvd);
         cur.set(0, x, y, w, h, mvd);
     }
-    write_cbp_cabac(e, st, lnb, anb, d.cbp_luma | (d.cbp_chroma << 4), cfi == 1 || cfi == 2);
+    write_cbp_cabac(
+        e,
+        st,
+        lnb,
+        anb,
+        d.cbp_luma | (d.cbp_chroma << 4),
+        cfi == 1 || cfi == 2,
+    );
     // An inter macroblock's flag comes after the coded block pattern,
     // only when some luma block is coded, and only when every
     // sub-macroblock partition is at least 8x8 (7.3.5).
@@ -230,7 +248,10 @@ fn write_b_body(
         !matches!(d.kind, BMbKind::BSkip | BMbKind::UseIntra),
         "only a coded B macroblock carries this syntax"
     );
-    debug_assert!(d.ref_idx.iter().flatten().all(|&r| r <= 0), "more than one reference needs ref_idx writing");
+    debug_assert!(
+        d.ref_idx.iter().flatten().all(|&r| r <= 0),
+        "more than one reference needs ref_idx writing"
+    );
     let lnb = left.map(|m| &m.nb);
     let anb = above.map(|m| &m.nb);
     write_mb_type_b_cabac(e, st, inc, d.mb_type());
@@ -275,7 +296,14 @@ fn write_b_body(
             }
         }
     }
-    write_cbp_cabac(e, st, lnb, anb, d.cbp_luma | (d.cbp_chroma << 4), cfi == 1 || cfi == 2);
+    write_cbp_cabac(
+        e,
+        st,
+        lnb,
+        anb,
+        d.cbp_luma | (d.cbp_chroma << 4),
+        cfi == 1 || cfi == 2,
+    );
     // After the coded block pattern, only when some luma block is coded
     // and every sub-macroblock partition is at least 8x8 —
     // `B_Direct_16x16` and a direct sub-macroblock count as 8x8, because
@@ -290,8 +318,20 @@ fn write_b_body(
         write_mb_qp_delta_cabac(e, st, d.qp_delta as i32, bit_depth);
         st.prev_qp_delta_nonzero = d.qp_delta != 0;
         write_inter_residual_fields_cabac(
-            e, st, field, cfi, d.transform_8x8, d.cbp_luma, &d.nz_luma, &d.luma, d.cbp_chroma,
-            &d.chroma_dc, &d.chroma_ac, &d.nz_chroma, lnb, anb,
+            e,
+            st,
+            field,
+            cfi,
+            d.transform_8x8,
+            d.cbp_luma,
+            &d.nz_luma,
+            &d.luma,
+            d.cbp_chroma,
+            &d.chroma_dc,
+            &d.chroma_ac,
+            &d.nz_chroma,
+            lnb,
+            anb,
         );
     } else {
         st.prev_qp_delta_nonzero = false;
@@ -325,7 +365,17 @@ pub fn write_intra_picture_cabac<S: Sample>(
         let above = (mb_y > 0).then(|| &coded[idx - mbw]);
         let inc = left.map_or(0, |m| m.not_nxn as usize) + above.map_or(0, |m| m.not_nxn as usize);
         write_mb_type_i_cabac(&mut e, &mut st, inc, intra_mb_type_code(dec));
-        write_intra_body(&mut e, &mut st, dec, left, above, cfi, t8x8, g.bit_depth, g.field_pic);
+        write_intra_body(
+            &mut e,
+            &mut st,
+            dec,
+            left,
+            above,
+            cfi,
+            t8x8,
+            g.bit_depth,
+            g.field_pic,
+        );
         coded.push(Coded {
             nb: WrittenMb::from_decision(dec, cfi == 3),
             not_nxn: !dec.kind.is_nxn(),
@@ -362,50 +412,80 @@ pub fn write_p_picture_cabac<S: Sample>(
     let mut st = CabacState::new(SliceType::P, 0, qp as i32);
     let mut e = CabacEncoder::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
-    let fmbs = code_p_picture(g, tools, qp, planes, rec, refp, weights, |mb_x, mb_y, mb| {
-        let idx = coded.len();
-        let left = (mb_x > 0).then(|| &coded[idx - 1]);
-        let above = (mb_y > 0).then(|| &coded[idx - mbw]);
-        let lnb = left.map(|m| &m.nb);
-        let anb = above.map(|m| &m.nb);
-        // Every macroblock of a P slice codes mb_skip_flag, whatever it
-        // turns out to be.
-        write_mb_skip_cabac(&mut e, &mut st, lnb, anb, false, matches!(mb, PMb::Skip(_)));
-        let entry = match mb {
-            PMb::Skip(dec) => {
-                // A skip wrote its flag and writes nothing else; the
-                // qp-delta carry clears, as the decoder's slice loop
-                // clears it when it takes the skip branch.
-                st.prev_qp_delta_nonzero = false;
-                Coded {
-                    nb: WrittenMb::from_inter_decision(dec, cfi == 3),
-                    not_nxn: true,
-                    chroma_nonzero: false,
+    let fmbs = code_p_picture(
+        g,
+        tools,
+        qp,
+        planes,
+        rec,
+        refp,
+        weights,
+        |mb_x, mb_y, mb| {
+            let idx = coded.len();
+            let left = (mb_x > 0).then(|| &coded[idx - 1]);
+            let above = (mb_y > 0).then(|| &coded[idx - mbw]);
+            let lnb = left.map(|m| &m.nb);
+            let anb = above.map(|m| &m.nb);
+            // Every macroblock of a P slice codes mb_skip_flag, whatever it
+            // turns out to be.
+            write_mb_skip_cabac(&mut e, &mut st, lnb, anb, false, matches!(mb, PMb::Skip(_)));
+            let entry = match mb {
+                PMb::Skip(dec) => {
+                    // A skip wrote its flag and writes nothing else; the
+                    // qp-delta carry clears, as the decoder's slice loop
+                    // clears it when it takes the skip branch.
+                    st.prev_qp_delta_nonzero = false;
+                    Coded {
+                        nb: WrittenMb::from_inter_decision(dec, cfi == 3),
+                        not_nxn: true,
+                        chroma_nonzero: false,
+                    }
                 }
-            }
-            PMb::Coded(dec) => {
-                write_p16_body(&mut e, &mut st, dec, left, above, cfi, t8x8, g.bit_depth, g.field_pic, false);
-                Coded {
-                    nb: WrittenMb::from_inter_decision(dec, cfi == 3),
-                    not_nxn: true,
-                    chroma_nonzero: false,
+                PMb::Coded(dec) => {
+                    write_p16_body(
+                        &mut e,
+                        &mut st,
+                        dec,
+                        left,
+                        above,
+                        cfi,
+                        t8x8,
+                        g.bit_depth,
+                        g.field_pic,
+                        false,
+                    );
+                    Coded {
+                        nb: WrittenMb::from_inter_decision(dec, cfi == 3),
+                        not_nxn: true,
+                        chroma_nonzero: false,
+                    }
                 }
-            }
-            PMb::Intra(idec) => {
-                // Intra in a P slice: the same macroblock, `mb_type`
-                // shifted by 5 (Table 7-11's note).
-                write_mb_type_p_cabac(&mut e, &mut st, 5 + intra_mb_type_code(idec));
-                write_intra_body(&mut e, &mut st, idec, left, above, cfi, t8x8, g.bit_depth, g.field_pic);
-                Coded {
-                    nb: WrittenMb::from_decision(idec, cfi == 3),
-                    not_nxn: !idec.kind.is_nxn(),
-                    chroma_nonzero: idec.chroma_mode != 0,
+                PMb::Intra(idec) => {
+                    // Intra in a P slice: the same macroblock, `mb_type`
+                    // shifted by 5 (Table 7-11's note).
+                    write_mb_type_p_cabac(&mut e, &mut st, 5 + intra_mb_type_code(idec));
+                    write_intra_body(
+                        &mut e,
+                        &mut st,
+                        idec,
+                        left,
+                        above,
+                        cfi,
+                        t8x8,
+                        g.bit_depth,
+                        g.field_pic,
+                    );
+                    Coded {
+                        nb: WrittenMb::from_decision(idec, cfi == 3),
+                        not_nxn: !idec.kind.is_nxn(),
+                        chroma_nonzero: idec.chroma_mode != 0,
+                    }
                 }
-            }
-        };
-        coded.push(entry);
-        e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
-    });
+            };
+            coded.push(entry);
+            e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
+        },
+    );
     drop(e);
     w.align_zero();
     fmbs
@@ -439,51 +519,83 @@ pub fn write_b_picture_cabac<S: Sample>(
     let mut st = CabacState::new(SliceType::B, 0, qp as i32);
     let mut e = CabacEncoder::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
-    let fmbs = code_b_picture(g, tools, qp, planes, rec, refs, col, weights, |mb_x, mb_y, mb| {
-        let idx = coded.len();
-        let left = (mb_x > 0).then(|| &coded[idx - 1]);
-        let above = (mb_y > 0).then(|| &coded[idx - mbw]);
-        let lnb = left.map(|m| &m.nb);
-        let anb = above.map(|m| &m.nb);
-        write_mb_skip_cabac(&mut e, &mut st, lnb, anb, true, matches!(mb, BMb::Skip(_)));
-        // The B `mb_type` first-bin context counts available neighbours
-        // that are neither B_Skip nor B_Direct_16x16.
-        let cond = |m: Option<&Coded>| -> usize {
-            m.map_or(0, |m| !(m.nb.skip || m.nb.direct) as usize)
-        };
-        let inc = cond(left) + cond(above);
-        let entry = match mb {
-            BMb::Skip(dec) => {
-                st.prev_qp_delta_nonzero = false;
-                Coded {
-                    nb: WrittenMb::from_b_decision(dec, cfi == 3),
-                    not_nxn: true,
-                    chroma_nonzero: false,
+    let fmbs = code_b_picture(
+        g,
+        tools,
+        qp,
+        planes,
+        rec,
+        refs,
+        col,
+        weights,
+        |mb_x, mb_y, mb| {
+            let idx = coded.len();
+            let left = (mb_x > 0).then(|| &coded[idx - 1]);
+            let above = (mb_y > 0).then(|| &coded[idx - mbw]);
+            let lnb = left.map(|m| &m.nb);
+            let anb = above.map(|m| &m.nb);
+            write_mb_skip_cabac(&mut e, &mut st, lnb, anb, true, matches!(mb, BMb::Skip(_)));
+            // The B `mb_type` first-bin context counts available neighbours
+            // that are neither B_Skip nor B_Direct_16x16.
+            let cond = |m: Option<&Coded>| -> usize {
+                m.map_or(0, |m| !(m.nb.skip || m.nb.direct) as usize)
+            };
+            let inc = cond(left) + cond(above);
+            let entry = match mb {
+                BMb::Skip(dec) => {
+                    st.prev_qp_delta_nonzero = false;
+                    Coded {
+                        nb: WrittenMb::from_b_decision(dec, cfi == 3),
+                        not_nxn: true,
+                        chroma_nonzero: false,
+                    }
                 }
-            }
-            BMb::Direct(dec) | BMb::Explicit(dec) => {
-                write_b_body(&mut e, &mut st, dec, inc, left, above, cfi, t8x8, g.bit_depth, g.field_pic, false);
-                Coded {
-                    nb: WrittenMb::from_b_decision(dec, cfi == 3),
-                    not_nxn: true,
-                    chroma_nonzero: false,
+                BMb::Direct(dec) | BMb::Explicit(dec) => {
+                    write_b_body(
+                        &mut e,
+                        &mut st,
+                        dec,
+                        inc,
+                        left,
+                        above,
+                        cfi,
+                        t8x8,
+                        g.bit_depth,
+                        g.field_pic,
+                        false,
+                    );
+                    Coded {
+                        nb: WrittenMb::from_b_decision(dec, cfi == 3),
+                        not_nxn: true,
+                        chroma_nonzero: false,
+                    }
                 }
-            }
-            BMb::Intra(idec) => {
-                // Intra in a B slice: the same macroblock behind the B
-                // prefix, `mb_type` shifted by 23.
-                write_mb_type_b_cabac(&mut e, &mut st, inc, 23 + intra_mb_type_code(idec));
-                write_intra_body(&mut e, &mut st, idec, left, above, cfi, t8x8, g.bit_depth, g.field_pic);
-                Coded {
-                    nb: WrittenMb::from_decision(idec, cfi == 3),
-                    not_nxn: !idec.kind.is_nxn(),
-                    chroma_nonzero: idec.chroma_mode != 0,
+                BMb::Intra(idec) => {
+                    // Intra in a B slice: the same macroblock behind the B
+                    // prefix, `mb_type` shifted by 23.
+                    write_mb_type_b_cabac(&mut e, &mut st, inc, 23 + intra_mb_type_code(idec));
+                    write_intra_body(
+                        &mut e,
+                        &mut st,
+                        idec,
+                        left,
+                        above,
+                        cfi,
+                        t8x8,
+                        g.bit_depth,
+                        g.field_pic,
+                    );
+                    Coded {
+                        nb: WrittenMb::from_decision(idec, cfi == 3),
+                        not_nxn: !idec.kind.is_nxn(),
+                        chroma_nonzero: idec.chroma_mode != 0,
+                    }
                 }
-            }
-        };
-        coded.push(entry);
-        e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
-    });
+            };
+            coded.push(entry);
+            e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
+        },
+    );
     drop(e);
     w.align_zero();
     fmbs
@@ -503,7 +615,13 @@ struct MbaffParams {
 /// The written record of storage address `a`: one of the two macroblocks
 /// of the pair being written (`local`, top then bottom), or one written
 /// before it.
-fn mbaff_lookup(base: &[Option<Coded>], local: &[Option<Coded>; 2], top: usize, bot: usize, a: usize) -> Coded {
+fn mbaff_lookup(
+    base: &[Option<Coded>],
+    local: &[Option<Coded>; 2],
+    top: usize,
+    bot: usize,
+    a: usize,
+) -> Coded {
     (if a == top {
         local[0]
     } else if a == bot {
@@ -571,12 +689,16 @@ fn mbaff_neighbours(
             }
         }
         for r8 in 0..2usize {
-            let (ma, blk) = nb.block(-1, 2 * r8 as i32).expect("an available pair is whole");
+            let (ma, blk) = nb
+                .block(-1, 2 * r8 as i32)
+                .expect("an available pair is whole");
             let b8 = (blk / 8) * 2 + (blk % 4) / 2;
             v.nb.cbp |= ((get(ma).nb.cbp >> b8) & 1) << (2 * r8 + 1);
         }
         for r in 0..rows {
-            let (ma, cblk) = nb.block_c(-1, r as i32, rows as i32).expect("an available pair is whole");
+            let (ma, cblk) = nb
+                .block_c(-1, r as i32, rows as i32)
+                .expect("an available pair is whole");
             let m = get(ma).nb;
             for comp in 0..2 {
                 v.nb.nz_chroma[comp][r * 2 + 1] = m.nz_chroma[comp][cblk];
@@ -598,13 +720,17 @@ fn mbaff_neighbours(
             }
         }
         for c8 in 0..2usize {
-            let (ma, blk) = nb.block(2 * c8 as i32, -1).expect("an available pair is whole");
+            let (ma, blk) = nb
+                .block(2 * c8 as i32, -1)
+                .expect("an available pair is whole");
             let b8 = (blk / 8) * 2 + (blk % 4) / 2;
             v.nb.cbp |= ((get(ma).nb.cbp >> b8) & 1) << (2 + c8);
         }
         if rows > 0 {
             for c in 0..2 {
-                let (ma, cblk) = nb.block_c(c as i32, -1, rows as i32).expect("an available pair is whole");
+                let (ma, cblk) = nb
+                    .block_c(c as i32, -1, rows as i32)
+                    .expect("an available pair is whole");
                 let m = get(ma).nb;
                 for comp in 0..2 {
                     v.nb.nz_chroma[comp][(rows - 1) * 2 + c] = m.nz_chroma[comp][cblk];
@@ -623,7 +749,11 @@ fn mbaff_skip_record(mb: &PairMb, cfi: u32) -> Coded {
         PairMb::B(d) => WrittenMb::from_b_decision(d, cfi == 3),
         _ => unreachable!("only an inter macroblock skips"),
     };
-    Coded { nb, not_nxn: true, chroma_nonzero: false }
+    Coded {
+        nb,
+        not_nxn: true,
+        chroma_nonzero: false,
+    }
 }
 
 /// One coded macroblock of an MBAFF pair — `mb_type` through its residual
@@ -654,25 +784,57 @@ fn write_mbaff_mb(
             let inc = ra.map_or(0, |m| m.not_nxn as usize) + rb.map_or(0, |m| m.not_nxn as usize);
             write_mb_type_i_cabac(e, st, inc, intra_mb_type_code(d));
             write_intra_body(e, st, d, l, a, p.cfi, p.t8x8, p.bit_depth, field);
-            Coded { nb: WrittenMb::from_decision(d, p.cfi == 3), not_nxn: !d.kind.is_nxn(), chroma_nonzero: d.chroma_mode != 0 }
+            Coded {
+                nb: WrittenMb::from_decision(d, p.cfi == 3),
+                not_nxn: !d.kind.is_nxn(),
+                chroma_nonzero: d.chroma_mode != 0,
+            }
         }
         PairMb::PIntra(d) => {
             write_mb_type_p_cabac(e, st, 5 + intra_mb_type_code(d));
             write_intra_body(e, st, d, l, a, p.cfi, p.t8x8, p.bit_depth, field);
-            Coded { nb: WrittenMb::from_decision(d, p.cfi == 3), not_nxn: !d.kind.is_nxn(), chroma_nonzero: d.chroma_mode != 0 }
+            Coded {
+                nb: WrittenMb::from_decision(d, p.cfi == 3),
+                not_nxn: !d.kind.is_nxn(),
+                chroma_nonzero: d.chroma_mode != 0,
+            }
         }
         PairMb::BIntra(d) => {
             write_mb_type_b_cabac(e, st, b_inc(ra) + b_inc(rb), 23 + intra_mb_type_code(d));
             write_intra_body(e, st, d, l, a, p.cfi, p.t8x8, p.bit_depth, field);
-            Coded { nb: WrittenMb::from_decision(d, p.cfi == 3), not_nxn: !d.kind.is_nxn(), chroma_nonzero: d.chroma_mode != 0 }
+            Coded {
+                nb: WrittenMb::from_decision(d, p.cfi == 3),
+                not_nxn: !d.kind.is_nxn(),
+                chroma_nonzero: d.chroma_mode != 0,
+            }
         }
         PairMb::P(d) => {
             write_p16_body(e, st, d, l, a, p.cfi, p.t8x8, p.bit_depth, field, field);
-            Coded { nb: WrittenMb::from_inter_decision(d, p.cfi == 3), not_nxn: true, chroma_nonzero: false }
+            Coded {
+                nb: WrittenMb::from_inter_decision(d, p.cfi == 3),
+                not_nxn: true,
+                chroma_nonzero: false,
+            }
         }
         PairMb::B(d) => {
-            write_b_body(e, st, d, b_inc(ra) + b_inc(rb), l, a, p.cfi, p.t8x8, p.bit_depth, field, field);
-            Coded { nb: WrittenMb::from_b_decision(d, p.cfi == 3), not_nxn: true, chroma_nonzero: false }
+            write_b_body(
+                e,
+                st,
+                d,
+                b_inc(ra) + b_inc(rb),
+                l,
+                a,
+                p.cfi,
+                p.t8x8,
+                p.bit_depth,
+                field,
+                field,
+            );
+            Coded {
+                nb: WrittenMb::from_b_decision(d, p.cfi == 3),
+                not_nxn: true,
+                chroma_nonzero: false,
+            }
         }
     }
 }
@@ -706,7 +868,9 @@ fn write_pair_cabac(
     let mut local: [Option<Coded>; 2] = [None, None];
     let skip = [pair.mbs[0].is_skip(), pair.mbs[1].is_skip()];
     let is_b = p.slice.is_b();
-    let rec = |local: &[Option<Coded>; 2], a: Option<usize>| a.map(|a| mbaff_lookup(base, local, top, bot, a).nb);
+    let rec = |local: &[Option<Coded>; 2], a: Option<usize>| {
+        a.map(|a| mbaff_lookup(base, local, top, bot, a).nb)
+    };
     let inferred = crate::h264::decoder::infer_mb_field(info, top, 0);
     let mut nb = MbNeighbours::default();
     nb.derive_mbaff_into(info, top, 0, inferred);
@@ -727,7 +891,19 @@ fn write_pair_cabac(
             } else {
                 write_mb_field_cabac(e, st, &nbb, pair.field);
                 nb.derive_mbaff_into(info, bot, 0, pair.field);
-                local[1] = Some(write_mbaff_mb(e, st, &nb, info, base, &local, top, bot, &pair.mbs[1], pair.field, p));
+                local[1] = Some(write_mbaff_mb(
+                    e,
+                    st,
+                    &nb,
+                    info,
+                    base,
+                    &local,
+                    top,
+                    bot,
+                    &pair.mbs[1],
+                    pair.field,
+                    p,
+                ));
             }
             e.encode_terminate(last as u32);
             return [local[0].expect("written"), local[1].expect("written")];
@@ -735,7 +911,19 @@ fn write_pair_cabac(
     }
     write_mb_field_cabac(e, st, &nb, pair.field);
     nb.derive_mbaff_into(info, top, 0, pair.field);
-    local[0] = Some(write_mbaff_mb(e, st, &nb, info, base, &local, top, bot, &pair.mbs[0], pair.field, p));
+    local[0] = Some(write_mbaff_mb(
+        e,
+        st,
+        &nb,
+        info,
+        base,
+        &local,
+        top,
+        bot,
+        &pair.mbs[0],
+        pair.field,
+        p,
+    ));
     nb.derive_mbaff_into(info, bot, 0, pair.field);
     if !p.slice.is_intra() {
         let (la, lb) = (rec(&local, nb.a), rec(&local, nb.b));
@@ -745,7 +933,19 @@ fn write_pair_cabac(
         st.prev_qp_delta_nonzero = false;
         mbaff_skip_record(&pair.mbs[1], p.cfi)
     } else {
-        write_mbaff_mb(e, st, &nb, info, base, &local, top, bot, &pair.mbs[1], pair.field, p)
+        write_mbaff_mb(
+            e,
+            st,
+            &nb,
+            info,
+            base,
+            &local,
+            top,
+            bot,
+            &pair.mbs[1],
+            pair.field,
+            p,
+        )
     });
     e.encode_terminate(last as u32);
     [local[0].expect("written"), local[1].expect("written")]
@@ -769,7 +969,13 @@ pub(crate) struct MbaffCabac<'w> {
 impl<'w> MbaffCabac<'w> {
     /// Begin the slice data of an MBAFF picture of `slice` type at slice
     /// quantiser `qp`, after its header.
-    pub(crate) fn new<S: Sample>(w: &'w mut BitWriter, g: &Geometry, tools: &IntraTools<S>, qp: u8, slice: SliceType) -> Self {
+    pub(crate) fn new<S: Sample>(
+        w: &'w mut BitWriter,
+        g: &Geometry,
+        tools: &IntraTools<S>,
+        qp: u8,
+        slice: SliceType,
+    ) -> Self {
         w.align_one();
         let rows = match g.chroma {
             ChromaFormat::Yuv420 => 2,
@@ -781,7 +987,13 @@ impl<'w> MbaffCabac<'w> {
             e: CabacEncoder::new(w),
             st: CabacState::new(slice, 0, qp as i32),
             recs: vec![None; n],
-            p: MbaffParams { slice, cfi: cfi_of(g.chroma), t8x8: tools.transform_8x8, bit_depth: g.bit_depth, rows },
+            p: MbaffParams {
+                slice,
+                cfi: cfi_of(g.chroma),
+                t8x8: tools.transform_8x8,
+                bit_depth: g.bit_depth,
+                rows,
+            },
             pairs: n / 2,
             written: 0,
         }
@@ -799,7 +1011,15 @@ impl crate::encode::h264_pic::PairWriter for MbaffCabac<'_> {
     fn write_pair(&mut self, pair: &CodedPair, pm: &PicMotion) {
         self.written += 1;
         let last = self.written == self.pairs;
-        let recs = write_pair_cabac(&mut self.e, &mut self.st, &self.recs, pair, pm, &self.p, last);
+        let recs = write_pair_cabac(
+            &mut self.e,
+            &mut self.st,
+            &self.recs,
+            pair,
+            pm,
+            &self.p,
+            last,
+        );
         let mbw = pm.info.mb_width;
         self.recs[pair.top] = Some(recs[0]);
         self.recs[pair.top + mbw] = Some(recs[1]);
@@ -825,7 +1045,10 @@ pub fn write_skip_picture_cabac(w: &mut BitWriter, g: &Geometry, qp: u8, is_b: b
     // the rule. A skipped B macroblock leaves the same state a skipped P
     // one does: the contexts only ever read `skip`.
     let skipped = WrittenMb::from_inter_decision(
-        &InterDecision { kind: InterMbKind::PSkip, ..InterDecision::default() },
+        &InterDecision {
+            kind: InterMbKind::PSkip,
+            ..InterDecision::default()
+        },
         false,
     );
     for idx in 0..total {
@@ -868,7 +1091,9 @@ mod tests {
         m.qp_delta_nonzero = layer.has_residual() && layer.qp_delta != 0;
         m.dc_cbf = layer.dc_cbf;
         m.sub_direct = if layer.kind == DecKind::Inter8x8 {
-            (0..4).map(|p| ((layer.sub_shape[p] == SubMbShape::Direct) as u8) << p).sum()
+            (0..4)
+                .map(|p| ((layer.sub_shape[p] == SubMbShape::Direct) as u8) << p)
+                .sum()
         } else {
             0
         };
@@ -911,7 +1136,12 @@ mod tests {
             test_b_decision(
                 BMbKind::B8x8,
                 [PRED_BI, PRED_L1, PRED_BI, PRED_L0],
-                [SubMbShape::Direct, SubMbShape::S8x8, SubMbShape::S4x4, SubMbShape::S8x4],
+                [
+                    SubMbShape::Direct,
+                    SubMbShape::S8x8,
+                    SubMbShape::S4x4,
+                    SubMbShape::S8x4,
+                ],
                 5,
             ),
             test_b_decision(BMbKind::BDirect16, [PRED_BI; 4], [SubMbShape::S8x8; 4], 1),
@@ -946,7 +1176,19 @@ mod tests {
                 let cond =
                     |m: Option<&Coded>| m.map_or(0, |m| !(m.nb.skip || m.nb.direct) as usize);
                 let inc = cond(left) + cond(above);
-                write_b_body(&mut e, &mut enc_st, d, inc, left, above, cfi, false, 8, false, false);
+                write_b_body(
+                    &mut e,
+                    &mut enc_st,
+                    d,
+                    inc,
+                    left,
+                    above,
+                    cfi,
+                    false,
+                    8,
+                    false,
+                    false,
+                );
                 coded.push(Coded {
                     nb: WrittenMb::from_b_decision(d, false),
                     not_nxn: true,
@@ -980,9 +1222,15 @@ mod tests {
             sp_qs: 0,
             sp_qsc: [0; 2],
         };
-        let lists = ScalingLists { list4x4: [[16; 16]; 6], list8x8: [[16; 64]; 6] };
+        let lists = ScalingLists {
+            list4x4: [[16; 16]; 6],
+            list8x8: [[16; 64]; 6],
+        };
         let dq = Dequant::new(&lists);
-        let mut qps = QpState { prev_qp: 30, chroma_offset: [0, 0] };
+        let mut qps = QpState {
+            prev_qp: 30,
+            chroma_offset: [0, 0],
+        };
         let mut dec_st = CabacState::new(SliceType::B, 0, 30);
         let mut c = Cabac::new(&data);
         let mut info = PicInfo::new(mbw, total / mbw);
@@ -995,7 +1243,10 @@ mod tests {
         for (addr, d) in mbs.iter().enumerate() {
             nb.derive_into(&info, addr, 0);
             nb.gather_nz(&info, 1, 2);
-            assert!(!decode_mb_skip(&mut c, &mut dec_st, &info, &nb, true), "mb {addr} skip");
+            assert!(
+                !decode_mb_skip(&mut c, &mut dec_st, &info, &nb, true),
+                "mb {addr} skip"
+            );
             parse_mb_cabac(
                 &mut c,
                 &mut dec_st,
@@ -1020,11 +1271,13 @@ mod tests {
                     }
                     continue;
                 }
-                assert_eq!(layer.pred_dir[part], d.dir[part], "mb {addr} part {part} direction");
+                assert_eq!(
+                    layer.pred_dir[part], d.dir[part],
+                    "mb {addr} part {part} direction"
+                );
                 if d.kind == BMbKind::B8x8 {
                     assert_eq!(
-                        layer.sub_shape[part],
-                        d.sub_shape[part],
+                        layer.sub_shape[part], d.sub_shape[part],
                         "mb {addr} part {part} shape"
                     );
                 }
@@ -1034,8 +1287,7 @@ mod tests {
             for blk in 0..16 {
                 for l in 0..2 {
                     assert_eq!(
-                        layer.mvd[blk].mvd[l],
-                        d.mvd[l][blk],
+                        layer.mvd[blk].mvd[l], d.mvd[l][blk],
                         "mb {addr} block {blk} list {l} mvd"
                     );
                 }
@@ -1048,8 +1300,14 @@ mod tests {
             // the decoder stores of it.
             let wm = &coded[addr].nb;
             for blk in 0..16 {
-                assert_eq!(wm.mvd[0][blk], layer.mvd[blk].mvd[0], "mb {addr} WrittenMb l0 {blk}");
-                assert_eq!(wm.mvd[1][blk], layer.mvd[blk].mvd[1], "mb {addr} WrittenMb l1 {blk}");
+                assert_eq!(
+                    wm.mvd[0][blk], layer.mvd[blk].mvd[0],
+                    "mb {addr} WrittenMb l0 {blk}"
+                );
+                assert_eq!(
+                    wm.mvd[1][blk], layer.mvd[blk].mvd[1],
+                    "mb {addr} WrittenMb l1 {blk}"
+                );
             }
             commit(&mut info, addr, &layer);
             assert_eq!(

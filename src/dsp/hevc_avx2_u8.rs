@@ -22,7 +22,12 @@ use crate::hevc::tables::{EPEL_FILTERS, QPEL_FILTERS};
 
 /// Replace the scalar entries of `d` with the AVX2 kernels.
 pub fn install(d: &mut HevcDsp<u8>) {
-    d.idct = [w16::idct_avx2::<4>, w16::idct_avx2::<8>, w16::idct_avx2::<16>, w16::idct_avx2::<32>];
+    d.idct = [
+        w16::idct_avx2::<4>,
+        w16::idct_avx2::<8>,
+        w16::idct_avx2::<16>,
+        w16::idct_avx2::<32>,
+    ];
     d.add_residual = add_residual_avx2;
     d.qpel_copy = copy_avx2;
     d.qpel_h = qpel_h_avx2;
@@ -187,7 +192,14 @@ fn copy_avx2(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize,
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn copy_impl(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, shift: i32) {
+unsafe fn copy_impl(
+    dst: &mut [i16],
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    shift: i32,
+) {
     unsafe {
         let sh = _mm_cvtsi32_si128(shift);
         if narrow(w) {
@@ -200,15 +212,27 @@ unsafe fn copy_impl(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h:
                 let p = match w {
                     8 => {
                         let a = _mm_loadl_epi64(s as *const __m128i);
-                        let b = if rows > 1 { _mm_loadl_epi64(s.add(src_stride) as *const __m128i) } else { a };
+                        let b = if rows > 1 {
+                            _mm_loadl_epi64(s.add(src_stride) as *const __m128i)
+                        } else {
+                            a
+                        };
                         _mm_unpacklo_epi64(a, b)
                     }
                     4 => {
-                        let rd = |r: usize| std::ptr::read_unaligned(s.add(r.min(rows - 1) * src_stride) as *const u32) as i32;
+                        let rd = |r: usize| {
+                            std::ptr::read_unaligned(
+                                s.add(r.min(rows - 1) * src_stride) as *const u32
+                            ) as i32
+                        };
                         _mm_setr_epi32(rd(0), rd(1), rd(2), rd(3))
                     }
                     _ => {
-                        let rd = |r: usize| std::ptr::read_unaligned(s.add(r.min(rows - 1) * src_stride) as *const u16) as i16;
+                        let rd = |r: usize| {
+                            std::ptr::read_unaligned(
+                                s.add(r.min(rows - 1) * src_stride) as *const u16
+                            ) as i16
+                        };
                         _mm_setr_epi16(rd(0), rd(1), rd(2), rd(3), rd(4), rd(5), rd(6), rd(7))
                     }
                 };
@@ -268,7 +292,10 @@ unsafe fn emit<const MODE: u8>(out: &Out, row: usize, x: usize, v: __m256i, n: u
             _ => {
                 // Saturating sums, exact after the clip (see `bi_impl`).
                 let o = w16::load_n(out.other.add(row * out.w + x), n);
-                let r = _mm256_srai_epi16(_mm256_adds_epi16(_mm256_adds_epi16(v, o), _mm256_set1_epi16(64)), 7);
+                let r = _mm256_srai_epi16(
+                    _mm256_adds_epi16(_mm256_adds_epi16(v, o), _mm256_set1_epi16(64)),
+                    7,
+                );
                 store_bytes(out.u8.add(row * out.stride + x), pack16(r), n);
             }
         }
@@ -278,13 +305,26 @@ unsafe fn emit<const MODE: u8>(out: &Out, row: usize, x: usize, v: __m256i, n: u
 /// Horizontal FIR with `TAPS` taps over bytes.
 #[target_feature(enable = "avx2")]
 #[inline]
-pub(super) unsafe fn fir_h<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, src_stride: usize, w: usize, h: usize, taps: &[i8], shift: i32) {
+pub(super) unsafe fn fir_h<const TAPS: usize, const MODE: u8>(
+    out: &Out,
+    src: *const u8,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+    shift: i32,
+) {
     unsafe {
         let mut c = [_mm256_setzero_si256(); 4];
         for k in 0..TAPS / 2 {
             c[k] = _mm256_set1_epi16(pair8(taps[2 * k], taps[2 * k + 1]));
         }
-        let c8: [__m128i; 4] = [_mm256_castsi256_si128(c[0]), _mm256_castsi256_si128(c[1]), _mm256_castsi256_si128(c[2]), _mm256_castsi256_si128(c[3])];
+        let c8: [__m128i; 4] = [
+            _mm256_castsi256_si128(c[0]),
+            _mm256_castsi256_si128(c[1]),
+            _mm256_castsi256_si128(c[2]),
+            _mm256_castsi256_si128(c[3]),
+        ];
         let sh = _mm_cvtsi32_si128(shift);
         if w <= 8 {
             // Narrow blocks: two rows per vector, one 128-bit lane each.
@@ -294,13 +334,28 @@ pub(super) unsafe fn fir_h<const TAPS: usize, const MODE: u8>(out: &Out, src: *c
                 let s1 = s0.add(src_stride);
                 let mut acc = _mm256_setzero_si256();
                 for k in 0..TAPS / 2 {
-                    let a = _mm256_setr_m128i(_mm_loadl_epi64(s0.add(2 * k) as *const __m128i), _mm_loadl_epi64(s1.add(2 * k) as *const __m128i));
-                    let b = _mm256_setr_m128i(_mm_loadl_epi64(s0.add(2 * k + 1) as *const __m128i), _mm_loadl_epi64(s1.add(2 * k + 1) as *const __m128i));
-                    acc = _mm256_add_epi16(acc, _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]));
+                    let a = _mm256_setr_m128i(
+                        _mm_loadl_epi64(s0.add(2 * k) as *const __m128i),
+                        _mm_loadl_epi64(s1.add(2 * k) as *const __m128i),
+                    );
+                    let b = _mm256_setr_m128i(
+                        _mm_loadl_epi64(s0.add(2 * k + 1) as *const __m128i),
+                        _mm_loadl_epi64(s1.add(2 * k + 1) as *const __m128i),
+                    );
+                    acc = _mm256_add_epi16(
+                        acc,
+                        _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]),
+                    );
                 }
                 let r = _mm256_sra_epi16(acc, sh);
                 emit::<MODE>(out, y, 0, r, w);
-                emit::<MODE>(out, y + 1, 0, _mm256_castsi128_si256(_mm256_extracti128_si256(r, 1)), w);
+                emit::<MODE>(
+                    out,
+                    y + 1,
+                    0,
+                    _mm256_castsi128_si256(_mm256_extracti128_si256(r, 1)),
+                    w,
+                );
                 y += 2;
             }
             if y < h {
@@ -340,16 +395,34 @@ pub(super) unsafe fn fir_h<const TAPS: usize, const MODE: u8>(out: &Out, src: *c
                 for k in 0..TAPS / 2 {
                     let a = _mm256_loadu_si256(s.add(x + 2 * k) as *const __m256i);
                     let b = _mm256_loadu_si256(s.add(x + 2 * k + 1) as *const __m256i);
-                    lo = _mm256_add_epi16(lo, _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]));
-                    hi = _mm256_add_epi16(hi, _mm256_maddubs_epi16(_mm256_unpackhi_epi8(a, b), c[k]));
+                    lo = _mm256_add_epi16(
+                        lo,
+                        _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]),
+                    );
+                    hi = _mm256_add_epi16(
+                        hi,
+                        _mm256_maddubs_epi16(_mm256_unpackhi_epi8(a, b), c[k]),
+                    );
                 }
                 let lo = _mm256_sra_epi16(lo, sh);
                 let hi = _mm256_sra_epi16(hi, sh);
                 // lo = outputs 0..8 | 16..24, hi = 8..16 | 24..32.
                 let n = w - x;
-                emit::<MODE>(out, y, x, _mm256_permute2x128_si256(lo, hi, 0x20), n.min(16));
+                emit::<MODE>(
+                    out,
+                    y,
+                    x,
+                    _mm256_permute2x128_si256(lo, hi, 0x20),
+                    n.min(16),
+                );
                 if n > 16 {
-                    emit::<MODE>(out, y, x + 16, _mm256_permute2x128_si256(lo, hi, 0x31), (n - 16).min(16));
+                    emit::<MODE>(
+                        out,
+                        y,
+                        x + 16,
+                        _mm256_permute2x128_si256(lo, hi, 0x31),
+                        (n - 16).min(16),
+                    );
                 }
                 x += 32;
             }
@@ -360,13 +433,26 @@ pub(super) unsafe fn fir_h<const TAPS: usize, const MODE: u8>(out: &Out, src: *c
 /// Vertical FIR with `TAPS` taps over byte rows.
 #[target_feature(enable = "avx2")]
 #[inline]
-pub(super) unsafe fn fir_v<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, src_stride: usize, w: usize, h: usize, taps: &[i8], shift: i32) {
+pub(super) unsafe fn fir_v<const TAPS: usize, const MODE: u8>(
+    out: &Out,
+    src: *const u8,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+    shift: i32,
+) {
     unsafe {
         let mut c = [_mm256_setzero_si256(); 4];
         for k in 0..TAPS / 2 {
             c[k] = _mm256_set1_epi16(pair8(taps[2 * k], taps[2 * k + 1]));
         }
-        let c8: [__m128i; 4] = [_mm256_castsi256_si128(c[0]), _mm256_castsi256_si128(c[1]), _mm256_castsi256_si128(c[2]), _mm256_castsi256_si128(c[3])];
+        let c8: [__m128i; 4] = [
+            _mm256_castsi256_si128(c[0]),
+            _mm256_castsi256_si128(c[1]),
+            _mm256_castsi256_si128(c[2]),
+            _mm256_castsi256_si128(c[3]),
+        ];
         let sh = _mm_cvtsi32_si128(shift);
         let row = |r: usize| src.add(r * src_stride);
         if w <= 8 {
@@ -379,11 +465,20 @@ pub(super) unsafe fn fir_v<const TAPS: usize, const MODE: u8>(out: &Out, src: *c
                     let r2 = _mm_loadl_epi64(row(y + 2 * k + 2) as *const __m128i);
                     let a = _mm256_setr_m128i(r0, r1);
                     let b = _mm256_setr_m128i(r1, r2);
-                    acc = _mm256_add_epi16(acc, _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]));
+                    acc = _mm256_add_epi16(
+                        acc,
+                        _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]),
+                    );
                 }
                 let r = _mm256_sra_epi16(acc, sh);
                 emit::<MODE>(out, y, 0, r, w);
-                emit::<MODE>(out, y + 1, 0, _mm256_castsi128_si256(_mm256_extracti128_si256(r, 1)), w);
+                emit::<MODE>(
+                    out,
+                    y + 1,
+                    0,
+                    _mm256_castsi128_si256(_mm256_extracti128_si256(r, 1)),
+                    w,
+                );
                 y += 2;
             }
             if y < h {
@@ -420,15 +515,33 @@ pub(super) unsafe fn fir_v<const TAPS: usize, const MODE: u8>(out: &Out, src: *c
                 for k in 0..TAPS / 2 {
                     let a = _mm256_loadu_si256(row(y + 2 * k).add(x) as *const __m256i);
                     let b = _mm256_loadu_si256(row(y + 2 * k + 1).add(x) as *const __m256i);
-                    lo = _mm256_add_epi16(lo, _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]));
-                    hi = _mm256_add_epi16(hi, _mm256_maddubs_epi16(_mm256_unpackhi_epi8(a, b), c[k]));
+                    lo = _mm256_add_epi16(
+                        lo,
+                        _mm256_maddubs_epi16(_mm256_unpacklo_epi8(a, b), c[k]),
+                    );
+                    hi = _mm256_add_epi16(
+                        hi,
+                        _mm256_maddubs_epi16(_mm256_unpackhi_epi8(a, b), c[k]),
+                    );
                 }
                 let lo = _mm256_sra_epi16(lo, sh);
                 let hi = _mm256_sra_epi16(hi, sh);
                 let n = w - x;
-                emit::<MODE>(out, y, x, _mm256_permute2x128_si256(lo, hi, 0x20), n.min(16));
+                emit::<MODE>(
+                    out,
+                    y,
+                    x,
+                    _mm256_permute2x128_si256(lo, hi, 0x20),
+                    n.min(16),
+                );
                 if n > 16 {
-                    emit::<MODE>(out, y, x + 16, _mm256_permute2x128_si256(lo, hi, 0x31), (n - 16).min(16));
+                    emit::<MODE>(
+                        out,
+                        y,
+                        x + 16,
+                        _mm256_permute2x128_si256(lo, hi, 0x31),
+                        (n - 16).min(16),
+                    );
                 }
                 x += 32;
             }
@@ -440,7 +553,14 @@ pub(super) unsafe fn fir_v<const TAPS: usize, const MODE: u8>(out: &Out, src: *c
 /// `pmaddwd` on interleaved row pairs, 32-bit sums, `>> 6`.
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(out: &Out, src: *const i16, src_stride: usize, w: usize, h: usize, taps: &[i8]) {
+unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(
+    out: &Out,
+    src: *const i16,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+) {
     unsafe {
         let mut c = [_mm256_setzero_si256(); 4];
         for k in 0..TAPS / 2 {
@@ -448,7 +568,12 @@ unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(out: &Out, src: *const i16, 
         }
         let row = |r: usize| src.add(r * src_stride);
         if w <= 8 {
-            let c8: [__m128i; 4] = [_mm256_castsi256_si128(c[0]), _mm256_castsi256_si128(c[1]), _mm256_castsi256_si128(c[2]), _mm256_castsi256_si128(c[3])];
+            let c8: [__m128i; 4] = [
+                _mm256_castsi256_si128(c[0]),
+                _mm256_castsi256_si128(c[1]),
+                _mm256_castsi256_si128(c[2]),
+                _mm256_castsi256_si128(c[3]),
+            ];
             for y in 0..h {
                 let mut lo = _mm_setzero_si128();
                 let mut hi = _mm_setzero_si128();
@@ -497,36 +622,132 @@ fn fits_i16(len: usize, w: usize, rows: usize) -> bool {
     (rows - 1) * w + last_x + vec <= len
 }
 
-pub(super) fn qpel_h_avx2(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+pub(super) fn qpel_h_avx2(
+    dst: &mut [i16],
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if !fits(src.len(), src_stride, h, w, 7) || dst.len() < w * h {
         return (HevcDsp::<u8>::SCALAR.qpel_h)(dst, src, src_stride, w, h, frac, shift);
     }
-    let out = Out { i16: dst.as_mut_ptr(), u8: std::ptr::null_mut(), stride: 0, other: std::ptr::null(), w };
-    unsafe { fir_h::<8, MODE_I16>(&out, src.as_ptr(), src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
+    let out = Out {
+        i16: dst.as_mut_ptr(),
+        u8: std::ptr::null_mut(),
+        stride: 0,
+        other: std::ptr::null(),
+        w,
+    };
+    unsafe {
+        fir_h::<8, MODE_I16>(
+            &out,
+            src.as_ptr(),
+            src_stride,
+            w,
+            h,
+            &QPEL_FILTERS[frac][..8],
+            shift,
+        )
+    }
 }
 
-pub(super) fn qpel_v_avx2(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+pub(super) fn qpel_v_avx2(
+    dst: &mut [i16],
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if !fits(src.len(), src_stride, h + 7, w, 0) || dst.len() < w * h {
         return (HevcDsp::<u8>::SCALAR.qpel_v)(dst, src, src_stride, w, h, frac, shift);
     }
-    let out = Out { i16: dst.as_mut_ptr(), u8: std::ptr::null_mut(), stride: 0, other: std::ptr::null(), w };
-    unsafe { fir_v::<8, MODE_I16>(&out, src.as_ptr(), src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
+    let out = Out {
+        i16: dst.as_mut_ptr(),
+        u8: std::ptr::null_mut(),
+        stride: 0,
+        other: std::ptr::null(),
+        w,
+    };
+    unsafe {
+        fir_v::<8, MODE_I16>(
+            &out,
+            src.as_ptr(),
+            src_stride,
+            w,
+            h,
+            &QPEL_FILTERS[frac][..8],
+            shift,
+        )
+    }
 }
 
-pub(super) fn epel_h_avx2(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+pub(super) fn epel_h_avx2(
+    dst: &mut [i16],
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if !fits(src.len(), src_stride, h, w, 3) || dst.len() < w * h {
         return (HevcDsp::<u8>::SCALAR.epel_h)(dst, src, src_stride, w, h, frac, shift);
     }
-    let out = Out { i16: dst.as_mut_ptr(), u8: std::ptr::null_mut(), stride: 0, other: std::ptr::null(), w };
-    unsafe { fir_h::<4, MODE_I16>(&out, src.as_ptr(), src_stride, w, h, &EPEL_FILTERS[frac], shift) }
+    let out = Out {
+        i16: dst.as_mut_ptr(),
+        u8: std::ptr::null_mut(),
+        stride: 0,
+        other: std::ptr::null(),
+        w,
+    };
+    unsafe {
+        fir_h::<4, MODE_I16>(
+            &out,
+            src.as_ptr(),
+            src_stride,
+            w,
+            h,
+            &EPEL_FILTERS[frac],
+            shift,
+        )
+    }
 }
 
-pub(super) fn epel_v_avx2(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+pub(super) fn epel_v_avx2(
+    dst: &mut [i16],
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if !fits(src.len(), src_stride, h + 3, w, 0) || dst.len() < w * h {
         return (HevcDsp::<u8>::SCALAR.epel_v)(dst, src, src_stride, w, h, frac, shift);
     }
-    let out = Out { i16: dst.as_mut_ptr(), u8: std::ptr::null_mut(), stride: 0, other: std::ptr::null(), w };
-    unsafe { fir_v::<4, MODE_I16>(&out, src.as_ptr(), src_stride, w, h, &EPEL_FILTERS[frac], shift) }
+    let out = Out {
+        i16: dst.as_mut_ptr(),
+        u8: std::ptr::null_mut(),
+        stride: 0,
+        other: std::ptr::null(),
+        w,
+    };
+    unsafe {
+        fir_v::<4, MODE_I16>(
+            &out,
+            src.as_ptr(),
+            src_stride,
+            w,
+            h,
+            &EPEL_FILTERS[frac],
+            shift,
+        )
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -536,7 +757,14 @@ pub(super) fn epel_v_avx2(dst: &mut [i16], src: &[u8], src_stride: usize, w: usi
 /// Copy a `w x h` byte block (whole-sample uni-prediction: the prediction
 /// is the reference block).
 #[target_feature(enable = "avx2")]
-unsafe fn copy_rows_u8(dst: *mut u8, dst_stride: usize, src: *const u8, src_stride: usize, w: usize, h: usize) {
+unsafe fn copy_rows_u8(
+    dst: *mut u8,
+    dst_stride: usize,
+    src: *const u8,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
     unsafe {
         for y in 0..h {
             let s = src.add(y * src_stride);
@@ -545,19 +773,34 @@ unsafe fn copy_rows_u8(dst: *mut u8, dst_stride: usize, src: *const u8, src_stri
             while x < w {
                 let n = w - x;
                 if n >= 32 {
-                    _mm256_storeu_si256(d.add(x) as *mut __m256i, _mm256_loadu_si256(s.add(x) as *const __m256i));
+                    _mm256_storeu_si256(
+                        d.add(x) as *mut __m256i,
+                        _mm256_loadu_si256(s.add(x) as *const __m256i),
+                    );
                     x += 32;
                 } else if n >= 16 {
-                    _mm_storeu_si128(d.add(x) as *mut __m128i, _mm_loadu_si128(s.add(x) as *const __m128i));
+                    _mm_storeu_si128(
+                        d.add(x) as *mut __m128i,
+                        _mm_loadu_si128(s.add(x) as *const __m128i),
+                    );
                     x += 16;
                 } else if n >= 8 {
-                    _mm_storel_epi64(d.add(x) as *mut __m128i, _mm_loadl_epi64(s.add(x) as *const __m128i));
+                    _mm_storel_epi64(
+                        d.add(x) as *mut __m128i,
+                        _mm_loadl_epi64(s.add(x) as *const __m128i),
+                    );
                     x += 8;
                 } else if n >= 4 {
-                    std::ptr::write_unaligned(d.add(x) as *mut u32, std::ptr::read_unaligned(s.add(x) as *const u32));
+                    std::ptr::write_unaligned(
+                        d.add(x) as *mut u32,
+                        std::ptr::read_unaligned(s.add(x) as *const u32),
+                    );
                     x += 4;
                 } else {
-                    std::ptr::write_unaligned(d.add(x) as *mut u16, std::ptr::read_unaligned(s.add(x) as *const u16));
+                    std::ptr::write_unaligned(
+                        d.add(x) as *mut u16,
+                        std::ptr::read_unaligned(s.add(x) as *const u16),
+                    );
                     x += 2;
                 }
             }
@@ -567,7 +810,18 @@ unsafe fn copy_rows_u8(dst: *mut u8, dst_stride: usize, src: *const u8, src_stri
 
 /// The fused kernels: `TAPS` (8 luma / 4 chroma), `MODE_UNI` or `MODE_BI`.
 #[allow(clippy::too_many_arguments)]
-fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16]) {
+fn fused<const TAPS: usize, const MODE: u8>(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+) {
     let reach = TAPS / 2 - 1;
     let at_block = reach * src_stride + reach;
     let hh = h + TAPS - 1;
@@ -578,26 +832,53 @@ fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, s
         && tmp.len() >= super::hevc::MC_TMP_LEN
         && match (fx, fy) {
             (0, 0) => (h - 1) * src_stride + w + at_block <= src.len(),
-            (_, 0) => src.len() > reach * src_stride && fits(src.len() - reach * src_stride, src_stride, h, w, TAPS - 1),
+            (_, 0) => {
+                src.len() > reach * src_stride
+                    && fits(src.len() - reach * src_stride, src_stride, h, w, TAPS - 1)
+            }
             (0, _) => src.len() > reach && fits(src.len() - reach, src_stride, hh, w, 0),
-            _ => fits(src.len(), src_stride, hh, w, TAPS - 1) && fits_i16(super::hevc::MC_TMP_LEN, w, hh),
+            _ => {
+                fits(src.len(), src_stride, hh, w, TAPS - 1)
+                    && fits_i16(super::hevc::MC_TMP_LEN, w, hh)
+            }
         };
     if !ok {
         let s = HevcDsp::<u8>::SCALAR;
         return match (TAPS, MODE) {
             (8, MODE_UNI) => (s.qpel_uni)(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, 8),
-            (8, _) => (s.qpel_bi)(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, 8),
+            (8, _) => (s.qpel_bi)(
+                dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, 8,
+            ),
             (_, MODE_UNI) => (s.epel_uni)(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, 8),
-            _ => (s.epel_bi)(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, 8),
+            _ => (s.epel_bi)(
+                dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, 8,
+            ),
         };
     }
-    let (tx, ty): (&[i8], &[i8]) = if TAPS == 8 { (&QPEL_FILTERS[fx][..8], &QPEL_FILTERS[fy][..8]) } else { (&EPEL_FILTERS[fx], &EPEL_FILTERS[fy]) };
-    let out = Out { i16: std::ptr::null_mut(), u8: dst.as_mut_ptr(), stride: dst_stride, other: other.as_ptr(), w };
+    let (tx, ty): (&[i8], &[i8]) = if TAPS == 8 {
+        (&QPEL_FILTERS[fx][..8], &QPEL_FILTERS[fy][..8])
+    } else {
+        (&EPEL_FILTERS[fx], &EPEL_FILTERS[fy])
+    };
+    let out = Out {
+        i16: std::ptr::null_mut(),
+        u8: dst.as_mut_ptr(),
+        stride: dst_stride,
+        other: other.as_ptr(),
+        w,
+    };
     unsafe {
         match (fx, fy) {
             (0, 0) => {
                 if MODE == MODE_UNI {
-                    copy_rows_u8(dst.as_mut_ptr(), dst_stride, src.as_ptr().add(at_block), src_stride, w, h);
+                    copy_rows_u8(
+                        dst.as_mut_ptr(),
+                        dst_stride,
+                        src.as_ptr().add(at_block),
+                        src_stride,
+                        w,
+                        h,
+                    );
                 } else {
                     // Whole-sample bi: widen, then the usual average.
                     let (pred, _) = tmp.split_at_mut(w * h);
@@ -605,10 +886,24 @@ fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, s
                     bi_impl(dst, dst_stride, other, pred, w, h, 7);
                 }
             }
-            (_, 0) => fir_h::<TAPS, MODE>(&out, src.as_ptr().add(reach * src_stride), src_stride, w, h, tx, 0),
+            (_, 0) => fir_h::<TAPS, MODE>(
+                &out,
+                src.as_ptr().add(reach * src_stride),
+                src_stride,
+                w,
+                h,
+                tx,
+                0,
+            ),
             (0, _) => fir_v::<TAPS, MODE>(&out, src.as_ptr().add(reach), src_stride, w, h, ty, 0),
             _ => {
-                let mid = Out { i16: tmp.as_mut_ptr(), u8: std::ptr::null_mut(), stride: 0, other: std::ptr::null(), w };
+                let mid = Out {
+                    i16: tmp.as_mut_ptr(),
+                    u8: std::ptr::null_mut(),
+                    stride: 0,
+                    other: std::ptr::null(),
+                    w,
+                };
                 fir_h::<TAPS, MODE_I16>(&mid, src.as_ptr(), src_stride, w, hh, tx, 0);
                 fir_v2::<TAPS, MODE>(&out, tmp.as_ptr(), w, w, h, ty);
             }
@@ -616,24 +911,70 @@ fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, s
     }
 }
 
-pub(super) fn qpel_uni_avx2(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
+pub(super) fn qpel_uni_avx2(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    bit_depth: u32,
+) {
     debug_assert_eq!(bit_depth, 8);
     fused::<8, MODE_UNI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, &[])
 }
 
-pub(super) fn epel_uni_avx2(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
+pub(super) fn epel_uni_avx2(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    bit_depth: u32,
+) {
     debug_assert_eq!(bit_depth, 8);
     fused::<4, MODE_UNI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, &[])
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn qpel_bi_avx2(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
+pub(super) fn qpel_bi_avx2(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+) {
     debug_assert_eq!(bit_depth, 8);
     fused::<8, MODE_BI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn epel_bi_avx2(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
+pub(super) fn epel_bi_avx2(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+) {
     debug_assert_eq!(bit_depth, 8);
     fused::<4, MODE_BI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other)
 }
@@ -659,7 +1000,13 @@ unsafe fn uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize, h: usiz
                 let n = (total - i).min(16);
                 let s = w16::load_n(src.as_ptr().add(i), total - i);
                 let v = _mm256_sra_epi16(_mm256_adds_epi16(s, round), sh);
-                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, pack16(v), n / w);
+                scatter_rows(
+                    dst.as_mut_ptr().add((i / w) * stride),
+                    stride,
+                    w,
+                    pack16(v),
+                    n / w,
+                );
                 i += 16;
             }
             return;
@@ -678,13 +1025,30 @@ unsafe fn uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize, h: usiz
     }
 }
 
-fn bi_avx2(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, shift: i32, max: i32) {
+fn bi_avx2(
+    dst: &mut [u8],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    shift: i32,
+    max: i32,
+) {
     debug_assert_eq!(max, 255);
     unsafe { bi_impl(dst, stride, a, b, w, h, shift) }
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, shift: i32) {
+unsafe fn bi_impl(
+    dst: &mut [u8],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    shift: i32,
+) {
     unsafe {
         let round = _mm256_set1_epi16(1 << (shift - 1));
         let sh = _mm_cvtsi32_si128(shift);
@@ -696,7 +1060,13 @@ unsafe fn bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], w: usize,
                 let va = w16::load_n(a.as_ptr().add(i), total - i);
                 let vb = w16::load_n(b.as_ptr().add(i), total - i);
                 let v = _mm256_sra_epi16(_mm256_adds_epi16(_mm256_adds_epi16(va, vb), round), sh);
-                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, pack16(v), n / w);
+                scatter_rows(
+                    dst.as_mut_ptr().add((i / w) * stride),
+                    stride,
+                    w,
+                    pack16(v),
+                    n / w,
+                );
                 i += 16;
             }
             return;
@@ -719,14 +1089,33 @@ unsafe fn bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], w: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_uni_avx2(dst: &mut [u8], stride: usize, src: &[i16], w: usize, h: usize, log2_wd: i32, wt: i32, o: i32, max: i32) {
+fn weighted_uni_avx2(
+    dst: &mut [u8],
+    stride: usize,
+    src: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+) {
     debug_assert_eq!(max, 255);
     unsafe { weighted_uni_impl(dst, stride, src, w, h, log2_wd, wt, o) }
 }
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize, h: usize, log2_wd: i32, wt: i32, o: i32) {
+unsafe fn weighted_uni_impl(
+    dst: &mut [u8],
+    stride: usize,
+    src: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    wt: i32,
+    o: i32,
+) {
     unsafe {
         let round = _mm256_set1_epi32(if log2_wd >= 1 { 1 << (log2_wd - 1) } else { 0 });
         let sh = _mm_cvtsi32_si128(log2_wd.max(0));
@@ -735,9 +1124,18 @@ unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize
         let weigh = |s: __m256i| -> __m128i {
             let lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(s));
             let hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(s, 1));
-            let lo = _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(lo, wv), round), sh), ov);
-            let hi = _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(hi, wv), round), sh), ov);
-            pack16(_mm256_permute4x64_epi64(_mm256_packs_epi32(lo, hi), 0b11_01_10_00))
+            let lo = _mm256_add_epi32(
+                _mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(lo, wv), round), sh),
+                ov,
+            );
+            let hi = _mm256_add_epi32(
+                _mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(hi, wv), round), sh),
+                ov,
+            );
+            pack16(_mm256_permute4x64_epi64(
+                _mm256_packs_epi32(lo, hi),
+                0b11_01_10_00,
+            ))
         };
         if narrow(w) {
             let total = w * h;
@@ -745,7 +1143,13 @@ unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize
             while i < total {
                 let n = (total - i).min(16);
                 let s = w16::load_n(src.as_ptr().add(i), total - i);
-                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, weigh(s), n / w);
+                scatter_rows(
+                    dst.as_mut_ptr().add((i / w) * stride),
+                    stride,
+                    w,
+                    weigh(s),
+                    n / w,
+                );
                 i += 16;
             }
             return;
@@ -763,14 +1167,39 @@ unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi_avx2(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, log2_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32) {
+fn weighted_bi_avx2(
+    dst: &mut [u8],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+) {
     debug_assert_eq!(max, 255);
     unsafe { weighted_bi_impl(dst, stride, a, b, w, h, log2_wd, w0, w1, o0, o1) }
 }
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn weighted_bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, log2_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32) {
+unsafe fn weighted_bi_impl(
+    dst: &mut [u8],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+) {
     unsafe {
         let round = _mm256_set1_epi32((o0 + o1 + 1) << log2_wd);
         let sh = _mm_cvtsi32_si128(log2_wd + 1);
@@ -781,9 +1210,24 @@ unsafe fn weighted_bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], 
             let ahi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(va, 1));
             let blo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(vb));
             let bhi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(vb, 1));
-            let lo = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(alo, w0v), _mm256_mullo_epi32(blo, w1v)), round), sh);
-            let hi = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(ahi, w0v), _mm256_mullo_epi32(bhi, w1v)), round), sh);
-            pack16(_mm256_permute4x64_epi64(_mm256_packs_epi32(lo, hi), 0b11_01_10_00))
+            let lo = _mm256_sra_epi32(
+                _mm256_add_epi32(
+                    _mm256_add_epi32(_mm256_mullo_epi32(alo, w0v), _mm256_mullo_epi32(blo, w1v)),
+                    round,
+                ),
+                sh,
+            );
+            let hi = _mm256_sra_epi32(
+                _mm256_add_epi32(
+                    _mm256_add_epi32(_mm256_mullo_epi32(ahi, w0v), _mm256_mullo_epi32(bhi, w1v)),
+                    round,
+                ),
+                sh,
+            );
+            pack16(_mm256_permute4x64_epi64(
+                _mm256_packs_epi32(lo, hi),
+                0b11_01_10_00,
+            ))
         };
         if narrow(w) {
             let total = w * h;
@@ -792,7 +1236,13 @@ unsafe fn weighted_bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], 
                 let n = (total - i).min(16);
                 let va = w16::load_n(a.as_ptr().add(i), total - i);
                 let vb = w16::load_n(b.as_ptr().add(i), total - i);
-                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, weigh(va, vb), n / w);
+                scatter_rows(
+                    dst.as_mut_ptr().add((i / w) * stride),
+                    stride,
+                    w,
+                    weigh(va, vb),
+                    n / w,
+                );
                 i += 16;
             }
             return;
@@ -830,10 +1280,16 @@ unsafe fn add_residual_impl(dst: &mut [u8], stride: usize, res: &[i16], n: usize
                         let d = dst.as_mut_ptr().add(y * stride + x);
                         let p = _mm256_loadu_si256(d as *const __m256i);
                         let r0 = _mm256_loadu_si256(res.as_ptr().add(y * n + x) as *const __m256i);
-                        let r1 = _mm256_loadu_si256(res.as_ptr().add(y * n + x + 16) as *const __m256i);
-                        let lo = _mm256_add_epi16(_mm256_cvtepu8_epi16(_mm256_castsi256_si128(p)), r0);
-                        let hi = _mm256_add_epi16(_mm256_cvtepu8_epi16(_mm256_extracti128_si256(p, 1)), r1);
-                        let v = _mm256_permute4x64_epi64(_mm256_packus_epi16(lo, hi), 0b11_01_10_00);
+                        let r1 =
+                            _mm256_loadu_si256(res.as_ptr().add(y * n + x + 16) as *const __m256i);
+                        let lo =
+                            _mm256_add_epi16(_mm256_cvtepu8_epi16(_mm256_castsi256_si128(p)), r0);
+                        let hi = _mm256_add_epi16(
+                            _mm256_cvtepu8_epi16(_mm256_extracti128_si256(p, 1)),
+                            r1,
+                        );
+                        let v =
+                            _mm256_permute4x64_epi64(_mm256_packus_epi16(lo, hi), 0b11_01_10_00);
                         _mm256_storeu_si256(d as *mut __m256i, v);
                         x += 32;
                     }
@@ -852,7 +1308,10 @@ unsafe fn add_residual_impl(dst: &mut [u8], stride: usize, res: &[i16], n: usize
                 for y in (0..8).step_by(2) {
                     let d0 = dst.as_mut_ptr().add(y * stride);
                     let d1 = d0.add(stride);
-                    let p = _mm256_cvtepu8_epi16(_mm_unpacklo_epi64(_mm_loadl_epi64(d0 as *const __m128i), _mm_loadl_epi64(d1 as *const __m128i)));
+                    let p = _mm256_cvtepu8_epi16(_mm_unpacklo_epi64(
+                        _mm_loadl_epi64(d0 as *const __m128i),
+                        _mm_loadl_epi64(d1 as *const __m128i),
+                    ));
                     let r = _mm256_loadu_si256(res.as_ptr().add(y * 8) as *const __m256i);
                     let v = pack16(_mm256_add_epi16(p, r));
                     _mm_storel_epi64(d0 as *mut __m128i, v);
@@ -862,7 +1321,8 @@ unsafe fn add_residual_impl(dst: &mut [u8], stride: usize, res: &[i16], n: usize
             _ => {
                 // 4x4: all four rows in one vector.
                 let d = dst.as_mut_ptr();
-                let rd = |k: usize| std::ptr::read_unaligned(d.add(k * stride) as *const u32) as i32;
+                let rd =
+                    |k: usize| std::ptr::read_unaligned(d.add(k * stride) as *const u32) as i32;
                 let p = _mm256_cvtepu8_epi16(_mm_setr_epi32(rd(0), rd(1), rd(2), rd(3)));
                 let r = _mm256_loadu_si256(res.as_ptr() as *const __m256i);
                 let v = pack16(_mm256_add_epi16(p, r));
@@ -891,9 +1351,21 @@ unsafe fn add_offset_u8(v: __m256i, off: __m256i) -> __m256i {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sao_band_avx2(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, table: &[i16; 32], shift: i32, max: i32) {
+fn sao_band_avx2(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    table: &[i16; 32],
+    shift: i32,
+    max: i32,
+) {
     if shift != 3 || table.iter().any(|&o| !(-128..=127).contains(&o)) {
-        return (HevcDsp::<u8>::SCALAR.sao_band)(dst, dst_stride, src, src_stride, w, h, table, shift, max);
+        return (HevcDsp::<u8>::SCALAR.sao_band)(
+            dst, dst_stride, src, src_stride, w, h, table, shift, max,
+        );
     }
     debug_assert_eq!(max, 255);
     unsafe { sao_band_impl(dst, dst_stride, src, src_stride, w, h, table, shift) }
@@ -901,7 +1373,16 @@ fn sao_band_avx2(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usiz
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn sao_band_impl(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, table: &[i16; 32], shift: i32) {
+unsafe fn sao_band_impl(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    table: &[i16; 32],
+    shift: i32,
+) {
     unsafe {
         // The four consecutive bands (mod 32) with nonzero offsets.
         let mut bands = [0u8; 4];
@@ -927,7 +1408,11 @@ unsafe fn sao_band_impl(dst: &mut [u8], dst_stride: usize, src: &[u8], src_strid
                 for i in 0..k {
                     off = _mm256_blendv_epi8(off, ov[i], _mm256_cmpeq_epi8(band, bv[i]));
                 }
-                store_bytes32(dst.as_mut_ptr().add(y * dst_stride + x), add_offset_u8(v, off), n);
+                store_bytes32(
+                    dst.as_mut_ptr().add(y * dst_stride + x),
+                    add_offset_u8(v, off),
+                    n,
+                );
                 x += 32;
             }
         }
@@ -935,7 +1420,18 @@ unsafe fn sao_band_impl(dst: &mut [u8], dst_stride: usize, src: &[u8], src_strid
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sao_edge_avx2(dst: &mut [u8], src: &[u8], origin: usize, stride: usize, w: usize, h: usize, na: isize, nb: isize, off: &[i16; 5], max: i32) {
+fn sao_edge_avx2(
+    dst: &mut [u8],
+    src: &[u8],
+    origin: usize,
+    stride: usize,
+    w: usize,
+    h: usize,
+    na: isize,
+    nb: isize,
+    off: &[i16; 5],
+    max: i32,
+) {
     if off.iter().any(|&o| !(-128..=127).contains(&o)) {
         return (HevcDsp::<u8>::SCALAR.sao_edge)(dst, src, origin, stride, w, h, na, nb, off, max);
     }
@@ -945,11 +1441,22 @@ fn sao_edge_avx2(dst: &mut [u8], src: &[u8], origin: usize, stride: usize, w: us
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn sao_edge_impl(dst: &mut [u8], src: &[u8], origin: usize, stride: usize, w: usize, h: usize, na: isize, nb: isize, off: &[i16; 5]) {
+unsafe fn sao_edge_impl(
+    dst: &mut [u8],
+    src: &[u8],
+    origin: usize,
+    stride: usize,
+    w: usize,
+    h: usize,
+    na: isize,
+    nb: isize,
+    off: &[i16; 5],
+) {
     unsafe {
         // edgeIdx = 2 + sign(v-a) + sign(v-b) in 0..=4 indexes the offsets
         // through a byte shuffle.
         let o = |i: usize| off[i] as i8;
+        #[rustfmt::skip]
         let tab = _mm256_setr_epi8(
             o(0), o(1), o(2), o(3), o(4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             o(0), o(1), o(2), o(3), o(4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -962,7 +1469,10 @@ unsafe fn sao_edge_impl(dst: &mut [u8], src: &[u8], origin: usize, stride: usize
             while x < w {
                 let n = (w - x).min(32);
                 let i = origin + y * stride + x;
-                if (i as isize + lo_reach) < 0 || (i as isize + hi_reach) as usize + 32 > src.len() || i + 32 > dst.len() {
+                if (i as isize + lo_reach) < 0
+                    || (i as isize + hi_reach) as usize + 32 > src.len()
+                    || i + 32 > dst.len()
+                {
                     // Tail near the buffer end: scalar.
                     for xx in x..w {
                         let ii = origin + y * stride + xx;
@@ -986,7 +1496,10 @@ unsafe fn sao_edge_impl(dst: &mut [u8], src: &[u8], origin: usize, stride: usize
                 let ones = _mm256_cmpeq_epi8(v, v);
                 let lt_a = _mm256_xor_si256(ge_a, ones);
                 let lt_b = _mm256_xor_si256(ge_b, ones);
-                let e = _mm256_add_epi8(_mm256_sub_epi8(_mm256_sub_epi8(two, gt_a), gt_b), _mm256_add_epi8(lt_a, lt_b));
+                let e = _mm256_add_epi8(
+                    _mm256_sub_epi8(_mm256_sub_epi8(two, gt_a), gt_b),
+                    _mm256_add_epi8(lt_a, lt_b),
+                );
                 let o = _mm256_shuffle_epi8(tab, e);
                 store_bytes32(dst.as_mut_ptr().add(i), add_offset_u8(v, o), n);
                 x += 32;
@@ -1017,21 +1530,50 @@ unsafe fn pack8_u8(v: __m256i) -> __m128i {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn deblock_luma_v_avx2(data: &mut [u8], off: usize, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+fn deblock_luma_v_avx2(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    beta: [i32; 2],
+    tc: [i32; 2],
+    no_p: [bool; 2],
+    no_q: [bool; 2],
+    max: i32,
+) {
     if (beta[0] == 0 && tc[0] == 0) && (beta[1] == 0 && tc[1] == 0) {
         return;
     }
     assert!(off >= 4 && off + 7 * stride + 4 <= data.len());
-    unsafe { deblock_luma_v_impl(data.as_mut_ptr().add(off), stride, beta, tc, no_p, no_q, max) }
+    unsafe {
+        deblock_luma_v_impl(
+            data.as_mut_ptr().add(off),
+            stride,
+            beta,
+            tc,
+            no_p,
+            no_q,
+            max,
+        )
+    }
 }
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn deblock_luma_v_impl(data: *mut u8, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+unsafe fn deblock_luma_v_impl(
+    data: *mut u8,
+    stride: usize,
+    beta: [i32; 2],
+    tc: [i32; 2],
+    no_p: [bool; 2],
+    no_q: [bool; 2],
+    max: i32,
+) {
     unsafe {
         let mut r = [_mm_setzero_si128(); 8];
         for i in 0..8 {
-            r[i] = _mm_cvtepu8_epi16(_mm_loadl_epi64(data.add(i * stride).sub(4) as *const __m128i));
+            r[i] = _mm_cvtepu8_epi16(_mm_loadl_epi64(
+                data.add(i * stride).sub(4) as *const __m128i
+            ));
         }
         w16::transpose8_u16(&mut r);
         let mut v: w16::Lines8 = [_mm256_setzero_si256(); 8];
@@ -1044,23 +1586,53 @@ unsafe fn deblock_luma_v_impl(data: *mut u8, stride: usize, beta: [i32; 2], tc: 
         }
         w16::transpose8_u16(&mut r);
         for i in 0..8 {
-            _mm_storel_epi64(data.add(i * stride).sub(4) as *mut __m128i, _mm_packus_epi16(r[i], r[i]));
+            _mm_storel_epi64(
+                data.add(i * stride).sub(4) as *mut __m128i,
+                _mm_packus_epi16(r[i], r[i]),
+            );
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn deblock_luma_h_avx2(data: &mut [u8], off: usize, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+fn deblock_luma_h_avx2(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    beta: [i32; 2],
+    tc: [i32; 2],
+    no_p: [bool; 2],
+    no_q: [bool; 2],
+    max: i32,
+) {
     if (beta[0] == 0 && tc[0] == 0) && (beta[1] == 0 && tc[1] == 0) {
         return;
     }
     assert!(off >= 4 * stride && off + 3 * stride + 8 <= data.len());
-    unsafe { deblock_luma_h_impl(data.as_mut_ptr().add(off), stride, beta, tc, no_p, no_q, max) }
+    unsafe {
+        deblock_luma_h_impl(
+            data.as_mut_ptr().add(off),
+            stride,
+            beta,
+            tc,
+            no_p,
+            no_q,
+            max,
+        )
+    }
 }
 
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn deblock_luma_h_impl(data: *mut u8, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+unsafe fn deblock_luma_h_impl(
+    data: *mut u8,
+    stride: usize,
+    beta: [i32; 2],
+    tc: [i32; 2],
+    no_p: [bool; 2],
+    no_q: [bool; 2],
+    max: i32,
+) {
     unsafe {
         let mut v: w16::Lines8 = [_mm256_setzero_si256(); 8];
         for k in 0..8 {
@@ -1068,12 +1640,23 @@ unsafe fn deblock_luma_h_impl(data: *mut u8, stride: usize, beta: [i32; 2], tc: 
         }
         w16::luma_filter8(&mut v, beta, tc, no_p, no_q, max);
         for k in 1..7 {
-            _mm_storel_epi64(data.offset((k as isize - 4) * stride as isize) as *mut __m128i, pack8_u8(v[k]));
+            _mm_storel_epi64(
+                data.offset((k as isize - 4) * stride as isize) as *mut __m128i,
+                pack8_u8(v[k]),
+            );
         }
     }
 }
 
-fn deblock_chroma_v_avx2(data: &mut [u8], off: usize, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+fn deblock_chroma_v_avx2(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    tc: [i32; 4],
+    no_p: [bool; 4],
+    no_q: [bool; 4],
+    max: i32,
+) {
     if tc.iter().all(|&t| t == 0) {
         return;
     }
@@ -1082,7 +1665,14 @@ fn deblock_chroma_v_avx2(data: &mut [u8], off: usize, stride: usize, tc: [i32; 4
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_chroma_v_impl(data: *mut u8, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+unsafe fn deblock_chroma_v_impl(
+    data: *mut u8,
+    stride: usize,
+    tc: [i32; 4],
+    no_p: [bool; 4],
+    no_q: [bool; 4],
+    max: i32,
+) {
     unsafe {
         let mut r = [_mm_setzero_si128(); 8];
         for i in 0..8 {
@@ -1116,7 +1706,15 @@ unsafe fn deblock_chroma_v_impl(data: *mut u8, stride: usize, tc: [i32; 4], no_p
     }
 }
 
-fn deblock_chroma_h_avx2(data: &mut [u8], off: usize, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+fn deblock_chroma_h_avx2(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    tc: [i32; 4],
+    no_p: [bool; 4],
+    no_q: [bool; 4],
+    max: i32,
+) {
     if tc.iter().all(|&t| t == 0) {
         return;
     }
@@ -1125,9 +1723,21 @@ fn deblock_chroma_h_avx2(data: &mut [u8], off: usize, stride: usize, tc: [i32; 4
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_chroma_h_impl(data: *mut u8, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+unsafe fn deblock_chroma_h_impl(
+    data: *mut u8,
+    stride: usize,
+    tc: [i32; 4],
+    no_p: [bool; 4],
+    no_q: [bool; 4],
+    max: i32,
+) {
     unsafe {
-        let mut v = [ld8_u8(data.sub(2 * stride)), ld8_u8(data.sub(stride)), ld8_u8(data), ld8_u8(data.add(stride))];
+        let mut v = [
+            ld8_u8(data.sub(2 * stride)),
+            ld8_u8(data.sub(stride)),
+            ld8_u8(data),
+            ld8_u8(data.add(stride)),
+        ];
         w16::chroma_filter8(&mut v, tc, no_p, no_q, max);
         _mm_storel_epi64(data.sub(stride) as *mut __m128i, pack8_u8(v[1]));
         _mm_storel_epi64(data as *mut __m128i, pack8_u8(v[2]));
@@ -1152,7 +1762,14 @@ unsafe fn deblock_chroma_h_impl(data: *mut u8, stride: usize, tc: [i32; 4], no_p
 
 /// Angular prediction of an `n x n` 8-bit block (`n` 4 to 32) from `refs`
 /// (`ref[k]` at `refs[k + n]`), as [`HevcDsp::intra_angular`].
-fn intra_angular_avx2(dst: &mut [u8], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
+fn intra_angular_avx2(
+    dst: &mut [u8],
+    stride: usize,
+    refs: &[u16],
+    n: usize,
+    angle: i32,
+    transposed: bool,
+) {
     let reach = angular_pack_len(n);
     let fits = n >= 4 && (n - 1) * stride + n <= dst.len();
     if n == 4 {
@@ -1193,34 +1810,83 @@ fn angular_pack_len(n: usize) -> usize {
 /// AVX2. `refs` holds at least 16 elements, `|angle| <= 32`, and `dst` is
 /// writable for a 4x4 block at row pitch `stride`.
 #[target_feature(enable = "avx2")]
-unsafe fn intra_angular4_impl(dst: *mut u8, stride: usize, refs: &[u16], angle: i32, transposed: bool) {
+unsafe fn intra_angular4_impl(
+    dst: *mut u8,
+    stride: usize,
+    refs: &[u16],
+    angle: i32,
+    transposed: bool,
+) {
     unsafe {
         let p = refs.as_ptr() as *const __m128i;
-        let r = _mm256_broadcastsi128_si256(_mm_packus_epi16(_mm_loadu_si128(p), _mm_loadu_si128(p.add(1))));
+        let r = _mm256_broadcastsi128_si256(_mm_packus_epi16(
+            _mm_loadu_si128(p),
+            _mm_loadu_si128(p.add(1)),
+        ));
         // (y + 1) * angle for rows 0-3, in the low four 16-bit lanes.
-        let pos = _mm_mullo_epi16(_mm_setr_epi16(1, 2, 3, 4, 0, 0, 0, 0), _mm_set1_epi16(angle as i16));
+        let pos = _mm_mullo_epi16(
+            _mm_setr_epi16(1, 2, 3, 4, 0, 0, 0, 0),
+            _mm_set1_epi16(angle as i16),
+        );
         let start = _mm_add_epi16(_mm_srai_epi16::<5>(pos), _mm_set1_epi16(5));
         let f = _mm_and_si128(pos, _mm_set1_epi16(31));
         // `(32 - f) | f << 8`: the byte pair `pmaddubsw` wants.
         let w = _mm_or_si128(_mm_sub_epi16(_mm_set1_epi16(32), f), _mm_slli_epi16::<8>(f));
         // Each row's start byte over its eight control bytes, plus the
         // pair pattern; each row's weight pair over its four pairs.
-        let spread = |lo: i8, hi: i8| _mm_setr_epi8(lo, lo, lo, lo, lo, lo, lo, lo, hi, hi, hi, hi, hi, hi, hi, hi);
+        let spread = |lo: i8, hi: i8| {
+            _mm_setr_epi8(
+                lo, lo, lo, lo, lo, lo, lo, lo, hi, hi, hi, hi, hi, hi, hi, hi,
+            )
+        };
         let pattern = _mm_setr_epi8(0, 1, 1, 2, 2, 3, 3, 4, 0, 1, 1, 2, 2, 3, 3, 4);
         let ctl = _mm256_setr_m128i(
             _mm_add_epi8(_mm_shuffle_epi8(start, spread(0, 2)), pattern),
             _mm_add_epi8(_mm_shuffle_epi8(start, spread(4, 6)), pattern),
         );
-        let wpair = |a: i8, b: i8| _mm_setr_epi8(a, a + 1, a, a + 1, a, a + 1, a, a + 1, b, b + 1, b, b + 1, b, b + 1, b, b + 1);
-        let wts = _mm256_setr_m128i(_mm_shuffle_epi8(w, wpair(0, 2)), _mm_shuffle_epi8(w, wpair(4, 6)));
+        let wpair = |a: i8, b: i8| {
+            _mm_setr_epi8(
+                a,
+                a + 1,
+                a,
+                a + 1,
+                a,
+                a + 1,
+                a,
+                a + 1,
+                b,
+                b + 1,
+                b,
+                b + 1,
+                b,
+                b + 1,
+                b,
+                b + 1,
+            )
+        };
+        let wts = _mm256_setr_m128i(
+            _mm_shuffle_epi8(w, wpair(0, 2)),
+            _mm_shuffle_epi8(w, wpair(4, 6)),
+        );
         let v = angular_madd(_mm256_shuffle_epi8(r, ctl), wts);
         // Rows 0, 1 in the low lane's first eight bytes, 2, 3 in the high's.
         let v = _mm256_packus_epi16(v, v);
         let mut b = _mm_unpacklo_epi64(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
         if transposed {
-            b = _mm_shuffle_epi8(b, _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15));
+            b = _mm_shuffle_epi8(
+                b,
+                _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15),
+            );
         }
-        for (y, q) in [b, _mm_srli_si128::<4>(b), _mm_srli_si128::<8>(b), _mm_srli_si128::<12>(b)].into_iter().enumerate() {
+        for (y, q) in [
+            b,
+            _mm_srli_si128::<4>(b),
+            _mm_srli_si128::<8>(b),
+            _mm_srli_si128::<12>(b),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             std::ptr::write_unaligned(dst.add(y * stride) as *mut u32, _mm_cvtsi128_si32(q) as u32);
         }
     }
@@ -1249,7 +1915,14 @@ fn angular_row(y: usize, n: usize, angle: i32) -> (i16, usize) {
 /// `n` is 8, 16 or 32, `|angle| <= 32`, and `dst` is writable for an
 /// `n x n` block at row pitch `stride`.
 #[target_feature(enable = "avx2")]
-unsafe fn intra_angular_impl(dst: *mut u8, stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
+unsafe fn intra_angular_impl(
+    dst: *mut u8,
+    stride: usize,
+    refs: &[u16],
+    n: usize,
+    angle: i32,
+    transposed: bool,
+) {
     unsafe {
         // The references as bytes. Row `y` reads `r[s..=s + n]` with
         // `s = n + iIdx + 1` in `1..=2n + 1`, so at most `r[3n + 1]`. The
@@ -1273,7 +1946,11 @@ unsafe fn intra_angular_impl(dst: *mut u8, stride: usize, refs: &[u16], n: usize
         // reads it, and nothing else of it is read, so it is not cleared:
         // clearing a kilobyte a call costs a 4x4 block more than predicting it.
         let mut tmp = std::mem::MaybeUninit::<[u8; 32 * 32]>::uninit();
-        let (out, pitch) = if transposed { (tmp.as_mut_ptr() as *mut u8, n) } else { (dst, stride) };
+        let (out, pitch) = if transposed {
+            (tmp.as_mut_ptr() as *mut u8, n)
+        } else {
+            (dst, stride)
+        };
         match n {
             32 => {
                 for y in 0..32 {
@@ -1286,7 +1963,10 @@ unsafe fn intra_angular_impl(dst: *mut u8, stride: usize, refs: &[u16], n: usize
                     // Within each 128-bit lane `lo` holds samples 0-7
                     // (16-23) and `hi` 8-15 (24-31): the in-lane pack puts
                     // them back in order.
-                    _mm256_storeu_si256(out.add(y * pitch) as *mut __m256i, _mm256_packus_epi16(lo, hi));
+                    _mm256_storeu_si256(
+                        out.add(y * pitch) as *mut __m256i,
+                        _mm256_packus_epi16(lo, hi),
+                    );
                 }
             }
             16 => {
@@ -1294,27 +1974,51 @@ unsafe fn intra_angular_impl(dst: *mut u8, stride: usize, refs: &[u16], n: usize
                 for y in (0..16).step_by(2) {
                     let (w0, s0) = angular_row(y, n, angle);
                     let (w1, s1) = angular_row(y + 1, n, angle);
-                    let a = _mm256_loadu2_m128i(rp.add(s1) as *const __m128i, rp.add(s0) as *const __m128i);
-                    let b = _mm256_loadu2_m128i(rp.add(s1 + 1) as *const __m128i, rp.add(s0 + 1) as *const __m128i);
+                    let a = _mm256_loadu2_m128i(
+                        rp.add(s1) as *const __m128i,
+                        rp.add(s0) as *const __m128i,
+                    );
+                    let b = _mm256_loadu2_m128i(
+                        rp.add(s1 + 1) as *const __m128i,
+                        rp.add(s0 + 1) as *const __m128i,
+                    );
                     let w = _mm256_setr_m128i(_mm_set1_epi16(w0), _mm_set1_epi16(w1));
                     let lo = angular_madd(_mm256_unpacklo_epi8(a, b), w);
                     let hi = angular_madd(_mm256_unpackhi_epi8(a, b), w);
                     let v = _mm256_packus_epi16(lo, hi);
-                    _mm_storeu_si128(out.add(y * pitch) as *mut __m128i, _mm256_castsi256_si128(v));
-                    _mm_storeu_si128(out.add((y + 1) * pitch) as *mut __m128i, _mm256_extracti128_si256::<1>(v));
+                    _mm_storeu_si128(
+                        out.add(y * pitch) as *mut __m128i,
+                        _mm256_castsi256_si128(v),
+                    );
+                    _mm_storeu_si128(
+                        out.add((y + 1) * pitch) as *mut __m128i,
+                        _mm256_extracti128_si256::<1>(v),
+                    );
                 }
             }
             8 => {
                 for y in (0..8).step_by(2) {
                     let (w0, s0) = angular_row(y, n, angle);
                     let (w1, s1) = angular_row(y + 1, n, angle);
-                    let a = _mm256_setr_m128i(_mm_loadl_epi64(rp.add(s0) as *const __m128i), _mm_loadl_epi64(rp.add(s1) as *const __m128i));
-                    let b = _mm256_setr_m128i(_mm_loadl_epi64(rp.add(s0 + 1) as *const __m128i), _mm_loadl_epi64(rp.add(s1 + 1) as *const __m128i));
+                    let a = _mm256_setr_m128i(
+                        _mm_loadl_epi64(rp.add(s0) as *const __m128i),
+                        _mm_loadl_epi64(rp.add(s1) as *const __m128i),
+                    );
+                    let b = _mm256_setr_m128i(
+                        _mm_loadl_epi64(rp.add(s0 + 1) as *const __m128i),
+                        _mm_loadl_epi64(rp.add(s1 + 1) as *const __m128i),
+                    );
                     let w = _mm256_setr_m128i(_mm_set1_epi16(w0), _mm_set1_epi16(w1));
                     let v = angular_madd(_mm256_unpacklo_epi8(a, b), w);
                     let v = _mm256_packus_epi16(v, v);
-                    _mm_storel_epi64(out.add(y * pitch) as *mut __m128i, _mm256_castsi256_si128(v));
-                    _mm_storel_epi64(out.add((y + 1) * pitch) as *mut __m128i, _mm256_extracti128_si256::<1>(v));
+                    _mm_storel_epi64(
+                        out.add(y * pitch) as *mut __m128i,
+                        _mm256_castsi256_si128(v),
+                    );
+                    _mm_storel_epi64(
+                        out.add((y + 1) * pitch) as *mut __m128i,
+                        _mm256_extracti128_si256::<1>(v),
+                    );
                 }
             }
             _ => unreachable!("angular {n}x{n} is not this kernel's"),
@@ -1337,7 +2041,12 @@ unsafe fn intra_angular_impl(dst: *mut u8, stride: usize, refs: &[u16], n: usize
                 let u2 = _mm_unpacklo_epi16(t2, t3);
                 let u3 = _mm_unpackhi_epi16(t2, t3);
                 // Columns 0-1, 2-3, 4-5 and 6-7 of the tile, eight bytes each.
-                let cols = [_mm_unpacklo_epi32(u0, u2), _mm_unpackhi_epi32(u0, u2), _mm_unpacklo_epi32(u1, u3), _mm_unpackhi_epi32(u1, u3)];
+                let cols = [
+                    _mm_unpacklo_epi32(u0, u2),
+                    _mm_unpackhi_epi32(u0, u2),
+                    _mm_unpacklo_epi32(u1, u3),
+                    _mm_unpackhi_epi32(u1, u3),
+                ];
                 for (j, c) in cols.into_iter().enumerate() {
                     let o = dst.add((bx + 2 * j) * stride + by);
                     _mm_storel_epi64(o as *mut __m128i, c);
@@ -1354,7 +2063,9 @@ mod tests {
     use crate::dsp::hevc::HevcDsp;
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -1396,7 +2107,10 @@ mod tests {
                             let mut b = a.clone();
                             (s.intra_angular)(&mut a, stride, &refs, n, angle, transposed);
                             (d.intra_angular)(&mut b, stride, &refs, n, angle, transposed);
-                            assert_eq!(a, b, "{n}x{n} angle {angle} transposed {transposed} stride {stride} trial {trial}");
+                            assert_eq!(
+                                a, b,
+                                "{n}x{n} angle {angle} transposed {transposed} stride {stride} trial {trial}"
+                            );
                             checked += 1;
                         }
                     }
@@ -1414,10 +2128,20 @@ mod tests {
     fn intra_angular_bench() {
         let Some(d) = avx2() else { return };
         let s = HevcDsp::<u8>::SCALAR;
-        let avx = HevcDsp::<u8>::new(crate::dsp::Cpu { avx2: false, avx512: false, avx512vnni: false, ..crate::dsp::Cpu::detect() });
+        let avx = HevcDsp::<u8>::new(crate::dsp::Cpu {
+            avx2: false,
+            avx512: false,
+            avx512vnni: false,
+            ..crate::dsp::Cpu::detect()
+        });
         let mut seed = 9u64;
-        let refs: Vec<u16> = (0..3 * 32 + 2 + 8).map(|_| (lcg(&mut seed) & 255) as u16).collect();
-        let angles: [i32; 33] = [32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32];
+        let refs: Vec<u16> = (0..3 * 32 + 2 + 8)
+            .map(|_| (lcg(&mut seed) & 255) as u16)
+            .collect();
+        let angles: [i32; 33] = [
+            32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17,
+            -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32,
+        ];
         for n in [4usize, 8, 16, 32] {
             let mut dst = vec![0u8; 64 * 32];
             let mut row = Vec::new();
@@ -1437,7 +2161,10 @@ mod tests {
                     }
                     std::hint::black_box(&mut dst);
                 }
-                row.push(format!("{name} {:.1}", t0.elapsed().as_nanos() as f64 / (reps * angles.len()) as f64));
+                row.push(format!(
+                    "{name} {:.1}",
+                    t0.elapsed().as_nanos() as f64 / (reps * angles.len()) as f64
+                ));
             }
             eprintln!("intra_angular {n}x{n}: ns per call {}", row.join(", "));
         }
@@ -1457,7 +2184,23 @@ mod tests {
                     _ => (lcg(&mut seed) % 4) as u8 * 85,
                 })
                 .collect();
-            for &(w, h) in &[(2usize, 4usize), (2, 8), (4, 4), (4, 8), (4, 3), (6, 8), (8, 4), (8, 8), (8, 5), (12, 16), (16, 16), (24, 32), (32, 8), (48, 64), (64, 64)] {
+            for &(w, h) in &[
+                (2usize, 4usize),
+                (2, 8),
+                (4, 4),
+                (4, 8),
+                (4, 3),
+                (6, 8),
+                (8, 4),
+                (8, 8),
+                (8, 5),
+                (12, 16),
+                (16, 16),
+                (24, 32),
+                (32, 8),
+                (48, 64),
+                (64, 64),
+            ] {
                 for frac in 1..8 {
                     let mut a = vec![0i16; w * h];
                     let mut b = vec![0i16; w * h];
@@ -1468,7 +2211,9 @@ mod tests {
                         (s.qpel_v)(&mut a, &src, stride, w, h, frac, 0);
                         (d.qpel_v)(&mut b, &src, stride, w, h, frac, 0);
                         assert_eq!(a, b, "qpel_v {w}x{h} frac={frac} trial={trial}");
-                        let mid: Vec<i16> = (0..stride * 96).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+                        let mid: Vec<i16> = (0..stride * 96)
+                            .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                            .collect();
                         (s.qpel_v2)(&mut a, &mid, stride, w, h, frac);
                         (d.qpel_v2)(&mut b, &mid, stride, w, h, frac);
                         assert_eq!(a, b, "qpel_v2 {w}x{h} frac={frac}");
@@ -1479,7 +2224,9 @@ mod tests {
                     (s.epel_v)(&mut a, &src, stride, w, h, frac, 0);
                     (d.epel_v)(&mut b, &src, stride, w, h, frac, 0);
                     assert_eq!(a, b, "epel_v {w}x{h} frac={frac} trial={trial}");
-                    let mid: Vec<i16> = (0..stride * 96).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+                    let mid: Vec<i16> = (0..stride * 96)
+                        .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+                        .collect();
                     (s.epel_v2)(&mut a, &mid, stride, w, h, frac);
                     (d.epel_v2)(&mut b, &mid, stride, w, h, frac);
                     assert_eq!(a, b, "epel_v2 {w}x{h} frac={frac}");
@@ -1503,9 +2250,35 @@ mod tests {
         let mut tmp2 = vec![0i16; crate::dsp::hevc::MC_TMP_LEN];
         let mut checked = 0;
         for trial in 0..2 {
-            let src: Vec<u8> = (0..stride * 96).map(|_| if trial == 0 { lcg(&mut seed) as u8 } else { [0u8, 255][(lcg(&mut seed) % 2) as usize] }).collect();
-            for &(w, h) in &[(2usize, 4usize), (2, 8), (4, 4), (4, 8), (4, 3), (6, 8), (8, 4), (8, 8), (8, 5), (12, 16), (16, 16), (24, 32), (32, 8), (48, 64), (64, 64)] {
-                let other: Vec<i16> = (0..w * h).map(|_| (lcg(&mut seed) % 30000) as i16 - 6000).collect();
+            let src: Vec<u8> = (0..stride * 96)
+                .map(|_| {
+                    if trial == 0 {
+                        lcg(&mut seed) as u8
+                    } else {
+                        [0u8, 255][(lcg(&mut seed) % 2) as usize]
+                    }
+                })
+                .collect();
+            for &(w, h) in &[
+                (2usize, 4usize),
+                (2, 8),
+                (4, 4),
+                (4, 8),
+                (4, 3),
+                (6, 8),
+                (8, 4),
+                (8, 8),
+                (8, 5),
+                (12, 16),
+                (16, 16),
+                (24, 32),
+                (32, 8),
+                (48, 64),
+                (64, 64),
+            ] {
+                let other: Vec<i16> = (0..w * h)
+                    .map(|_| (lcg(&mut seed) % 30000) as i16 - 6000)
+                    .collect();
                 for fx in 0..8 {
                     for fy in 0..8 {
                         for luma in [true, false] {
@@ -1517,21 +2290,119 @@ mod tests {
                             let mut d2 = d1.clone();
                             let off = 8 * stride + 8;
                             if luma {
-                                (s.qpel_uni)(&mut d1, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp1, 8);
-                                (d.qpel_uni)(&mut d2, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp2, 8);
+                                (s.qpel_uni)(
+                                    &mut d1,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp1,
+                                    8,
+                                );
+                                (d.qpel_uni)(
+                                    &mut d2,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp2,
+                                    8,
+                                );
                             } else {
-                                (s.epel_uni)(&mut d1, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp1, 8);
-                                (d.epel_uni)(&mut d2, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp2, 8);
+                                (s.epel_uni)(
+                                    &mut d1,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp1,
+                                    8,
+                                );
+                                (d.epel_uni)(
+                                    &mut d2,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp2,
+                                    8,
+                                );
                             }
-                            assert_eq!(d1, d2, "uni luma={luma} {w}x{h} fx={fx} fy={fy} trial={trial}");
+                            assert_eq!(
+                                d1, d2,
+                                "uni luma={luma} {w}x{h} fx={fx} fy={fy} trial={trial}"
+                            );
                             if luma {
-                                (s.qpel_bi)(&mut d1, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp1, &other, 8);
-                                (d.qpel_bi)(&mut d2, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp2, &other, 8);
+                                (s.qpel_bi)(
+                                    &mut d1,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp1,
+                                    &other,
+                                    8,
+                                );
+                                (d.qpel_bi)(
+                                    &mut d2,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp2,
+                                    &other,
+                                    8,
+                                );
                             } else {
-                                (s.epel_bi)(&mut d1, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp1, &other, 8);
-                                (d.epel_bi)(&mut d2, dstride, &src[off..], stride, w, h, fx, fy, &mut tmp2, &other, 8);
+                                (s.epel_bi)(
+                                    &mut d1,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp1,
+                                    &other,
+                                    8,
+                                );
+                                (d.epel_bi)(
+                                    &mut d2,
+                                    dstride,
+                                    &src[off..],
+                                    stride,
+                                    w,
+                                    h,
+                                    fx,
+                                    fy,
+                                    &mut tmp2,
+                                    &other,
+                                    8,
+                                );
                             }
-                            assert_eq!(d1, d2, "bi luma={luma} {w}x{h} fx={fx} fy={fy} trial={trial}");
+                            assert_eq!(
+                                d1, d2,
+                                "bi luma={luma} {w}x{h} fx={fx} fy={fy} trial={trial}"
+                            );
                             checked += 1;
                         }
                     }
@@ -1547,10 +2418,24 @@ mod tests {
         let s = HevcDsp::<u8>::SCALAR;
         let mut seed = 3u64;
         let max = 255;
-        for &(w, h) in &[(2usize, 4usize), (4, 4), (6, 8), (8, 8), (12, 16), (16, 8), (24, 4), (32, 32), (64, 64)] {
+        for &(w, h) in &[
+            (2usize, 4usize),
+            (4, 4),
+            (6, 8),
+            (8, 8),
+            (12, 16),
+            (16, 8),
+            (24, 4),
+            (32, 32),
+            (64, 64),
+        ] {
             for range in [16000i32, 22500] {
-                let a: Vec<i16> = (0..w * h).map(|_| ((lcg(&mut seed) % (2 * range as u32)) as i32 - range) as i16).collect();
-                let b: Vec<i16> = (0..w * h).map(|_| ((lcg(&mut seed) % (2 * range as u32)) as i32 - range) as i16).collect();
+                let a: Vec<i16> = (0..w * h)
+                    .map(|_| ((lcg(&mut seed) % (2 * range as u32)) as i32 - range) as i16)
+                    .collect();
+                let b: Vec<i16> = (0..w * h)
+                    .map(|_| ((lcg(&mut seed) % (2 * range as u32)) as i32 - range) as i16)
+                    .collect();
                 let stride = w + 5;
                 let mut d1 = vec![0u8; stride * h];
                 let mut d2 = vec![0u8; stride * h];
@@ -1560,16 +2445,49 @@ mod tests {
                 (s.bi)(&mut d1, stride, &a, &b, w, h, 7, max);
                 (d.bi)(&mut d2, stride, &a, &b, w, h, 7, max);
                 assert_eq!(d1, d2, "bi {w}x{h} range={range}");
-                for &(log2_wd, wt, o) in &[(6 + 6, 128, 0), (6, 1, 5), (7 + 6, -20, -3), (3 + 6, 255, 127)] {
+                for &(log2_wd, wt, o) in &[
+                    (6 + 6, 128, 0),
+                    (6, 1, 5),
+                    (7 + 6, -20, -3),
+                    (3 + 6, 255, 127),
+                ] {
                     (s.weighted_uni)(&mut d1, stride, &a, w, h, log2_wd, wt, o, max);
                     (d.weighted_uni)(&mut d2, stride, &a, w, h, log2_wd, wt, o, max);
                     assert_eq!(d1, d2, "wuni {w}x{h} {log2_wd} {wt} {o}");
-                    (s.weighted_bi)(&mut d1, stride, &a, &b, w, h, log2_wd, wt, 3 - wt, o, -o, max);
-                    (d.weighted_bi)(&mut d2, stride, &a, &b, w, h, log2_wd, wt, 3 - wt, o, -o, max);
+                    (s.weighted_bi)(
+                        &mut d1,
+                        stride,
+                        &a,
+                        &b,
+                        w,
+                        h,
+                        log2_wd,
+                        wt,
+                        3 - wt,
+                        o,
+                        -o,
+                        max,
+                    );
+                    (d.weighted_bi)(
+                        &mut d2,
+                        stride,
+                        &a,
+                        &b,
+                        w,
+                        h,
+                        log2_wd,
+                        wt,
+                        3 - wt,
+                        o,
+                        -o,
+                        max,
+                    );
                     assert_eq!(d1, d2, "wbi {w}x{h}");
                 }
             }
-            let res: Vec<i16> = (0..w * w).map(|_| (lcg(&mut seed) % 700) as i16 - 350).collect();
+            let res: Vec<i16> = (0..w * w)
+                .map(|_| (lcg(&mut seed) % 700) as i16 - 350)
+                .collect();
             if w == h && w >= 4 && w.is_power_of_two() {
                 let stride = w + 5;
                 let base: Vec<u8> = (0..stride * h).map(|_| lcg(&mut seed) as u8).collect();
@@ -1597,7 +2515,15 @@ mod tests {
                     _ => [0u8, 255, 254, 1][(lcg(&mut seed) % 4) as usize],
                 })
                 .collect();
-            for &(w, h) in &[(3usize, 5usize), (8, 8), (16, 16), (31, 17), (33, 9), (64, 64), (72, 3)] {
+            for &(w, h) in &[
+                (3usize, 5usize),
+                (8, 8),
+                (16, 16),
+                (31, 17),
+                (33, 9),
+                (64, 64),
+                (72, 3),
+            ] {
                 let mut table = [0i16; 32];
                 let pos = (lcg(&mut seed) % 32) as usize;
                 for k in 0..4 {
@@ -1606,11 +2532,42 @@ mod tests {
                 let mut d1 = src.clone();
                 let mut d2 = src.clone();
                 let off = 8 * stride + 8;
-                (s.sao_band)(&mut d1[off..], stride, &src[off..], stride, w, h, &table, 3, max);
-                (d.sao_band)(&mut d2[off..], stride, &src[off..], stride, w, h, &table, 3, max);
+                (s.sao_band)(
+                    &mut d1[off..],
+                    stride,
+                    &src[off..],
+                    stride,
+                    w,
+                    h,
+                    &table,
+                    3,
+                    max,
+                );
+                (d.sao_band)(
+                    &mut d2[off..],
+                    stride,
+                    &src[off..],
+                    stride,
+                    w,
+                    h,
+                    &table,
+                    3,
+                    max,
+                );
                 assert_eq!(d1, d2, "band {w}x{h} trial={trial}");
-                let offs: [i16; 5] = [(lcg(&mut seed) % 8) as i16, (lcg(&mut seed) % 8) as i16, 0, -((lcg(&mut seed) % 8) as i16), -((lcg(&mut seed) % 8) as i16)];
-                for &(na, nb) in &[(-1isize, 1isize), (-(stride as isize), stride as isize), (-(stride as isize) - 1, stride as isize + 1), (-(stride as isize) + 1, stride as isize - 1)] {
+                let offs: [i16; 5] = [
+                    (lcg(&mut seed) % 8) as i16,
+                    (lcg(&mut seed) % 8) as i16,
+                    0,
+                    -((lcg(&mut seed) % 8) as i16),
+                    -((lcg(&mut seed) % 8) as i16),
+                ];
+                for &(na, nb) in &[
+                    (-1isize, 1isize),
+                    (-(stride as isize), stride as isize),
+                    (-(stride as isize) - 1, stride as isize + 1),
+                    (-(stride as isize) + 1, stride as isize - 1),
+                ] {
                     let mut d1 = src.clone();
                     let mut d2 = src.clone();
                     (s.sao_edge)(&mut d1, &src, off, stride, w, h, na, nb, &offs, max);
@@ -1631,16 +2588,39 @@ mod tests {
         for trial in 0..600 {
             let base = lcg(&mut seed) % 256;
             let spread = 1 + lcg(&mut seed) % 16;
-            let plane: Vec<u8> = (0..stride * 32).map(|_| (base + lcg(&mut seed) % spread).min(255) as u8).collect();
+            let plane: Vec<u8> = (0..stride * 32)
+                .map(|_| (base + lcg(&mut seed) % spread).min(255) as u8)
+                .collect();
             let rnd = |seed: &mut u64, n: u32| lcg(seed) % n;
             let v = |seed: &mut u64, n: u32| rnd(seed, n) as i32;
-            let beta = [rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 64), rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 64)];
-            let tc = [rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 25), rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 25)];
+            let beta = [
+                rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 64),
+                rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 64),
+            ];
+            let tc = [
+                rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 25),
+                rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 25),
+            ];
             let np = [rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0];
             let nq = [rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0];
-            let tc4 = [v(&mut seed, 25) * (rnd(&mut seed, 2) as i32), v(&mut seed, 25), 0, v(&mut seed, 25)];
-            let np4 = [rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0, false, rnd(&mut seed, 5) == 0];
-            let nq4 = [rnd(&mut seed, 5) == 0, false, rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0];
+            let tc4 = [
+                v(&mut seed, 25) * (rnd(&mut seed, 2) as i32),
+                v(&mut seed, 25),
+                0,
+                v(&mut seed, 25),
+            ];
+            let np4 = [
+                rnd(&mut seed, 5) == 0,
+                rnd(&mut seed, 5) == 0,
+                false,
+                rnd(&mut seed, 5) == 0,
+            ];
+            let nq4 = [
+                rnd(&mut seed, 5) == 0,
+                false,
+                rnd(&mut seed, 5) == 0,
+                rnd(&mut seed, 5) == 0,
+            ];
             let off = 8 * stride + 8;
             let mut a = plane.clone();
             let mut b = plane.clone();
@@ -1662,7 +2642,12 @@ mod tests {
                     (d.deblock_chroma_h)(&mut b, off, stride, tc4, np4, nq4, max);
                 }
             }
-            assert_eq!(a, b, "hevc u8 deblock kind {} trial {trial} beta {beta:?} tc {tc:?}", trial % 4);
+            assert_eq!(
+                a,
+                b,
+                "hevc u8 deblock kind {} trial {trial} beta {beta:?} tc {tc:?}",
+                trial % 4
+            );
         }
     }
 }

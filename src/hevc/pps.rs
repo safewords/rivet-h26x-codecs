@@ -207,7 +207,9 @@ impl Pps {
                     diff_cu_chroma_qp_offset_depth = r.ue();
                     let len = r.ue() + 1;
                     if len > 6 {
-                        return Err(Error::bitstream("chroma_qp_offset_list_len_minus1 out of range"));
+                        return Err(Error::bitstream(
+                            "chroma_qp_offset_list_len_minus1 out of range",
+                        ));
                     }
                     for _ in 0..len {
                         let cb = r.se();
@@ -219,7 +221,10 @@ impl Pps {
                     }
                 }
                 log2_sao_offset_scale = (r.ue(), r.ue());
-                if log2_max_transform_skip_size > 5 || log2_sao_offset_scale.0 > 6 || log2_sao_offset_scale.1 > 6 {
+                if log2_max_transform_skip_size > 5
+                    || log2_sao_offset_scale.0 > 6
+                    || log2_sao_offset_scale.1 > 6
+                {
                     return Err(Error::bitstream("pps_range_extension values out of range"));
                 }
             }
@@ -330,7 +335,8 @@ impl Pps {
                 col_widths[i] = ((i as u32 + 1) * wc) / cols as u32 - (i as u32 * wc) / cols as u32;
             }
             for j in 0..rows {
-                row_heights[j] = ((j as u32 + 1) * hc) / rows as u32 - (j as u32 * hc) / rows as u32;
+                row_heights[j] =
+                    ((j as u32 + 1) * hc) / rows as u32 - (j as u32 * hc) / rows as u32;
             }
         } else {
             let mut sum = 0;

@@ -963,7 +963,12 @@ enum Response {
 
 impl Complexity {
     fn new(k: f64) -> Self {
-        Complexity { k, last_obs: None, response: Response::Unknown, observed: false }
+        Complexity {
+            k,
+            last_obs: None,
+            response: Response::Unknown,
+            observed: false,
+        }
     }
 
     /// Fold one observation — the quantiser `qp` a picture was coded at and
@@ -985,19 +990,34 @@ impl Complexity {
                     // law's response to one step limit?
                     (y - vy).abs() > f64::from(MAX_QP_STEP) / 6.0
                 };
-                if answered { restart } else { Response::Insensitive { floor, y: vy, held } }
+                if answered {
+                    restart
+                } else {
+                    Response::Insensitive { floor, y: vy, held }
+                }
             }
             (Response::Confirm { floor, y: fy }, _) => {
                 // The raised picture: a verdict only if its bits neither fell
                 // by an answer's worth nor rose beyond noise.
                 let change = y - fy;
                 if qp > floor && change > -answer(i32::from(qp - floor)) && change < -band {
-                    Response::Insensitive { floor, y: fy, held: 0 }
+                    Response::Insensitive {
+                        floor,
+                        y: fy,
+                        held: 0,
+                    }
                 } else {
                     restart
                 }
             }
-            (Response::Walk { qp: wqp, y: wy, moves }, Some((lqp, ly))) => {
+            (
+                Response::Walk {
+                    qp: wqp,
+                    y: wy,
+                    moves,
+                },
+                Some((lqp, ly)),
+            ) => {
                 if qp > lqp || (qp == lqp && (y - ly < band || y - ly > -band)) {
                     // A raised quantiser is not a walk; a held one whose bits
                     // moved means the content did, and the anchor no longer
@@ -1012,10 +1032,16 @@ impl Complexity {
                         // Answered, or got cheaper: either way not a picture
                         // ignoring the quantiser.
                         restart
-                    } else if span >= INSENSITIVE_SPAN && (moves >= 1 || span >= 2 * INSENSITIVE_SPAN) {
+                    } else if span >= INSENSITIVE_SPAN
+                        && (moves >= 1 || span >= 2 * INSENSITIVE_SPAN)
+                    {
                         Response::Confirm { floor: qp, y }
                     } else {
-                        Response::Walk { qp: wqp, y: wy, moves: moves + 1 }
+                        Response::Walk {
+                            qp: wqp,
+                            y: wy,
+                            moves: moves + 1,
+                        }
                     }
                 }
             }
@@ -1134,14 +1160,29 @@ impl RateController {
     /// over a `width` by `height` picture, with `gop` pictures between IDRs
     /// (0 meaning every picture is one) and `bframes` consecutive B
     /// pictures between references.
-    pub fn new(bps: u32, fps: impl Into<f64>, width: u32, height: u32, gop: u32, bframes: u32) -> Self {
+    pub fn new(
+        bps: u32,
+        fps: impl Into<f64>,
+        width: u32,
+        height: u32,
+        gop: u32,
+        bframes: u32,
+    ) -> Self {
         Self::with_cpb(bps, fps, width, height, gop, bframes, None)
     }
 
     /// [`RateController::new`] against a declared coded picture buffer of
     /// `cpb_bits`, which each picture's target is capped to fit.
     #[allow(clippy::too_many_arguments)]
-    pub fn with_cpb(bps: u32, fps: impl Into<f64>, width: u32, height: u32, gop: u32, bframes: u32, cpb_bits: Option<u64>) -> Self {
+    pub fn with_cpb(
+        bps: u32,
+        fps: impl Into<f64>,
+        width: u32,
+        height: u32,
+        gop: u32,
+        bframes: u32,
+        cpb_bits: Option<u64>,
+    ) -> Self {
         // Frames per second, a fraction for the NTSC family: the budget
         // of each picture is `bps / fps` exactly (`Config::frame_rate_f64`).
         let fps = fps.into().max(1.0);
@@ -1239,7 +1280,8 @@ impl RateController {
     /// this formula would be two things to keep in step, and the one that
     /// went stale would be the one nobody ran.
     pub fn affordable_bits(&self) -> Option<u64> {
-        self.cpb.map(|(size, fullness)| (fullness + self.per_picture).min(size).max(0.0) as u64)
+        self.cpb
+            .map(|(size, fullness)| (fullness + self.per_picture).min(size).max(0.0) as u64)
     }
 
     /// This controller at a constant rate: the bucket counts from
@@ -1277,7 +1319,11 @@ impl RateController {
     /// ([`RateController::escalate`]) for the first [`MAX_ATTEMPTS`], then
     /// the coarsest quantiser the syntax has.
     pub fn next_attempt_qp(attempt: u32, qp: u8, actual: u64, affordable: u64) -> u8 {
-        if attempt + 1 >= MAX_ATTEMPTS { QP_MAX as u8 } else { Self::escalate(qp, actual, affordable) }
+        if attempt + 1 >= MAX_ATTEMPTS {
+            QP_MAX as u8
+        } else {
+            Self::escalate(qp, actual, affordable)
+        }
     }
 
     /// Whether a picture that came out at `bits` at quantiser `qp` and
@@ -1292,7 +1338,9 @@ impl RateController {
     /// overspends goes out as the fallback, and the buffer refills by the
     /// arrival it no longer spends. Never without a declared buffer.
     pub fn starving(&self, qp: u8, bits: u64) -> bool {
-        let Some((size, fullness)) = self.cpb else { return false };
+        let Some((size, fullness)) = self.cpb else {
+            return false;
+        };
         let after = (fullness + self.per_picture).min(size) - bits as f64;
         i32::from(qp) >= QP_MAX && bits as f64 > self.per_picture && after < 0.5 * size
     }
@@ -1337,9 +1385,14 @@ impl RateController {
     /// plus the same bucket correction [`RateController::target_for`]
     /// applies. See the module documentation's lookahead section.
     fn target_ahead(&self, kind: PicKind, cost: f64, window: &[(PicKind, f64)]) -> f64 {
-        let mean = window.iter().map(|&(k, c)| self.k_for(k) * c).sum::<f64>() / window.len() as f64;
+        let mean =
+            window.iter().map(|&(k, c)| self.k_for(k) * c).sum::<f64>() / window.len() as f64;
         let mine = self.k_for(kind) * cost;
-        let share = if mean > 0.0 { (mine / mean).clamp(1.0 / MAX_K_RATIO, MAX_K_RATIO) } else { 1.0 };
+        let share = if mean > 0.0 {
+            (mine / mean).clamp(1.0 / MAX_K_RATIO, MAX_K_RATIO)
+        } else {
+            1.0
+        };
         let base = self.per_picture * share;
         let correction = (self.budget / CORRECTION_PICTURES).clamp(-0.5 * base, 0.5 * base);
         (base + correction).max(16.0)
@@ -1373,9 +1426,16 @@ impl RateController {
     /// cost` — recorded on the constant.
     pub fn pick_qp_ahead(&mut self, kind: PicKind, cost: f64, window: &[(PicKind, f64)]) -> u8 {
         let ahead = !window.is_empty();
-        debug_assert!(ahead || cost == 1.0, "a past-only pick has no cost to scale by");
+        debug_assert!(
+            ahead || cost == 1.0,
+            "a past-only pick has no cost to scale by"
+        );
         debug_assert!(cost > 0.0, "a lookahead cost must be positive");
-        let mut target = if ahead { self.target_ahead(kind, cost, window) } else { self.target_for(kind) };
+        let mut target = if ahead {
+            self.target_ahead(kind, cost, window)
+        } else {
+            self.target_for(kind)
+        };
         // What the buffer can hand over at this picture's removal time.
         // The rate target says what the picture is *worth*; this says what
         // it can *have*, and the smaller of the two wins.
@@ -1390,7 +1450,11 @@ impl RateController {
             // very first picture of a stream — an intra picture against a
             // small buffer, which is the case that actually underflows —
             // is the one that benefits.
-            let aim = if self.complexity[kind as usize].observed { CPB_AIM } else { CPB_AIM * 0.5 };
+            let aim = if self.complexity[kind as usize].observed {
+                CPB_AIM
+            } else {
+                CPB_AIM * 0.5
+            };
             target = target.min(available * aim).max(16.0);
         }
         let c = self.complexity[kind as usize];
@@ -1403,11 +1467,17 @@ impl RateController {
         // whose cost the lookahead put near zero — a held frame, whose
         // residual is really the reference's quantisation noise — was
         // planned at quantiser 0 and cost twelve times its keyframe.
-        let (k_eff, guess) = if ahead { (self.k_for(kind) * cost, !c.observed) } else { (c.k, false) };
+        let (k_eff, guess) = if ahead {
+            (self.k_for(kind) * cost, !c.observed)
+        } else {
+            (c.k, false)
+        };
         // Planned from a seed and nothing else: the stream's first picture,
         // and the first P after a keyframe that was coded again. Either may
         // be coded again itself (`seed_recode`).
-        let first_p = kind == PicKind::Inter && self.keyframe_recoded && self.last_observed == Some(PicKind::Intra);
+        let first_p = kind == PicKind::Inter
+            && self.keyframe_recoded
+            && self.last_observed == Some(PicKind::Intra);
         let seeded = ahead && guess && (self.last_observed.is_none() || first_p);
         // A kind borrowing the bits per cost of a keyframe that was coded
         // again borrows a measurement, not the calibration, so the seed's
@@ -1415,7 +1485,11 @@ impl RateController {
         // grad clip's first P on 0.04 of its plan.
         let guess = guess && !(self.keyframe_recoded && self.last_observed.is_some());
         let want = 6.0 * (k_eff / target).log2();
-        let want = if guess { want.clamp(SEED_QP_MIN, SEED_QP_MAX) } else { want };
+        let want = if guess {
+            want.clamp(SEED_QP_MIN, SEED_QP_MAX)
+        } else {
+            want
+        };
         let mut qp = want.round().clamp(QP_MIN as f64, QP_MAX as f64) as i32;
         // The step limit stops the quantiser pulsing between *considered*
         // choices, so it applies only between two of them — see
@@ -1438,10 +1512,17 @@ impl RateController {
             _ => 0,
         };
         let informed = c.observed;
-        match (informed, self.last_informed[kind as usize], self.last_any[kind as usize]) {
+        match (
+            informed,
+            self.last_informed[kind as usize],
+            self.last_any[kind as usize],
+        ) {
             (true, Some(last), _) => {
                 let last = last as i32;
-                qp = qp.clamp(last - MAX_QP_STEP + widen.min(0), last + MAX_QP_STEP + widen.max(0));
+                qp = qp.clamp(
+                    last - MAX_QP_STEP + widen.min(0),
+                    last + MAX_QP_STEP + widen.max(0),
+                );
             }
             (_, None, Some(any)) => {
                 let any = any as i32;
@@ -1515,7 +1596,9 @@ impl RateController {
             return None;
         }
         let was = i32::from(qp);
-        let again = ((was as f64 + miss).round() as i32).clamp(was - MAX_FIRST_STEP, was + MAX_FIRST_STEP).clamp(QP_MIN, QP_MAX);
+        let again = ((was as f64 + miss).round() as i32)
+            .clamp(was - MAX_FIRST_STEP, was + MAX_FIRST_STEP)
+            .clamp(QP_MIN, QP_MAX);
         if again == was || (self.cpb.is_some() && again < was) {
             return None;
         }
@@ -1606,7 +1689,9 @@ impl RateController {
             c.observe_response(qp, (coded as f64 / cost).log2());
             c.observed = true;
             match (was, c.response) {
-                (Response::Confirm { .. }, Response::Insensitive { .. }) => self.insensitivity.verdicts += 1,
+                (Response::Confirm { .. }, Response::Insensitive { .. }) => {
+                    self.insensitivity.verdicts += 1
+                }
                 (Response::Insensitive { .. }, Response::Insensitive { .. }) => {}
                 (Response::Insensitive { .. }, _) => self.insensitivity.releases += 1,
                 _ => {}
@@ -1694,9 +1779,17 @@ mod tests {
     #[test]
     fn the_budget_per_picture_reads_the_exact_frame_rate() {
         let at = |fps: f64| RateController::new(30_000, fps, 64, 64, 8, 0).per_picture;
-        assert!((at(30_000.0 / 1_001.0) - 1_001.0).abs() < 1e-9, "{}", at(30_000.0 / 1_001.0));
+        assert!(
+            (at(30_000.0 / 1_001.0) - 1_001.0).abs() < 1e-9,
+            "{}",
+            at(30_000.0 / 1_001.0)
+        );
         assert_eq!(at(30.0), 1_000.0);
-        assert_eq!(RateController::new(30_000, 30, 64, 64, 8, 0).per_picture, 1_000.0, "a whole number still reads");
+        assert_eq!(
+            RateController::new(30_000, 30, 64, 64, 8, 0).per_picture,
+            1_000.0,
+            "a whole number still reads"
+        );
     }
 
     /// The ledger is the one exact property here: whatever bytes are
@@ -1709,7 +1802,11 @@ mod tests {
         let mut rc = RateController::new(500_000, 30, 64, 64, 8, 0);
         let sizes = [900usize, 120, 140, 95, 210, 88, 400, 3];
         for (i, &b) in sizes.iter().enumerate() {
-            let kind = if i == 0 { PicKind::Intra } else { PicKind::Inter };
+            let kind = if i == 0 {
+                PicKind::Intra
+            } else {
+                PicKind::Inter
+            };
             let _ = rc.pick_qp(kind);
             rc.account(b);
         }
@@ -1736,7 +1833,11 @@ mod tests {
             let mut rc = RateController::new(bps, 30, W, H, 8, 0);
             let mut total = 0usize;
             for i in 0..12 {
-                let kind = if i % 8 == 0 { PicKind::Intra } else { PicKind::Inter };
+                let kind = if i % 8 == 0 {
+                    PicKind::Intra
+                } else {
+                    PicKind::Inter
+                };
                 let qp = rc.pick_qp(kind);
                 let b = synth_bits(if kind == PicKind::Intra { ki } else { kp }, qp);
                 rc.account(b);
@@ -1746,7 +1847,10 @@ mod tests {
         }
         for w in totals.windows(2) {
             let ((lo_bps, lo), (hi_bps, hi)) = (w[0], w[1]);
-            assert!(hi > lo, "target {hi_bps} produced {hi} bytes, not more than target {lo_bps}'s {lo}");
+            assert!(
+                hi > lo,
+                "target {hi_bps} produced {hi} bytes, not more than target {lo_bps}'s {lo}"
+            );
             // A real margin, not rounding: tripling the target must move
             // the total by more than a quarter.
             assert!(
@@ -1767,7 +1871,11 @@ mod tests {
         for bps in [200_000u32, 600_000, 1_800_000] {
             let mut rc = RateController::new(bps, 30, W, H, 8, 0);
             for i in 0..40 {
-                let kind = if i % 8 == 0 { PicKind::Intra } else { PicKind::Inter };
+                let kind = if i % 8 == 0 {
+                    PicKind::Intra
+                } else {
+                    PicKind::Inter
+                };
                 let qp = rc.pick_qp(kind);
                 let b = synth_bits(if kind == PicKind::Intra { ki } else { kp }, qp);
                 rc.account(b);
@@ -1797,7 +1905,11 @@ mod tests {
         let mut rc = RateController::new(2_000_000, 30, W, H, 8, 0);
         let mut qps = Vec::new();
         for i in 0..40 {
-            let kind = if i % 8 == 0 { PicKind::Intra } else { PicKind::Inter };
+            let kind = if i % 8 == 0 {
+                PicKind::Intra
+            } else {
+                PicKind::Inter
+            };
             qps.push(rc.pick_qp(kind));
             // The same size every time, whatever was asked for.
             rc.account(400);
@@ -1812,7 +1924,10 @@ mod tests {
     /// Whether a kind's controller holds a standing verdict that its bits
     /// ignore the quantiser.
     fn verdict(rc: &RateController, kind: PicKind) -> bool {
-        matches!(rc.complexity[kind as usize].response, Response::Insensitive { .. })
+        matches!(
+            rc.complexity[kind as usize].response,
+            Response::Insensitive { .. }
+        )
     }
 
     /// Fold a sequence of `(quantiser, bits)` observations into a fresh
@@ -1874,16 +1989,24 @@ mod tests {
             (I, 23, 13144), (P, 32, 2768),
         ];
         let mut verdicts = Vec::new();
-        for (name, bps, trace) in [("H.265 64k", 64_000, &h265[..]), ("H.264 128k", 128_000, &h264[..])] {
+        for (name, bps, trace) in [
+            ("H.265 64k", 64_000, &h265[..]),
+            ("H.264 128k", 128_000, &h264[..]),
+        ] {
             let mut rc = RateController::new(bps, 30, 64, 64, 8, 0);
             for (i, &(kind, qp, bits)) in trace.iter().enumerate() {
                 observe_at(&mut rc, kind, qp, bits / 8);
                 if verdict(&rc, kind) {
-                    verdicts.push(format!("{name}: picture {i}, {kind:?} quantiser {qp}, {bits} bits"));
+                    verdicts.push(format!(
+                        "{name}: picture {i}, {kind:?} quantiser {qp}, {bits} bits"
+                    ));
                 }
             }
         }
-        assert!(verdicts.is_empty(), "the replayed traces reached verdicts: {verdicts:?}");
+        assert!(
+            verdicts.is_empty(),
+            "the replayed traces reached verdicts: {verdicts:?}"
+        );
     }
 
     /// **Bits held flat by improving references are not a verdict.** A
@@ -1899,10 +2022,25 @@ mod tests {
         let bits = |qp: u8, t: i32| 1e6 * 2f64.powf(-f64::from(qp) / 6.0 - f64::from(t) / 2.0);
         // The walk, then the raised picture the rule asks with, then the
         // scene settling at picture 5 while the controller walks on.
-        let seq = [(40, 0), (37, 1), (34, 2), (37, 3), (34, 4), (31, 5), (28, 5), (25, 5)];
+        let seq = [
+            (40, 0),
+            (37, 1),
+            (34, 2),
+            (37, 3),
+            (34, 4),
+            (31, 5),
+            (28, 5),
+            (25, 5),
+        ];
         let r = responses(&seq.map(|(qp, t)| (qp, bits(qp, t))));
-        assert!(matches!(r[2], Response::Confirm { floor: 34, .. }), "the walk should have gone silent and asked: {r:?}");
-        assert!(r.iter().all(|x| !matches!(x, Response::Insensitive { .. })), "improving references reached a verdict: {r:?}");
+        assert!(
+            matches!(r[2], Response::Confirm { floor: 34, .. }),
+            "the walk should have gone silent and asked: {r:?}"
+        );
+        assert!(
+            r.iter().all(|x| !matches!(x, Response::Insensitive { .. })),
+            "improving references reached a verdict: {r:?}"
+        );
     }
 
     /// **Bits that truly stop answering still reach a verdict**, through
@@ -1914,9 +2052,17 @@ mod tests {
     fn bits_that_do_not_answer_the_quantiser_reach_a_verdict_and_nothing_less_does() {
         let f = 3000.0;
         let r = responses(&[(40, f), (37, f * 1.02), (34, f * 0.99), (37, f * 1.01)]);
-        assert!(matches!(r[2], Response::Confirm { floor: 34, .. }) && matches!(r[3], Response::Insensitive { floor: 34, .. }), "{r:?}");
+        assert!(
+            matches!(r[2], Response::Confirm { floor: 34, .. })
+                && matches!(r[3], Response::Insensitive { floor: 34, .. }),
+            "{r:?}"
+        );
         let r = responses(&[(26, f), (10, f), (13, f)]);
-        assert!(matches!(r[1], Response::Confirm { floor: 10, .. }) && matches!(r[2], Response::Insensitive { floor: 10, .. }), "{r:?}");
+        assert!(
+            matches!(r[1], Response::Confirm { floor: 10, .. })
+                && matches!(r[2], Response::Insensitive { floor: 10, .. }),
+            "{r:?}"
+        );
 
         for seq in [
             // One move of three, and one of six.
@@ -1930,7 +2076,10 @@ mod tests {
             &[(40, f), (37, f * 1.1), (34, f * 1.2), (37, f * 1.2)][..],
         ] {
             let r = responses(seq);
-            assert!(r.iter().all(|x| !matches!(x, Response::Insensitive { .. })), "{seq:?} reached a verdict: {r:?}");
+            assert!(
+                r.iter().all(|x| !matches!(x, Response::Insensitive { .. })),
+                "{seq:?} reached a verdict: {r:?}"
+            );
         }
     }
 
@@ -1944,11 +2093,20 @@ mod tests {
         let base = [(40, f), (37, f), (34, f), (37, f)];
         let with = |tail: &[(u8, f64)]| responses(&[&base[..], tail].concat());
         let r = with(&[(34, f), (34, f * 1.5)]);
-        assert!(matches!(r[4], Response::Insensitive { .. }) && matches!(r[5], Response::Walk { .. }), "content change: {r:?}");
+        assert!(
+            matches!(r[4], Response::Insensitive { .. }) && matches!(r[5], Response::Walk { .. }),
+            "content change: {r:?}"
+        );
         let r = with(&[(34, f), (31, f * 1.3)]);
-        assert!(matches!(r[5], Response::Walk { .. }), "answering probe: {r:?}");
+        assert!(
+            matches!(r[5], Response::Walk { .. }),
+            "answering probe: {r:?}"
+        );
         let r = with(&[(34, f), (31, f * 1.02), (34, f)]);
-        assert!(matches!(r[6], Response::Insensitive { floor: 34, .. }), "silent probe: {r:?}");
+        assert!(
+            matches!(r[6], Response::Insensitive { floor: 34, .. }),
+            "silent probe: {r:?}"
+        );
     }
 
     /// Closed loop, content that never answers: each kind reaches its
@@ -1958,32 +2116,51 @@ mod tests {
     #[test]
     fn content_that_ignores_the_quantiser_is_held_without_walking() {
         let mut rc = RateController::new(2_000_000, 30, W, H, 8, 0);
-        let floor_of = |rc: &RateController, kind: PicKind| match rc.complexity[kind as usize].response {
-            Response::Insensitive { floor, .. } => Some(floor),
-            _ => None,
-        };
+        let floor_of =
+            |rc: &RateController, kind: PicKind| match rc.complexity[kind as usize].response {
+                Response::Insensitive { floor, .. } => Some(floor),
+                _ => None,
+            };
         let mut floors: [Option<u8>; 2] = [None; 2];
         let mut probes = 0;
         for i in 0..400 {
-            let kind = if i % 8 == 0 { PicKind::Intra } else { PicKind::Inter };
+            let kind = if i % 8 == 0 {
+                PicKind::Intra
+            } else {
+                PicKind::Inter
+            };
             let qp = rc.pick_qp(kind);
             if i >= 50 {
-                let fl = floors[kind as usize].expect("a verdict for both kinds within fifty pictures");
-                assert!(i32::from(qp) >= i32::from(fl) - MAX_QP_STEP, "picture {i}: {kind:?} picked {qp} under a floor of {fl}");
+                let fl =
+                    floors[kind as usize].expect("a verdict for both kinds within fifty pictures");
+                assert!(
+                    i32::from(qp) >= i32::from(fl) - MAX_QP_STEP,
+                    "picture {i}: {kind:?} picked {qp} under a floor of {fl}"
+                );
                 probes += usize::from(qp < fl);
             }
             rc.account(400);
             if i < 50 {
                 floors[kind as usize] = floor_of(&rc, kind);
             } else {
-                assert_eq!(floor_of(&rc, kind), floors[kind as usize], "picture {i}: {kind:?}'s verdict moved or was released");
+                assert_eq!(
+                    floor_of(&rc, kind),
+                    floors[kind as usize],
+                    "picture {i}: {kind:?}'s verdict moved or was released"
+                );
             }
         }
-        assert!(probes > 0, "no probe was ever made, so nothing above tested the hold against one");
+        assert!(
+            probes > 0,
+            "no probe was ever made, so nothing above tested the hold against one"
+        );
         // The report says the same: a verdict per kind, at least the probes
         // counted above (which start at picture fifty), and no release.
         let events = rc.insensitivity();
-        assert!(events.verdicts == 2 && events.probes as usize >= probes && events.releases == 0, "{events:?}, {probes} probes after picture 50");
+        assert!(
+            events.verdicts == 2 && events.probes as usize >= probes && events.releases == 0,
+            "{events:?}, {probes} probes after picture 50"
+        );
     }
 
     /// Closed loop, content that ignores the quantiser at or above some
@@ -1998,10 +2175,16 @@ mod tests {
         let mut floor = None;
         let mut below = u8::MAX;
         for i in 0..160 {
-            let kind = if i % 8 == 0 { PicKind::Intra } else { PicKind::Inter };
+            let kind = if i % 8 == 0 {
+                PicKind::Intra
+            } else {
+                PicKind::Inter
+            };
             let qp = rc.pick_qp(kind);
             let bytes = match (kind, floor) {
-                (PicKind::Inter, Some(fl)) if qp < fl => (400.0 * 2f64.powf(f64::from(fl - qp) / 6.0)) as usize,
+                (PicKind::Inter, Some(fl)) if qp < fl => {
+                    (400.0 * 2f64.powf(f64::from(fl - qp) / 6.0)) as usize
+                }
                 _ => 400,
             };
             if kind == PicKind::Inter && floor.is_some() {
@@ -2010,15 +2193,22 @@ mod tests {
             rc.account(bytes);
             if floor.is_none()
                 && i >= 40
-                && let Response::Insensitive { floor: fl, .. } = rc.complexity[PicKind::Inter as usize].response
+                && let Response::Insensitive { floor: fl, .. } =
+                    rc.complexity[PicKind::Inter as usize].response
             {
                 floor = Some(fl);
             }
         }
         let fl = floor.expect("a verdict on the constant phase");
-        assert!(i32::from(below) <= i32::from(fl) - 2 * MAX_QP_STEP, "the controller never went more than a probe below the floor {fl}: lowest {below}");
+        assert!(
+            i32::from(below) <= i32::from(fl) - 2 * MAX_QP_STEP,
+            "the controller never went more than a probe below the floor {fl}: lowest {below}"
+        );
         let events = rc.insensitivity();
-        assert!(events.verdicts >= 1 && events.probes >= 1 && events.releases >= 1, "the report missed a path: {events:?}");
+        assert!(
+            events.verdicts >= 1 && events.probes >= 1 && events.releases >= 1,
+            "the report missed a path: {events:?}"
+        );
     }
 
     /// The quantiser may not lurch. A controller that jumps from 20 to 45
@@ -2036,14 +2226,21 @@ mod tests {
         // swings hard, and the step limit is what stops the quantiser from
         // swinging with it.
         for i in 0..30 {
-            let kind = if i % 8 == 0 { PicKind::Intra } else { PicKind::Inter };
+            let kind = if i % 8 == 0 {
+                PicKind::Intra
+            } else {
+                PicKind::Inter
+            };
             let qp = rc.pick_qp(kind);
             if kind == PicKind::Inter {
                 inter_informed += 1;
                 if inter_informed > 2 {
                     let p = prev_inter.expect("an earlier inter pick");
                     let d = (qp as i32 - p as i32).abs();
-                    assert!(d <= MAX_QP_STEP, "picture {i}: quantiser moved {d}, from {p} to {qp}");
+                    assert!(
+                        d <= MAX_QP_STEP,
+                        "picture {i}: quantiser moved {d}, from {p} to {qp}"
+                    );
                 }
                 prev_inter = Some(qp);
             }
@@ -2064,9 +2261,19 @@ mod tests {
         // Two B pictures between anchors, eight pictures to a keyframe.
         let (gop, bframes) = (8u32, 2u32);
         let rc = RateController::new(500_000, 30, W, H, gop, bframes);
-        let (i, p, b) = (rc.target_for(PicKind::Intra), rc.target_for(PicKind::Inter), rc.target_for(PicKind::B));
-        assert!(b < p, "a B picture ({b:.0}) should be given less than a P ({p:.0})");
-        assert!(p < i, "a P picture ({p:.0}) should be given less than an intra ({i:.0})");
+        let (i, p, b) = (
+            rc.target_for(PicKind::Intra),
+            rc.target_for(PicKind::Inter),
+            rc.target_for(PicKind::B),
+        );
+        assert!(
+            b < p,
+            "a B picture ({b:.0}) should be given less than a P ({p:.0})"
+        );
+        assert!(
+            p < i,
+            "a P picture ({p:.0}) should be given less than an intra ({i:.0})"
+        );
 
         // The GOP as the scheduler will actually shape it.
         let others = (gop - 1) as f64;
@@ -2095,8 +2302,18 @@ mod tests {
             };
             let qa = a.pick_qp(kind);
             let qb = b.pick_qp_ahead(kind, 1.0, &[]);
-            assert_eq!(qa, qb, "picture {i}: the two paths chose different quantisers");
-            let bytes = synth_bits(if kind == PicKind::Intra { K_INTRA } else { K_INTER }, qa);
+            assert_eq!(
+                qa, qb,
+                "picture {i}: the two paths chose different quantisers"
+            );
+            let bytes = synth_bits(
+                if kind == PicKind::Intra {
+                    K_INTRA
+                } else {
+                    K_INTER
+                },
+                qa,
+            );
             a.account(bytes);
             b.account(bytes);
         }
@@ -2112,12 +2329,27 @@ mod tests {
         let window = [(PicKind::Inter, 1000.0), (PicKind::Inter, 3000.0)];
         let cheap = rc.target_ahead(PicKind::Inter, 1000.0, &window);
         let dear = rc.target_ahead(PicKind::Inter, 3000.0, &window);
-        assert!(dear > cheap * 2.5, "the picture at three times the cost was given {dear:.0} against {cheap:.0}");
+        assert!(
+            dear > cheap * 2.5,
+            "the picture at three times the cost was given {dear:.0} against {cheap:.0}"
+        );
         let plain = rc.per_picture * 2.0;
-        assert!(((cheap + dear) - plain).abs() < plain * 0.01, "the shares changed the window's total: {:.0} against {plain:.0}", cheap + dear);
+        assert!(
+            ((cheap + dear) - plain).abs() < plain * 0.01,
+            "the shares changed the window's total: {:.0} against {plain:.0}",
+            cheap + dear
+        );
         // Bounded: a picture a hundred times the cost of the rest cannot
         // take more than MAX_K_RATIO pictures' worth.
-        let wild = rc.target_ahead(PicKind::Inter, 100_000.0, &[(PicKind::Inter, 100_000.0), (PicKind::Inter, 1000.0), (PicKind::Inter, 1000.0)]);
+        let wild = rc.target_ahead(
+            PicKind::Inter,
+            100_000.0,
+            &[
+                (PicKind::Inter, 100_000.0),
+                (PicKind::Inter, 1000.0),
+                (PicKind::Inter, 1000.0),
+            ],
+        );
         assert!(wild <= rc.per_picture * MAX_K_RATIO * 1.01, "{wild:.0}");
     }
 
@@ -2133,10 +2365,18 @@ mod tests {
         // both ends — an absurd cost either way cannot run away.
         let mut fresh = RateController::new(600_000, 30, W, H, 8, 0);
         let huge = fresh.pick_qp_ahead(PicKind::Intra, 1e12, &[(PicKind::Intra, 1e12)]);
-        assert_eq!(f64::from(huge), SEED_QP_MAX, "an absurd cost against the calibration must hit the seed clamp, not run away");
+        assert_eq!(
+            f64::from(huge),
+            SEED_QP_MAX,
+            "an absurd cost against the calibration must hit the seed clamp, not run away"
+        );
         let mut fresh = RateController::new(600_000, 30, W, H, 8, 0);
         let tiny = fresh.pick_qp_ahead(PicKind::Intra, 1e-3, &[(PicKind::Intra, 1e-3)]);
-        assert_eq!(f64::from(tiny), SEED_QP_MIN, "a negligible cost must be held at the seed floor");
+        assert_eq!(
+            f64::from(tiny),
+            SEED_QP_MIN,
+            "a negligible cost must be held at the seed floor"
+        );
 
         // One keyframe observed at a plausible cost; its k per unit cost
         // is then what plans the first P, so a P at cost c and a P at
@@ -2150,21 +2390,34 @@ mod tests {
         let mut hi = rc.clone_for_test();
         let q_lo = lo.pick_qp_ahead(PicKind::Inter, 4e5, &[(PicKind::Inter, 4e5)]);
         let q_hi = hi.pick_qp_ahead(PicKind::Inter, 1.6e6, &[(PicKind::Inter, 1.6e6)]);
-        assert!(f64::from(q_lo) > SEED_QP_MIN && f64::from(q_hi) < SEED_QP_MAX, "the picks must sit inside the clamp for the slope to show: {q_lo}, {q_hi}");
-        assert!((i32::from(q_hi) - i32::from(q_lo) - 12).abs() <= 1, "cost x4 moved the quantiser from {q_lo} to {q_hi}, not by twelve");
+        assert!(
+            f64::from(q_lo) > SEED_QP_MIN && f64::from(q_hi) < SEED_QP_MAX,
+            "the picks must sit inside the clamp for the slope to show: {q_lo}, {q_hi}"
+        );
+        assert!(
+            (i32::from(q_hi) - i32::from(q_lo) - 12).abs() <= 1,
+            "cost x4 moved the quantiser from {q_lo} to {q_hi}, not by twelve"
+        );
         // A borrowed measurement is still a guess about this kind: a
         // negligible cost is held at the seed floor rather than planned
         // at quantiser 0 — the held-frame case, whose true residual is
         // the reference's quantisation noise.
         let mut held = rc.clone_for_test();
         let q_held = held.pick_qp_ahead(PicKind::Inter, 1.0, &[(PicKind::Inter, 1.0)]);
-        assert_eq!(f64::from(q_held), SEED_QP_MIN, "a borrowed pick at a negligible cost escaped the seed clamp: {q_held}");
+        assert_eq!(
+            f64::from(q_held),
+            SEED_QP_MIN,
+            "a borrowed pick at a negligible cost escaped the seed clamp: {q_held}"
+        );
         // And it was the keyframe's measurement that planned it, not the
         // calibration: the same P on a controller that observed nothing
         // lands elsewhere.
         let mut blind = RateController::new(600_000, 30, W, H, 8, 0);
         let q_blind = blind.pick_qp_ahead(PicKind::Inter, 4e5, &[(PicKind::Inter, 4e5)]);
-        assert_ne!(q_blind, q_lo, "the borrowed k made no difference to the first P");
+        assert_ne!(
+            q_blind, q_lo,
+            "the borrowed k made no difference to the first P"
+        );
     }
 
     /// **A seeded first picture that misses by far is coded again.** The
@@ -2181,23 +2434,55 @@ mod tests {
     #[test]
     fn a_seeded_first_picture_that_misses_by_far_is_coded_again_at_its_own_quantiser() {
         let cost = 1e-3;
-        let window = |c: f64| vec![(PicKind::Intra, c), (PicKind::Inter, c / 4.0), (PicKind::Inter, c / 4.0)];
+        let window = |c: f64| {
+            vec![
+                (PicKind::Intra, c),
+                (PicKind::Inter, c / 4.0),
+                (PicKind::Inter, c / 4.0),
+            ]
+        };
         // A negligible cost puts the seeded pick on the seed's floor.
         let mut rc = RateController::new(600_000, 30, W, H, 8, 0);
         let first = rc.pick_qp_ahead(PicKind::Intra, cost, &window(cost));
-        assert_eq!(f64::from(first), SEED_QP_MIN, "the seeded pick of a negligible cost sits on the floor");
+        assert_eq!(
+            f64::from(first),
+            SEED_QP_MIN,
+            "the seeded pick of a negligible cost sits on the floor"
+        );
         let plan = rc.planned;
         let at = |steps: f64| (plan * 2f64.powf(steps / 6.0)) as u64;
         let ask = |steps: f64| rc.clone_for_test().seed_recode(at(steps));
         assert_eq!(ask(-2.9), None, "2.9 steps under plan is near enough");
         assert_eq!(ask(2.9), None, "2.9 steps over plan is near enough");
-        assert_eq!(ask(-4.0), Some(first - 4), "4 steps under plan asks for 4 steps lower");
-        assert_eq!(ask(4.0), Some(first + 4), "4 steps over plan asks for 4 steps higher");
-        assert_eq!(ask(30.0), Some(first + 16), "30 steps over plan is bounded to the first-correction limit");
+        assert_eq!(
+            ask(-4.0),
+            Some(first - 4),
+            "4 steps under plan asks for 4 steps lower"
+        );
+        assert_eq!(
+            ask(4.0),
+            Some(first + 4),
+            "4 steps over plan asks for 4 steps higher"
+        );
+        assert_eq!(
+            ask(30.0),
+            Some(first + 16),
+            "30 steps over plan is bounded to the first-correction limit"
+        );
 
-        let again = rc.seed_recode(at(-12.0)).expect("12 steps under plan is coded again");
-        assert_eq!(again, first - 12, "12 steps under plan asks for 12 steps lower, under the seed's floor");
-        assert_eq!(rc.seed_recode(at(-12.0)), None, "a picture is coded again once, not twice");
+        let again = rc
+            .seed_recode(at(-12.0))
+            .expect("12 steps under plan is coded again");
+        assert_eq!(
+            again,
+            first - 12,
+            "12 steps under plan asks for 12 steps lower, under the seed's floor"
+        );
+        assert_eq!(
+            rc.seed_recode(at(-12.0)),
+            None,
+            "a picture is coded again once, not twice"
+        );
         // Coded again it still lands ten steps under. The model is pinned
         // to that coding, and the next keyframe, which wants ten lower,
         // moves by the ordinary limit and not the first correction's.
@@ -2205,23 +2490,46 @@ mod tests {
         rc.account(bytes);
         let k = (bytes * 8) as f64 * 2f64.powf(f64::from(again) / 6.0) / cost;
         let got = rc.complexity[PicKind::Intra as usize].k;
-        assert!((got / k - 1.0).abs() < 1e-9, "the model was pinned to {got}, not to the coding that shipped ({k})");
+        assert!(
+            (got / k - 1.0).abs() < 1e-9,
+            "the model was pinned to {got}, not to the coding that shipped ({k})"
+        );
         let next = rc.pick_qp_ahead(PicKind::Intra, cost, &window(cost));
-        assert_eq!(i32::from(next), i32::from(again) - MAX_QP_STEP, "the next keyframe did not move from a measured pick");
-        assert_eq!(rc.seed_recode(1), None, "a keyframe planned from a measurement is never asked again");
+        assert_eq!(
+            i32::from(next),
+            i32::from(again) - MAX_QP_STEP,
+            "the next keyframe did not move from a measured pick"
+        );
+        assert_eq!(
+            rc.seed_recode(1),
+            None,
+            "a keyframe planned from a measurement is never asked again"
+        );
 
         // Without a lookahead nothing is seeded from the calibration, and
         // nothing is ever asked again.
         let mut past = RateController::new(600_000, 30, W, H, 8, 0);
         let _ = past.pick_qp(PicKind::Intra);
-        assert_eq!(past.seed_recode(1), None, "the past-only controller asked for a re-code");
+        assert_eq!(
+            past.seed_recode(1),
+            None,
+            "the past-only controller asked for a re-code"
+        );
 
         // Under a declared buffer only a rise is asked for.
         let mut cpb = RateController::with_cpb(600_000, 30, W, H, 8, 0, Some(400_000));
         let q = cpb.pick_qp_ahead(PicKind::Intra, 1e6, &window(1e6));
         let plan = cpb.planned;
-        assert_eq!(cpb.clone_for_test().seed_recode((plan * 0.1) as u64), None, "a buffered keyframe under plan was asked to spend more");
-        assert!(cpb.seed_recode((plan * 10.0) as u64).is_some_and(|again| again > q), "a buffered keyframe over plan was not raised");
+        assert_eq!(
+            cpb.clone_for_test().seed_recode((plan * 0.1) as u64),
+            None,
+            "a buffered keyframe under plan was asked to spend more"
+        );
+        assert!(
+            cpb.seed_recode((plan * 10.0) as u64)
+                .is_some_and(|again| again > q),
+            "a buffered keyframe over plan was not raised"
+        );
     }
 
     /// **The first P after a re-coded keyframe plans from a measurement.**
@@ -2234,14 +2542,17 @@ mod tests {
     #[test]
     fn the_first_p_after_a_recoded_keyframe_is_not_held_at_the_seed_floor() {
         let (cost_i, cost_p) = (1e6, 3e4);
-        let window = |kind: PicKind, c: f64| vec![(kind, c), (PicKind::Inter, cost_p), (PicKind::B, cost_p)];
+        let window =
+            |kind: PicKind, c: f64| vec![(kind, c), (PicKind::Inter, cost_p), (PicKind::B, cost_p)];
         // The keyframe lands on plan either way: at the seed's pick, or
         // coded again 12 steps lower after missing by 12.
         let keyframe = |recode: bool| {
             let mut rc = RateController::new(600_000, 30, W, H, 8, 2);
             let first = rc.pick_qp_ahead(PicKind::Intra, cost_i, &window(PicKind::Intra, cost_i));
             if recode {
-                let again = rc.seed_recode((rc.planned * 2f64.powf(-12.0 / 6.0)) as u64).expect("the keyframe is coded again");
+                let again = rc
+                    .seed_recode((rc.planned * 2f64.powf(-12.0 / 6.0)) as u64)
+                    .expect("the keyframe is coded again");
                 assert_eq!(again, first - 12);
             } else {
                 assert_eq!(rc.seed_recode(rc.planned as u64), None);
@@ -2251,10 +2562,20 @@ mod tests {
         };
         let mut rc = keyframe(true);
         let p1 = rc.pick_qp_ahead(PicKind::Inter, cost_p, &window(PicKind::Inter, cost_p));
-        assert!(f64::from(p1) < SEED_QP_MIN, "the first P after a re-coded keyframe was held at the seed floor: {p1}");
+        assert!(
+            f64::from(p1) < SEED_QP_MIN,
+            "the first P after a re-coded keyframe was held at the seed floor: {p1}"
+        );
         let plan = rc.planned;
-        assert_eq!(rc.clone_for_test().seed_recode((plan * 2f64.powf(2.9 / 6.0)) as u64), None, "near enough is left alone");
-        let again = rc.seed_recode((plan * 2f64.powf(9.0 / 6.0)) as u64).expect("the first P over its plan by 9 steps is coded again");
+        assert_eq!(
+            rc.clone_for_test()
+                .seed_recode((plan * 2f64.powf(2.9 / 6.0)) as u64),
+            None,
+            "near enough is left alone"
+        );
+        let again = rc
+            .seed_recode((plan * 2f64.powf(9.0 / 6.0)) as u64)
+            .expect("the first P over its plan by 9 steps is coded again");
         assert_eq!(again, p1 + 9);
         rc.account((plan / 8.0) as usize);
         let _ = rc.pick_qp_ahead(PicKind::B, cost_p, &window(PicKind::B, cost_p));
@@ -2267,8 +2588,16 @@ mod tests {
         // held at the floor, and is not asked again.
         let mut plain = keyframe(false);
         let p = plain.pick_qp_ahead(PicKind::Inter, cost_p, &window(PicKind::Inter, cost_p));
-        assert_eq!(f64::from(p), SEED_QP_MIN, "without a re-coded keyframe the first P must stay on the seed floor");
-        assert_eq!(plain.seed_recode(1), None, "without a re-coded keyframe the first P was asked again");
+        assert_eq!(
+            f64::from(p),
+            SEED_QP_MIN,
+            "without a re-coded keyframe the first P must stay on the seed floor"
+        );
+        assert_eq!(
+            plain.seed_recode(1),
+            None,
+            "without a re-coded keyframe the first P was asked again"
+        );
     }
 
     /// A measured jump in cost widens the step limit in the direction of
@@ -2292,8 +2621,14 @@ mod tests {
         }
         let jump_a = ahead.pick_qp_ahead(PicKind::Inter, 8000.0, &window(8000.0));
         let jump_p = past.pick_qp(PicKind::Inter);
-        assert!(i32::from(jump_a) - i32::from(last_a) > MAX_QP_STEP, "lookahead held the cut to {last_a} -> {jump_a}");
-        assert!(i32::from(jump_p) - i32::from(last_p) <= MAX_QP_STEP, "the past-only path exceeded its limit: {last_p} -> {jump_p}");
+        assert!(
+            i32::from(jump_a) - i32::from(last_a) > MAX_QP_STEP,
+            "lookahead held the cut to {last_a} -> {jump_a}"
+        );
+        assert!(
+            i32::from(jump_p) - i32::from(last_p) <= MAX_QP_STEP,
+            "the past-only path exceeded its limit: {last_p} -> {jump_p}"
+        );
     }
 
     /// An intra picture gets a larger share than an inter one at the same
@@ -2306,7 +2641,10 @@ mod tests {
         let rc = RateController::new(500_000, 30, W, H, 8, 0);
         let i = rc.target_for(PicKind::Intra);
         let p = rc.target_for(PicKind::Inter);
-        assert!(i > p * 2.0, "intra target {i:.0} is not meaningfully above inter {p:.0}");
+        assert!(
+            i > p * 2.0,
+            "intra target {i:.0} is not meaningfully above inter {p:.0}"
+        );
         // And the split must not invent bits: the GOP's weighted average
         // is still one picture's worth.
         let gop_total = i + p * 7.0;

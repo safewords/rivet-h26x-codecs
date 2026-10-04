@@ -75,7 +75,14 @@ unsafe fn load8(p: *const u8) -> int16x8_t {
 
 /// `a - 5b + 20c + 20d - 5e + f` in i16.
 #[inline(always)]
-unsafe fn tap6(a: int16x8_t, b: int16x8_t, c: int16x8_t, d: int16x8_t, e: int16x8_t, f: int16x8_t) -> int16x8_t {
+unsafe fn tap6(
+    a: int16x8_t,
+    b: int16x8_t,
+    c: int16x8_t,
+    d: int16x8_t,
+    e: int16x8_t,
+    f: int16x8_t,
+) -> int16x8_t {
     unsafe {
         let t = vaddq_s16(c, d);
         let u = vaddq_s16(b, e);
@@ -97,7 +104,14 @@ unsafe fn round5(v: int16x8_t) -> uint8x8_t {
 unsafe fn b1_row(src: *const u8, stride: usize, row: usize, x0: usize) -> int16x8_t {
     unsafe {
         let p = src.add(row * stride + x0);
-        tap6(load8(p), load8(p.add(1)), load8(p.add(2)), load8(p.add(3)), load8(p.add(4)), load8(p.add(5)))
+        tap6(
+            load8(p),
+            load8(p.add(1)),
+            load8(p.add(2)),
+            load8(p.add(3)),
+            load8(p.add(4)),
+            load8(p.add(5)),
+        )
     }
 }
 
@@ -106,7 +120,14 @@ unsafe fn b1_row(src: *const u8, stride: usize, row: usize, x0: usize) -> int16x
 unsafe fn h1_row(src: *const u8, stride: usize, col: usize, y: usize) -> int16x8_t {
     unsafe {
         let p = src.add(y * stride + col);
-        tap6(load8(p), load8(p.add(stride)), load8(p.add(2 * stride)), load8(p.add(3 * stride)), load8(p.add(4 * stride)), load8(p.add(5 * stride)))
+        tap6(
+            load8(p),
+            load8(p.add(stride)),
+            load8(p.add(2 * stride)),
+            load8(p.add(3 * stride)),
+            load8(p.add(4 * stride)),
+            load8(p.add(5 * stride)),
+        )
     }
 }
 
@@ -125,12 +146,22 @@ unsafe fn j_combine(r: &[int16x8_t; 6]) -> uint8x8_t {
             lo = vmlal_n_s16(lo, vget_low_s16(r[k]), taps[k]);
             hi = vmlal_high_n_s16(hi, r[k], taps[k]);
         }
-        let v = vcombine_s16(vqmovn_s32(vshrq_n_s32::<10>(lo)), vqmovn_s32(vshrq_n_s32::<10>(hi)));
+        let v = vcombine_s16(
+            vqmovn_s32(vshrq_n_s32::<10>(lo)),
+            vqmovn_s32(vshrq_n_s32::<10>(hi)),
+        );
         vqmovun_s16(v)
     }
 }
 
-fn qpel_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, _max: i32) {
+fn qpel_neon<const XF: usize, const YF: usize>(
+    dst: &mut [u8],
+    src: &[u8],
+    stride: usize,
+    w: usize,
+    h: usize,
+    _max: i32,
+) {
     // 8-lane loads up to column x0 + 5 + 7 of the last row used.
     let need = (h + 5 - 1) * stride + w.div_ceil(8) * 8 + 5 + 8;
     if src.len() < need {
@@ -183,7 +214,13 @@ fn qpel_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], strid
 /// window belongs to one eight-lane chunk. `b` and `b_below`, which the
 /// half-and-half positions need, are rows y+2 and y+3 of that same window, so
 /// they cost a narrowing rather than a filter.
-unsafe fn qpel_centre_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize) {
+unsafe fn qpel_centre_neon<const XF: usize, const YF: usize>(
+    dst: &mut [u8],
+    src: &[u8],
+    stride: usize,
+    w: usize,
+    h: usize,
+) {
     unsafe {
         let s = src.as_ptr();
         let mut x0 = 0;
@@ -211,7 +248,14 @@ unsafe fn qpel_centre_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src
                 // window rows up to h + 4, and row h + 5 would read past the
                 // block.
                 if y + 1 < h {
-                    win = [win[1], win[2], win[3], win[4], win[5], b1_row(s, stride, y + 6, x0)];
+                    win = [
+                        win[1],
+                        win[2],
+                        win[3],
+                        win[4],
+                        win[5],
+                        b1_row(s, stride, y + 6, x0),
+                    ];
                 }
             }
             x0 += 8;
@@ -253,7 +297,10 @@ fn avg_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usiz
             let mut x0 = 0;
             while x0 < w {
                 let n = (w - x0).min(8);
-                let v = vrhadd_u8(vld1_u8(a.as_ptr().add(y * PRED_STRIDE + x0)), vld1_u8(b.as_ptr().add(y * PRED_STRIDE + x0)));
+                let v = vrhadd_u8(
+                    vld1_u8(a.as_ptr().add(y * PRED_STRIDE + x0)),
+                    vld1_u8(b.as_ptr().add(y * PRED_STRIDE + x0)),
+                );
                 store8_n(dst.as_mut_ptr().add(y * stride + x0), v, n);
                 x0 += 8;
             }
@@ -261,7 +308,17 @@ fn avg_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usiz
     }
 }
 
-fn weighted_uni_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, _max: i32) {
+fn weighted_uni_neon(
+    dst: &mut [u8],
+    stride: usize,
+    src: &[u8],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    wt: i32,
+    o: i32,
+    _max: i32,
+) {
     unsafe {
         let round = vdupq_n_s16(if log_wd >= 1 { 1 << (log_wd - 1) } else { 0 });
         let sh = vdupq_n_s16(-(log_wd.max(0) as i16));
@@ -271,7 +328,10 @@ fn weighted_uni_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usi
             while x0 < w {
                 let n = (w - x0).min(8);
                 let s = load8(src.as_ptr().add(y * PRED_STRIDE + x0));
-                let v = vaddq_s16(vshlq_s16(vaddq_s16(vmulq_n_s16(s, wt as i16), round), sh), ov);
+                let v = vaddq_s16(
+                    vshlq_s16(vaddq_s16(vmulq_n_s16(s, wt as i16), round), sh),
+                    ov,
+                );
                 store8_n(dst.as_mut_ptr().add(y * stride + x0), vqmovun_s16(v), n);
                 x0 += 8;
             }
@@ -280,7 +340,20 @@ fn weighted_uni_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usi
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, _max: i32) {
+fn weighted_bi_neon(
+    dst: &mut [u8],
+    stride: usize,
+    a: &[u8],
+    b: &[u8],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    _max: i32,
+) {
     unsafe {
         let round = vdupq_n_s32(1 << log_wd);
         let off = vdupq_n_s32((o0 + o1 + 1) >> 1);
@@ -334,12 +407,21 @@ unsafe fn luma_filter_normal(v: &mut Lines8, alpha: i32, beta: i32, tc0v: int16x
         let beta = vdupq_n_s16(beta as i16);
         let zero = vdupq_n_s16(0);
         let bs_on = vcgtq_s16(tc0v, vdupq_n_s16(-1));
-        let mask = vandq_u16(vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), vandq_u16(diff_lt(q1, q0, beta), bs_on));
+        let mask = vandq_u16(
+            vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+            vandq_u16(diff_lt(q1, q0, beta), bs_on),
+        );
         let ap = diff_lt(p2, p0, beta);
         let aq = diff_lt(q2, q0, beta);
         // tc = tc0 + (ap < beta) + (aq < beta): masks are all-ones (-1).
-        let tc = vsubq_s16(vsubq_s16(tc0v, vreinterpretq_s16_u16(ap)), vreinterpretq_s16_u16(aq));
-        let d = vshrq_n_s16::<3>(vaddq_s16(vaddq_s16(vshlq_n_s16::<2>(vsubq_s16(q0, p0)), vsubq_s16(p1, q1)), vdupq_n_s16(4)));
+        let tc = vsubq_s16(
+            vsubq_s16(tc0v, vreinterpretq_s16_u16(ap)),
+            vreinterpretq_s16_u16(aq),
+        );
+        let d = vshrq_n_s16::<3>(vaddq_s16(
+            vaddq_s16(vshlq_n_s16::<2>(vsubq_s16(q0, p0)), vsubq_s16(p1, q1)),
+            vdupq_n_s16(4),
+        ));
         let d = vminq_s16(vmaxq_s16(d, vnegq_s16(tc)), tc);
         let np0 = vaddq_s16(p0, d);
         let nq0 = vsubq_s16(q0, d);
@@ -366,7 +448,10 @@ unsafe fn luma_filter_intra(v: &mut Lines8, alpha: i32, beta: i32) {
         let [p3, p2, p1, p0, q0, q1, q2, q3] = *v;
         let alphav = vdupq_n_s16(alpha as i16);
         let beta = vdupq_n_s16(beta as i16);
-        let mask = vandq_u16(vandq_u16(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)), diff_lt(q1, q0, beta));
+        let mask = vandq_u16(
+            vandq_u16(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)),
+            diff_lt(q1, q0, beta),
+        );
         let strong = diff_lt(p0, q0, vdupq_n_s16(((alpha >> 2) + 2) as i16));
         let ap = vandq_u16(diff_lt(p2, p0, beta), strong);
         let aq = vandq_u16(diff_lt(q2, q0, beta), strong);
@@ -379,10 +464,16 @@ unsafe fn luma_filter_intra(v: &mut Lines8, alpha: i32, beta: i32) {
         let p0q0 = add(p0, q0);
         let sp0 = vshrq_n_s16::<3>(add(add(p2, dbl(add(p1, p0q0))), add(q1, four)));
         let sp1 = vshrq_n_s16::<2>(add(add(p2, p1), add(p0q0, two)));
-        let sp2 = vshrq_n_s16::<3>(add(add(dbl(p3), add(p2, dbl(p2))), add(add(p1, p0q0), four)));
+        let sp2 = vshrq_n_s16::<3>(add(
+            add(dbl(p3), add(p2, dbl(p2))),
+            add(add(p1, p0q0), four),
+        ));
         let sq0 = vshrq_n_s16::<3>(add(add(p1, dbl(add(p0q0, q1))), add(q2, four)));
         let sq1 = vshrq_n_s16::<2>(add(add(p0q0, q1), add(q2, two)));
-        let sq2 = vshrq_n_s16::<3>(add(add(dbl(q3), add(q2, dbl(q2))), add(add(q1, p0q0), four)));
+        let sq2 = vshrq_n_s16::<3>(add(
+            add(dbl(q3), add(q2, dbl(q2))),
+            add(add(q1, p0q0), four),
+        ));
         let np0 = vbslq_s16(ap, sp0, wp0);
         let np1 = vbslq_s16(ap, sp1, p1);
         let np2 = vbslq_s16(ap, sp2, p2);
@@ -478,7 +569,15 @@ unsafe fn store_transposed_16x8(data: *mut u8, stride: usize, v: &[Lines8; 2]) {
     }
 }
 
-fn deblock_luma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+fn deblock_luma_v_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    _max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -492,7 +591,14 @@ fn deblock_luma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, b
     }
 }
 
-fn deblock_luma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+fn deblock_luma_v_intra_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    _max: i32,
+) {
     assert!(off >= 4 && off + 15 * stride + 4 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
@@ -508,7 +614,10 @@ fn deblock_luma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: 
 unsafe fn ld16(p: *const u8) -> (int16x8_t, int16x8_t) {
     unsafe {
         let v = vld1q_u8(p);
-        (vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(v))), vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(v))))
+        (
+            vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(v))),
+            vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(v))),
+        )
     }
 }
 
@@ -517,7 +626,15 @@ unsafe fn st16(p: *mut u8, lo: int16x8_t, hi: int16x8_t) {
     unsafe { vst1q_u8(p, vcombine_u8(vqmovun_s16(lo), vqmovun_s16(hi))) }
 }
 
-fn deblock_luma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+fn deblock_luma_h_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    _max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -539,7 +656,14 @@ fn deblock_luma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, b
     }
 }
 
-fn deblock_luma_h_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+fn deblock_luma_h_intra_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    _max: i32,
+) {
     assert!(off >= 4 * stride && off + 3 * stride + 16 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
@@ -569,9 +693,15 @@ unsafe fn chroma_filter_normal(v: &mut ChromaLines, alpha: i32, beta: i32, tc0v:
         let beta = vdupq_n_s16(beta as i16);
         let zero = vdupq_n_s16(0);
         let bs_on = vcgtq_s16(tc0v, vdupq_n_s16(-1));
-        let mask = vandq_u16(vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), vandq_u16(diff_lt(q1, q0, beta), bs_on));
+        let mask = vandq_u16(
+            vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+            vandq_u16(diff_lt(q1, q0, beta), bs_on),
+        );
         let tc = vaddq_s16(tc0v, vdupq_n_s16(1));
-        let d = vshrq_n_s16::<3>(vaddq_s16(vaddq_s16(vshlq_n_s16::<2>(vsubq_s16(q0, p0)), vsubq_s16(p1, q1)), vdupq_n_s16(4)));
+        let d = vshrq_n_s16::<3>(vaddq_s16(
+            vaddq_s16(vshlq_n_s16::<2>(vsubq_s16(q0, p0)), vsubq_s16(p1, q1)),
+            vdupq_n_s16(4),
+        ));
         let d = vminq_s16(vmaxq_s16(d, vnegq_s16(tc)), tc);
         let clip = |x: int16x8_t| vminq_s16(vmaxq_s16(x, zero), vdupq_n_s16(255));
         v[1] = vbslq_s16(mask, clip(vaddq_s16(p0, d)), p0);
@@ -585,10 +715,19 @@ unsafe fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
         let [p1, p0, q0, q1] = *v;
         let alpha = vdupq_n_s16(alpha as i16);
         let beta = vdupq_n_s16(beta as i16);
-        let mask = vandq_u16(vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), diff_lt(q1, q0, beta));
+        let mask = vandq_u16(
+            vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+            diff_lt(q1, q0, beta),
+        );
         let two = vdupq_n_s16(2);
-        let np0 = vshrq_n_s16::<2>(vaddq_s16(vaddq_s16(vshlq_n_s16::<1>(p1), p0), vaddq_s16(q1, two)));
-        let nq0 = vshrq_n_s16::<2>(vaddq_s16(vaddq_s16(vshlq_n_s16::<1>(q1), q0), vaddq_s16(p1, two)));
+        let np0 = vshrq_n_s16::<2>(vaddq_s16(
+            vaddq_s16(vshlq_n_s16::<1>(p1), p0),
+            vaddq_s16(q1, two),
+        ));
+        let nq0 = vshrq_n_s16::<2>(vaddq_s16(
+            vaddq_s16(vshlq_n_s16::<1>(q1), q0),
+            vaddq_s16(p1, two),
+        ));
         v[1] = vbslq_s16(mask, np0, p0);
         v[2] = vbslq_s16(mask, nq0, q0);
     }
@@ -597,7 +736,16 @@ unsafe fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
 #[inline(always)]
 unsafe fn tc0_chroma(tc0: &[i16; 4]) -> int16x8_t {
     unsafe {
-        let t = [tc0[0] as i16, tc0[0] as i16, tc0[1] as i16, tc0[1] as i16, tc0[2] as i16, tc0[2] as i16, tc0[3] as i16, tc0[3] as i16];
+        let t = [
+            tc0[0] as i16,
+            tc0[0] as i16,
+            tc0[1] as i16,
+            tc0[1] as i16,
+            tc0[2] as i16,
+            tc0[2] as i16,
+            tc0[3] as i16,
+            tc0[3] as i16,
+        ];
         vld1q_s16(t.as_ptr())
     }
 }
@@ -609,7 +757,11 @@ unsafe fn load_transposed_8x4(data: *const u8, stride: usize) -> ChromaLines {
     unsafe {
         let mut rows = [0u8; 32];
         for i in 0..8 {
-            std::ptr::copy_nonoverlapping(data.add(i * stride).sub(2), rows.as_mut_ptr().add(4 * i), 4);
+            std::ptr::copy_nonoverlapping(
+                data.add(i * stride).sub(2),
+                rows.as_mut_ptr().add(4 * i),
+                4,
+            );
         }
         // vld4 de-interleaves the four positions across the eight rows.
         let cols = vld4_u8(rows.as_ptr());
@@ -639,7 +791,15 @@ unsafe fn store_transposed_8x4(data: *mut u8, stride: usize, v: &ChromaLines) {
     }
 }
 
-fn deblock_chroma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+fn deblock_chroma_v_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    _max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -652,7 +812,14 @@ fn deblock_chroma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32,
     }
 }
 
-fn deblock_chroma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+fn deblock_chroma_v_intra_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    _max: i32,
+) {
     assert!(off >= 2 && off + 7 * stride + 2 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
@@ -662,25 +829,50 @@ fn deblock_chroma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha
     }
 }
 
-fn deblock_chroma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+fn deblock_chroma_h_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    _max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
-        let mut v: ChromaLines = [load8(p.sub(2 * stride)), load8(p.sub(stride)), load8(p), load8(p.add(stride))];
+        let mut v: ChromaLines = [
+            load8(p.sub(2 * stride)),
+            load8(p.sub(stride)),
+            load8(p),
+            load8(p.add(stride)),
+        ];
         chroma_filter_normal(&mut v, alpha, beta, tc0_chroma(tc0));
         vst1_u8(p.sub(stride), vqmovun_s16(v[1]));
         vst1_u8(p, vqmovun_s16(v[2]));
     }
 }
 
-fn deblock_chroma_h_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+fn deblock_chroma_h_intra_neon(
+    data: &mut [u8],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    _max: i32,
+) {
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
-        let mut v: ChromaLines = [load8(p.sub(2 * stride)), load8(p.sub(stride)), load8(p), load8(p.add(stride))];
+        let mut v: ChromaLines = [
+            load8(p.sub(2 * stride)),
+            load8(p.sub(stride)),
+            load8(p),
+            load8(p.add(stride)),
+        ];
         chroma_filter_intra(&mut v, alpha, beta);
         vst1_u8(p.sub(stride), vqmovun_s16(v[1]));
         vst1_u8(p, vqmovun_s16(v[2]));
@@ -741,7 +933,12 @@ unsafe fn idct4_add_impl(dst: *mut u8, stride: usize, c: &[i16; 16]) {
         let e1 = vsubq_s16(c0, c2);
         let e2 = vsubq_s16(vshrq_n_s16::<1>(c1), c3);
         let e3 = vaddq_s16(c1, vshrq_n_s16::<1>(c3));
-        let mut f = [vaddq_s16(e0, e3), vaddq_s16(e1, e2), vsubq_s16(e1, e2), vsubq_s16(e0, e3)];
+        let mut f = [
+            vaddq_s16(e0, e3),
+            vaddq_s16(e1, e2),
+            vsubq_s16(e1, e2),
+            vsubq_s16(e0, e3),
+        ];
         transpose4(&mut f);
         let [r0, r1, r2, r3] = f;
         let g0 = vaddq_s16(r0, r2);
@@ -805,7 +1002,16 @@ unsafe fn idct8_pass(d: &[int16x8_t; 8]) -> [int16x8_t; 8] {
         let b7 = sub(a7, sh2(a1));
         let b3 = add(a3, sh2(a5));
         let b5 = sub(sh2(a3), a5);
-        [add(b0, b7), add(b2, b5), add(b4, b3), add(b6, b1), sub(b6, b1), sub(b4, b3), sub(b2, b5), sub(b0, b7)]
+        [
+            add(b0, b7),
+            add(b2, b5),
+            add(b4, b3),
+            add(b6, b1),
+            sub(b6, b1),
+            sub(b4, b3),
+            sub(b2, b5),
+            sub(b0, b7),
+        ]
     }
 }
 
@@ -894,7 +1100,11 @@ fn residual8_neon(dst: &mut [u8], stride: usize, coefs: &[i32; 64], _max: i32) {
             let (lo, hi) = pack16(coefs.as_ptr().add(16 * k));
             vst1q_s16(coeffs.as_mut_ptr().add(16 * k), lo);
             vst1q_s16(coeffs.as_mut_ptr().add(16 * k + 8), hi);
-            let lo_ac = if k == 0 { vsetq_lane_s16::<0>(0, lo) } else { lo };
+            let lo_ac = if k == 0 {
+                vsetq_lane_s16::<0>(0, lo)
+            } else {
+                lo
+            };
             ac = vorrq_s16(ac, vorrq_s16(lo_ac, hi));
         }
         if vmaxvq_u16(vreinterpretq_u16_s16(ac)) == 0 {
@@ -913,7 +1123,9 @@ mod tests {
     use super::*;
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -925,8 +1137,20 @@ mod tests {
         let mut seed = 5u64;
         let stride = 64;
         let src: Vec<u8> = (0..stride * 64).map(|_| lcg(&mut seed) as u8).collect();
-        for &(w, h) in &[(4usize, 4usize), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16)] {
-            let block = |v: &[u8]| -> Vec<u8> { (0..h).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec()).collect() };
+        for &(w, h) in &[
+            (4usize, 4usize),
+            (4, 8),
+            (8, 4),
+            (8, 8),
+            (8, 16),
+            (16, 8),
+            (16, 16),
+        ] {
+            let block = |v: &[u8]| -> Vec<u8> {
+                (0..h)
+                    .flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec())
+                    .collect()
+            };
             for pos in 0..16 {
                 let mut a = vec![0u8; 16 * PRED_STRIDE];
                 let mut b = vec![0u8; 16 * PRED_STRIDE];
@@ -941,19 +1165,33 @@ mod tests {
                     let mut b = vec![0u8; 16 * PRED_STRIDE];
                     (s.chroma)(&mut a, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
                     (d.chroma)(&mut b, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
-                    let cb = |v: &[u8]| -> Vec<u8> { (0..ch).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec()).collect() };
+                    let cb = |v: &[u8]| -> Vec<u8> {
+                        (0..ch)
+                            .flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec())
+                            .collect()
+                    };
                     assert_eq!(cb(&a), cb(&b), "chroma {xf},{yf} {cw}x{ch}");
                 }
             }
-            let a: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
-            let b: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
+            let a: Vec<u8> = (0..16 * PRED_STRIDE)
+                .map(|_| lcg(&mut seed) as u8)
+                .collect();
+            let b: Vec<u8> = (0..16 * PRED_STRIDE)
+                .map(|_| lcg(&mut seed) as u8)
+                .collect();
             let ds = w + 3;
             let mut d1 = vec![0u8; ds * h];
             let mut d2 = vec![0u8; ds * h];
             (s.avg)(&mut d1, ds, &a, &b, w, h);
             (d.avg)(&mut d2, ds, &a, &b, w, h);
             assert_eq!(d1, d2, "avg {w}x{h}");
-            for &(lwd, wt, o) in &[(6, 64, 0), (0, 1, 3), (5, -20, -7), (7, 127, 127), (2, 33, -128)] {
+            for &(lwd, wt, o) in &[
+                (6, 64, 0),
+                (0, 1, 3),
+                (5, -20, -7),
+                (7, 127, 127),
+                (2, 33, -128),
+            ] {
                 (s.weighted_uni)(&mut d1, ds, &a, w, h, lwd, wt, o, 255);
                 (d.weighted_uni)(&mut d2, ds, &a, w, h, lwd, wt, o, 255);
                 assert_eq!(d1, d2, "wuni {w}x{h} {lwd} {wt} {o}");
@@ -975,7 +1213,9 @@ mod tests {
             // Smooth-ish content so the alpha/beta tests pass often.
             let base = lcg(&mut seed) % 256;
             let spread = 1 + lcg(&mut seed) % 64;
-            let plane: Vec<u8> = (0..stride * 40).map(|_| (base + lcg(&mut seed) % spread).min(255) as u8).collect();
+            let plane: Vec<u8> = (0..stride * 40)
+                .map(|_| (base + lcg(&mut seed) % spread).min(255) as u8)
+                .collect();
             let alpha = (lcg(&mut seed) % 256) as i32;
             let beta = (lcg(&mut seed) % 20) as i32;
             let mut tc0 = [0i16; 4];
@@ -1019,7 +1259,12 @@ mod tests {
                     (d.deblock_chroma_h_intra)(&mut b, off, stride, alpha, beta, 255);
                 }
             }
-            assert_eq!(a, b, "deblock kind {} trial {trial} alpha {alpha} beta {beta} tc0 {tc0:?}", trial % 8);
+            assert_eq!(
+                a,
+                b,
+                "deblock kind {} trial {trial} alpha {alpha} beta {beta} tc0 {tc0:?}",
+                trial % 8
+            );
         }
     }
 
@@ -1071,12 +1316,24 @@ mod tests {
             let mut cf8 = [0i32; 64];
             let dc_only = trial % 4 == 1;
             for i in 0..16 {
-                cf4[i] = if dc_only && i != 0 { 0 } else { (lcg(&mut seed) % 4001) as i32 - 2000 };
+                cf4[i] = if dc_only && i != 0 {
+                    0
+                } else {
+                    (lcg(&mut seed) % 4001) as i32 - 2000
+                };
             }
             for i in 0..64 {
-                cf8[i] = if dc_only && i != 0 { 0 } else { (lcg(&mut seed) % 2001) as i32 - 1000 };
+                cf8[i] = if dc_only && i != 0 {
+                    0
+                } else {
+                    (lcg(&mut seed) % 2001) as i32 - 1000
+                };
             }
-            let dcv = if trial % 2 == 0 { NO_DC } else { (lcg(&mut seed) % 4001) as i32 - 2000 };
+            let dcv = if trial % 2 == 0 {
+                NO_DC
+            } else {
+                (lcg(&mut seed) % 4001) as i32 - 2000
+            };
             let mut a = base.clone();
             let mut b = base.clone();
             (s.residual4)(&mut a, stride, &cf4, dcv, 255);

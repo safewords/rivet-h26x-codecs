@@ -5,7 +5,10 @@
 use crate::bitreader::BitReader;
 use crate::{Error, Result};
 
-use super::tables::{DEFAULT_SCALING_INTER, DEFAULT_SCALING_INTRA, DIAG_SCAN4X4_X, DIAG_SCAN4X4_Y, DIAG_SCAN8X8_X, DIAG_SCAN8X8_Y};
+use super::tables::{
+    DEFAULT_SCALING_INTER, DEFAULT_SCALING_INTRA, DIAG_SCAN4X4_X, DIAG_SCAN4X4_Y, DIAG_SCAN8X8_X,
+    DIAG_SCAN8X8_Y,
+};
 
 /// `profile_tier_level()` — the general (top) level only.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,7 +24,11 @@ pub struct ProfileTierLevel {
 }
 
 /// Parse `profile_tier_level(profilePresentFlag, maxNumSubLayersMinus1)`.
-fn parse_ptl(r: &mut BitReader, profile_present: bool, max_sub_layers_minus1: u32) -> ProfileTierLevel {
+fn parse_ptl(
+    r: &mut BitReader,
+    profile_present: bool,
+    max_sub_layers_minus1: u32,
+) -> ProfileTierLevel {
     let mut ptl = ProfileTierLevel::default();
     if profile_present {
         r.bits(2); // profile_space
@@ -90,7 +97,11 @@ impl Vps {
         if r.overrun() {
             return Err(Error::bitstream("VPS truncated"));
         }
-        Ok(Vps { id, max_sub_layers, ptl })
+        Ok(Vps {
+            id,
+            max_sub_layers,
+            ptl,
+        })
     }
 }
 
@@ -109,10 +120,17 @@ pub struct ScalingList {
 impl ScalingList {
     /// The default lists (Tables 7-5/7-6).
     pub fn default_lists() -> Self {
-        let mut s = ScalingList { lists: [[[16; 64]; 6]; 4], dc: [[16; 6]; 2] };
+        let mut s = ScalingList {
+            lists: [[[16; 64]; 6]; 4],
+            dc: [[16; 6]; 2],
+        };
         for size in 1..4 {
             for m in 0..6 {
-                s.lists[size][m] = if m < 3 { DEFAULT_SCALING_INTRA } else { DEFAULT_SCALING_INTER };
+                s.lists[size][m] = if m < 3 {
+                    DEFAULT_SCALING_INTRA
+                } else {
+                    DEFAULT_SCALING_INTER
+                };
             }
         }
         s
@@ -143,7 +161,9 @@ pub fn parse_scaling_list_data(r: &mut BitReader) -> Result<ScalingList> {
                     }
                 } else {
                     if delta > matrix_id {
-                        return Err(Error::bitstream("scaling_list_pred_matrix_id_delta out of range"));
+                        return Err(Error::bitstream(
+                            "scaling_list_pred_matrix_id_delta out of range",
+                        ));
                     }
                     let ref_id = matrix_id - delta;
                     sl.lists[size_id][matrix_id] = sl.lists[size_id][ref_id];
@@ -214,7 +234,12 @@ impl StRps {
 /// Parse `st_ref_pic_set(stRpsIdx)` given the sets already parsed (for
 /// inter-RPS prediction). `num_short_term_ref_pic_sets` is the SPS count
 /// (the slice-header set has index equal to it).
-pub fn parse_st_rps(r: &mut BitReader, idx: usize, num_sets: usize, sets: &[StRps]) -> Result<StRps> {
+pub fn parse_st_rps(
+    r: &mut BitReader,
+    idx: usize,
+    num_sets: usize,
+    sets: &[StRps],
+) -> Result<StRps> {
     let mut inter_rps = false;
     if idx != 0 {
         inter_rps = r.flag();
@@ -478,7 +503,11 @@ fn parse_vui(r: &mut BitReader, max_sub_layers_minus1: u32) -> Vui {
     let mut vui = Vui::default();
     if r.flag() {
         let idc = r.bits(8);
-        let extended = if idc == 255 { (r.bits(16), r.bits(16)) } else { (0, 0) };
+        let extended = if idc == 255 {
+            (r.bits(16), r.bits(16))
+        } else {
+            (0, 0)
+        };
         vui.sample_aspect = crate::nal::sample_aspect(idc, extended);
     }
     if r.flag() {
@@ -667,7 +696,11 @@ impl Sps {
 
     /// `log2TransformRange` of a component of `bit_depth` bits (7.4.3.2.2).
     pub fn log2_transform_range(&self, bit_depth: u32) -> u32 {
-        if self.extended_precision() { 15.max(bit_depth + 6) } else { 15 }
+        if self.extended_precision() {
+            15.max(bit_depth + 6)
+        } else {
+            15
+        }
     }
 
     /// `ChromaArrayType`: the chroma format, or 0 when the colour planes
@@ -767,7 +800,11 @@ impl Sps {
             return Err(Error::bitstream("log2_max_pic_order_cnt_lsb out of range"));
         }
         let sub_layer_ordering_info_present = r.flag();
-        let start = if sub_layer_ordering_info_present { 0 } else { max_sub_layers_minus1 };
+        let start = if sub_layer_ordering_info_present {
+            0
+        } else {
+            max_sub_layers_minus1
+        };
         let mut max_dec_pic_buffering = 1;
         let mut max_num_reorder_pics = 0;
         let mut max_latency_increase_plus1 = 0;
@@ -783,7 +820,10 @@ impl Sps {
         if log2_ctb_size > 6 || log2_ctb_size < 4 || log2_min_cb_size > log2_ctb_size {
             return Err(Error::bitstream("coding block sizes out of range"));
         }
-        if log2_max_tb_size > 5 || log2_min_tb_size >= log2_min_cb_size || log2_max_tb_size > log2_ctb_size {
+        if log2_max_tb_size > 5
+            || log2_min_tb_size >= log2_min_cb_size
+            || log2_max_tb_size > log2_ctb_size
+        {
             return Err(Error::bitstream("transform block sizes out of range"));
         }
         let max_th_depth_inter = r.ue();
@@ -833,7 +873,11 @@ impl Sps {
         }
         let temporal_mvp_enabled = r.flag();
         let strong_intra_smoothing = r.flag();
-        let vui = if r.flag() { Some(parse_vui(&mut r, max_sub_layers_minus1)) } else { None };
+        let vui = if r.flag() {
+            Some(parse_vui(&mut r, max_sub_layers_minus1))
+        } else {
+            None
+        };
         let mut range_ext = None;
         if r.flag() {
             // sps_extension_present_flag
@@ -900,7 +944,10 @@ mod vui_signal_type_tests {
     /// VUI.
     fn vui(nal: &[u8]) -> Vui {
         let rbsp = crate::nal::unescape_rbsp(nal);
-        Sps::parse(&rbsp[2..]).expect("SPS parses").vui.expect("VUI present")
+        Sps::parse(&rbsp[2..])
+            .expect("SPS parses")
+            .vui
+            .expect("VUI present")
     }
 
     /// The x265 4.2 command line on a 64x64 raw source (`tools/synth_source.py detail`),
@@ -929,7 +976,10 @@ mod vui_signal_type_tests {
         assert!(v.full_range);
         assert_eq!(v.colour_description, None);
         let v = vui(LIMITED_RANGE_ONLY);
-        assert!(v.video_signal_type, "a signalled limited range is still signalled");
+        assert!(
+            v.video_signal_type,
+            "a signalled limited range is still signalled"
+        );
         assert!(!v.full_range);
         assert_eq!(v.colour_description, None);
     }
@@ -952,6 +1002,10 @@ mod vui_signal_type_tests {
     fn the_sample_aspect_ratio_is_read_from_the_table_or_the_stream() {
         assert_eq!(vui(SAR_EXTENDED).sample_aspect, Some((64, 45)));
         assert_eq!(vui(SAR_TABLE_IDC).sample_aspect, Some((4, 3)));
-        assert_eq!(vui(FULL_RANGE_ONLY).sample_aspect, Some((1, 1)), "--sar 1:1 is idc 1");
+        assert_eq!(
+            vui(FULL_RANGE_ONLY).sample_aspect,
+            Some((1, 1)),
+            "--sar 1:1 is idc 1"
+        );
     }
 }

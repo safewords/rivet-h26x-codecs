@@ -25,26 +25,81 @@ pub type AddResidualFn<S> = fn(dst: &mut [S], stride: usize, res: &[i16], n: usi
 /// output sample (3 samples / rows before the block for luma, 1 for chroma),
 /// `frac` is the sub-sample phase (1..=3 luma, 1..=7 chroma), `shift` the
 /// normalisation shift (shift1 = Min(4, BitDepth − 8)).
-pub type InterpFn<S> = fn(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32);
+pub type InterpFn<S> =
+    fn(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32);
 /// Copy with `<< shift` into the 14-bit domain.
-pub type CopyFn<S> = fn(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, shift: i32);
+pub type CopyFn<S> =
+    fn(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, shift: i32);
 /// Uni-prediction: `dst = clip((src + round) >> shift)`.
-pub type UniFn<S> = fn(dst: &mut [S], stride: usize, src: &[i16], w: usize, h: usize, shift: i32, max: i32);
+pub type UniFn<S> =
+    fn(dst: &mut [S], stride: usize, src: &[i16], w: usize, h: usize, shift: i32, max: i32);
 /// Bi-prediction: `dst = clip((a + b + round) >> shift)`.
-pub type BiFn<S> = fn(dst: &mut [S], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, shift: i32, max: i32);
+pub type BiFn<S> = fn(
+    dst: &mut [S],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    shift: i32,
+    max: i32,
+);
 /// Weighted uni-prediction: `dst = clip(((src * w + round) >> log2wd) + o)`.
-pub type WeightedUniFn<S> = fn(dst: &mut [S], stride: usize, src: &[i16], w: usize, h: usize, log2_wd: i32, wt: i32, o: i32, max: i32);
+pub type WeightedUniFn<S> = fn(
+    dst: &mut [S],
+    stride: usize,
+    src: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+);
 /// Weighted bi-prediction: `dst = clip((a * w0 + b * w1 + ((o0 + o1 + 1) << log2wd)) >> (log2wd + 1))`.
-pub type WeightedBiFn<S> =
-    fn(dst: &mut [S], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, log2_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32);
+pub type WeightedBiFn<S> = fn(
+    dst: &mut [S],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+);
 /// SAO band offset over a `w x h` region: `dst[i] = clip(src[i] + table[src[i] >> shift])`.
-pub type SaoBandFn<S> = fn(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, table: &[i16; 32], shift: i32, max: i32);
+pub type SaoBandFn<S> = fn(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    table: &[i16; 32],
+    shift: i32,
+    max: i32,
+);
 /// SAO edge offset over a `w x h` region at index `origin` of `dst` and `src`
 /// (same geometry, `stride`), whose two neighbours at offsets `na` / `nb`
 /// (in samples, relative to the sample) are all inside the picture and
 /// usable: `dst = clip(src + off[2 + sign(src - a) + sign(src - b)])` with
 /// `off` indexed by the raw edgeIdx (0..=4, index 2 = 0).
-pub type SaoEdgeFn<S> = fn(dst: &mut [S], src: &[S], origin: usize, stride: usize, w: usize, h: usize, na: isize, nb: isize, off: &[i16; 5], max: i32);
+pub type SaoEdgeFn<S> = fn(
+    dst: &mut [S],
+    src: &[S],
+    origin: usize,
+    stride: usize,
+    w: usize,
+    h: usize,
+    na: isize,
+    nb: isize,
+    off: &[i16; 5],
+    max: i32,
+);
 
 /// Fused uni-prediction: interpolate a `w x h` block at fractional position
 /// `(fx, fy)` and write the default-weighted samples straight into `dst`
@@ -52,10 +107,33 @@ pub type SaoEdgeFn<S> = fn(dst: &mut [S], src: &[S], origin: usize, stride: usiz
 /// block's top-left minus 3 (luma) or 1 (chroma) samples in each direction
 /// — with stride `src_stride`. `tmp` is scratch of at least
 /// [`super::hevc::MC_TMP_LEN`] entries.
-pub type UniInterpFn<S> = fn(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32);
+pub type UniInterpFn<S> = fn(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    bit_depth: u32,
+);
 /// Fused bi-prediction: as [`UniInterpFn`], averaged with `other`, the
 /// other list's 14-bit prediction (`w * h`, stride `w`).
-pub type BiInterpFn<S> = fn(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32);
+pub type BiInterpFn<S> = fn(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+);
 
 /// Planar intra prediction (8.4.4.2.5) of an `n x n` block at the start of
 /// `dst` (stride `stride`) from its reference samples `left[0..=n]`
@@ -65,7 +143,8 @@ pub type IntraPlanarFn<S> = fn(dst: &mut [S], stride: usize, left: &[u16], top: 
 /// DC intra prediction (8.4.4.2.5) from `left[0..n]` and `top[0..n]`, with
 /// the edge filter of the first row and column when `edge` (luma, `n < 32`,
 /// the boundary filter enabled).
-pub type IntraDcFn<S> = fn(dst: &mut [S], stride: usize, left: &[u16], top: &[u16], n: usize, edge: bool);
+pub type IntraDcFn<S> =
+    fn(dst: &mut [S], stride: usize, left: &[u16], top: &[u16], n: usize, edge: bool);
 /// Angular intra prediction (8.4.4.2.6): with `iIdx = ((y + 1) * angle) >>
 /// 5` and `iFact = ((y + 1) * angle) & 31`, sample `(x, y)` is `((32 -
 /// iFact) * ref[x + iIdx + 1] + iFact * ref[x + iIdx + 2] + 16) >> 5`, or
@@ -74,7 +153,8 @@ pub type IntraDcFn<S> = fn(dst: &mut [S], stride: usize, left: &[u16], top: &[u1
 /// there, and must not use what it reads). `transposed` stores sample `(x,
 /// y)` at `(y, x)`: the horizontal modes 2..=17, which predict along
 /// columns.
-pub type IntraAngularFn<S> = fn(dst: &mut [S], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool);
+pub type IntraAngularFn<S> =
+    fn(dst: &mut [S], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool);
 
 /// Scratch the fused interpolation kernels need: the horizontal stage of a
 /// 64x64 block over `64 + 7` rows, plus a 64x64 14-bit prediction.
@@ -98,7 +178,8 @@ pub struct HevcDsp<S: Sample = u16> {
     /// See `qpel_copy`.
     pub qpel_v: InterpFn<S>,
     /// Vertical 8-tap over 14-bit intermediates (second stage of hv).
-    pub qpel_v2: fn(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize),
+    pub qpel_v2:
+        fn(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize),
     /// Chroma copy / horizontal / vertical 4-tap.
     pub epel_copy: CopyFn<S>,
     /// See `epel_copy`.
@@ -106,7 +187,8 @@ pub struct HevcDsp<S: Sample = u16> {
     /// See `epel_copy`.
     pub epel_v: InterpFn<S>,
     /// Vertical 4-tap over 14-bit intermediates.
-    pub epel_v2: fn(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize),
+    pub epel_v2:
+        fn(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize),
     /// Sample combination.
     pub uni: UniFn<S>,
     /// See `uni`.
@@ -151,17 +233,39 @@ pub struct HevcDsp<S: Sample = u16> {
 /// and `beta == 0` is left alone. `off` is the offset of q0 on the first
 /// line; a vertical edge (`_v`) has its lines `stride` apart and p/q
 /// samples 1 apart, a horizontal edge (`_h`) the other way round.
-pub type LumaDeblockFn<S> = fn(data: &mut [S], off: usize, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32);
+pub type LumaDeblockFn<S> = fn(
+    data: &mut [S],
+    off: usize,
+    stride: usize,
+    beta: [i32; 2],
+    tc: [i32; 2],
+    no_p: [bool; 2],
+    no_q: [bool; 2],
+    max: i32,
+);
 /// Deblock eight lines of a 4:2:0 chroma edge — four 2-line segments with
 /// their own `tc` (0 = leave alone) and exemptions (8.7.2.5.5).
-pub type ChromaDeblockFn<S> = fn(data: &mut [S], off: usize, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32);
+pub type ChromaDeblockFn<S> = fn(
+    data: &mut [S],
+    off: usize,
+    stride: usize,
+    tc: [i32; 4],
+    no_p: [bool; 4],
+    no_q: [bool; 4],
+    max: i32,
+);
 
 impl<S: Sample> HevcDsp<S> {
     /// The scalar reference table.
     pub fn scalar() -> Self {
         HevcDsp {
             cpu: Cpu::SCALAR,
-            idct: [idct_scalar::<4>, idct_scalar::<8>, idct_scalar::<16>, idct_scalar::<32>],
+            idct: [
+                idct_scalar::<4>,
+                idct_scalar::<8>,
+                idct_scalar::<16>,
+                idct_scalar::<32>,
+            ],
             idst4: idst4_scalar,
             add_residual: add_residual_scalar::<S>,
             qpel_copy: copy_scalar::<S>,
@@ -183,10 +287,18 @@ impl<S: Sample> HevcDsp<S> {
             fused_mc: false,
             sao_band: sao_band_scalar::<S>,
             sao_edge: sao_edge_scalar::<S>,
-            deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max),
-            deblock_luma_h: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, stride, 1, beta, tc, np, nq, max),
-            deblock_chroma_v: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, 1, stride, tc, np, nq, max),
-            deblock_chroma_h: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, stride, 1, tc, np, nq, max),
+            deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| {
+                deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max)
+            },
+            deblock_luma_h: |d, off, stride, beta, tc, np, nq, max| {
+                deblock_luma_scalar(d, off, stride, 1, beta, tc, np, nq, max)
+            },
+            deblock_chroma_v: |d, off, stride, tc, np, nq, max| {
+                deblock_chroma_scalar(d, off, 1, stride, tc, np, nq, max)
+            },
+            deblock_chroma_h: |d, off, stride, tc, np, nq, max| {
+                deblock_chroma_scalar(d, off, stride, 1, tc, np, nq, max)
+            },
             intra_planar: intra_planar_scalar::<S>,
             intra_dc: intra_dc_scalar::<S>,
             intra_angular: intra_angular_scalar::<S>,
@@ -206,7 +318,12 @@ impl HevcDsp<u16> {
     /// The scalar reference table (16-bit samples).
     pub const SCALAR: HevcDsp<u16> = HevcDsp {
         cpu: Cpu::SCALAR,
-        idct: [idct_scalar::<4>, idct_scalar::<8>, idct_scalar::<16>, idct_scalar::<32>],
+        idct: [
+            idct_scalar::<4>,
+            idct_scalar::<8>,
+            idct_scalar::<16>,
+            idct_scalar::<32>,
+        ],
         idst4: idst4_scalar,
         add_residual: add_residual_scalar::<u16>,
         qpel_copy: copy_scalar::<u16>,
@@ -228,10 +345,18 @@ impl HevcDsp<u16> {
         fused_mc: false,
         sao_band: sao_band_scalar::<u16>,
         sao_edge: sao_edge_scalar::<u16>,
-        deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max),
-        deblock_luma_h: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, stride, 1, beta, tc, np, nq, max),
-        deblock_chroma_v: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, 1, stride, tc, np, nq, max),
-        deblock_chroma_h: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, stride, 1, tc, np, nq, max),
+        deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| {
+            deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max)
+        },
+        deblock_luma_h: |d, off, stride, beta, tc, np, nq, max| {
+            deblock_luma_scalar(d, off, stride, 1, beta, tc, np, nq, max)
+        },
+        deblock_chroma_v: |d, off, stride, tc, np, nq, max| {
+            deblock_chroma_scalar(d, off, 1, stride, tc, np, nq, max)
+        },
+        deblock_chroma_h: |d, off, stride, tc, np, nq, max| {
+            deblock_chroma_scalar(d, off, stride, 1, tc, np, nq, max)
+        },
         intra_planar: intra_planar_scalar::<u16>,
         intra_dc: intra_dc_scalar::<u16>,
         intra_angular: intra_angular_scalar::<u16>,
@@ -242,7 +367,12 @@ impl HevcDsp<u8> {
     /// The scalar reference table (8-bit samples).
     pub const SCALAR: HevcDsp<u8> = HevcDsp {
         cpu: Cpu::SCALAR,
-        idct: [idct_scalar::<4>, idct_scalar::<8>, idct_scalar::<16>, idct_scalar::<32>],
+        idct: [
+            idct_scalar::<4>,
+            idct_scalar::<8>,
+            idct_scalar::<16>,
+            idct_scalar::<32>,
+        ],
         idst4: idst4_scalar,
         add_residual: add_residual_scalar::<u8>,
         qpel_copy: copy_scalar::<u8>,
@@ -264,10 +394,18 @@ impl HevcDsp<u8> {
         fused_mc: false,
         sao_band: sao_band_scalar::<u8>,
         sao_edge: sao_edge_scalar::<u8>,
-        deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max),
-        deblock_luma_h: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, stride, 1, beta, tc, np, nq, max),
-        deblock_chroma_v: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, 1, stride, tc, np, nq, max),
-        deblock_chroma_h: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, stride, 1, tc, np, nq, max),
+        deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| {
+            deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max)
+        },
+        deblock_luma_h: |d, off, stride, beta, tc, np, nq, max| {
+            deblock_luma_scalar(d, off, stride, 1, beta, tc, np, nq, max)
+        },
+        deblock_chroma_v: |d, off, stride, tc, np, nq, max| {
+            deblock_chroma_scalar(d, off, 1, stride, tc, np, nq, max)
+        },
+        deblock_chroma_h: |d, off, stride, tc, np, nq, max| {
+            deblock_chroma_scalar(d, off, stride, 1, tc, np, nq, max)
+        },
         intra_planar: intra_planar_scalar::<u8>,
         intra_dc: intra_dc_scalar::<u8>,
         intra_angular: intra_angular_scalar::<u8>,
@@ -389,7 +527,12 @@ fn idct_scalar<const N: usize>(coeffs: &mut [i16], bd_shift: i32, max_x: usize, 
 
 /// Inverse DST 4x4 (8.6.4.2, `trType == 1`).
 fn idst4_scalar(coeffs: &mut [i16], bd_shift: i32, _max_x: usize, _max_y: usize) {
-    const M: [[i32; 4]; 4] = [[29, 55, 74, 84], [74, 74, 0, -74], [84, -29, -74, 55], [55, -84, 74, -29]];
+    const M: [[i32; 4]; 4] = [
+        [29, 55, 74, 84],
+        [74, 74, 0, -74],
+        [84, -29, -74, 55],
+        [55, -84, 74, -29],
+    ];
     let round2 = 1i32 << (bd_shift - 1);
     let mut tmp = [0i16; 16];
     for x in 0..4 {
@@ -457,7 +600,14 @@ fn idct1_wide(src: &[i32], stride: usize, n: usize, nz: usize, out: &mut [i64]) 
 /// (`coeffMin..=coeffMax`), the second shifts by `bd_shift` (`Max(20 -
 /// BitDepth, extended ? 11 : 0)`) and, unlike the `i16` kernel, has nothing
 /// to clip to — the residual is whatever the sum is.
-pub fn idct_wide(coeffs: &mut [i32], log2: u32, log2_range: u32, bd_shift: i32, max_x: usize, max_y: usize) {
+pub fn idct_wide(
+    coeffs: &mut [i32],
+    log2: u32,
+    log2_range: u32,
+    bd_shift: i32,
+    max_x: usize,
+    max_y: usize,
+) {
     let n = 1usize << log2;
     let (cmin, cmax) = (-(1i64 << log2_range), (1i64 << log2_range) - 1);
     let round2 = 1i64 << (bd_shift - 1);
@@ -479,7 +629,12 @@ pub fn idct_wide(coeffs: &mut [i32], log2: u32, log2_range: u32, bd_shift: i32, 
 
 /// Inverse DST 4x4 on `i32` coefficients (see [`idct_wide`]).
 pub fn idst4_wide(coeffs: &mut [i32], log2_range: u32, bd_shift: i32) {
-    const M: [[i64; 4]; 4] = [[29, 55, 74, 84], [74, 74, 0, -74], [84, -29, -74, 55], [55, -84, 74, -29]];
+    const M: [[i64; 4]; 4] = [
+        [29, 55, 74, 84],
+        [74, 74, 0, -74],
+        [84, -29, -74, 55],
+        [55, -84, 74, -29],
+    ];
     let (cmin, cmax) = (-(1i64 << log2_range), (1i64 << log2_range) - 1);
     let round2 = 1i64 << (bd_shift - 1);
     let mut tmp = [0i64; 16];
@@ -509,7 +664,8 @@ pub fn add_residual_wide<S: Sample>(dst: &mut [S], stride: usize, res: &[i32], n
         let row = &mut dst[y * stride..y * stride + n];
         let r = &res[y * n..y * n + n];
         for x in 0..n {
-            row[x] = S::from_i32((row[x].to_i32() as i64 + r[x] as i64).clamp(0, max as i64) as i32);
+            row[x] =
+                S::from_i32((row[x].to_i32() as i64 + r[x] as i64).clamp(0, max as i64) as i32);
         }
     }
 }
@@ -518,7 +674,14 @@ pub fn add_residual_wide<S: Sample>(dst: &mut [S], stride: usize, res: &[i32], n
 // Interpolation
 // ----------------------------------------------------------------------
 
-fn copy_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, shift: i32) {
+fn copy_scalar<S: Sample>(
+    dst: &mut [i16],
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    shift: i32,
+) {
     for y in 0..h {
         let s = &src[y * src_stride..y * src_stride + w];
         let d = &mut dst[y * w..y * w + w];
@@ -528,7 +691,15 @@ fn copy_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: usiz
     }
 }
 
-fn qpel_h_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn qpel_h_scalar<S: Sample>(
+    dst: &mut [i16],
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     let f = &QPEL_FILTERS[frac];
     for y in 0..h {
         let base = y * src_stride;
@@ -542,7 +713,15 @@ fn qpel_h_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: us
     }
 }
 
-fn qpel_v_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn qpel_v_scalar<S: Sample>(
+    dst: &mut [i16],
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     let f = &QPEL_FILTERS[frac];
     for y in 0..h {
         for x in 0..w {
@@ -555,7 +734,14 @@ fn qpel_v_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: us
     }
 }
 
-fn qpel_v2_scalar(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+fn qpel_v2_scalar(
+    dst: &mut [i16],
+    src: &[i16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+) {
     let f = &QPEL_FILTERS[frac];
     for y in 0..h {
         for x in 0..w {
@@ -568,7 +754,15 @@ fn qpel_v2_scalar(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: 
     }
 }
 
-fn epel_h_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn epel_h_scalar<S: Sample>(
+    dst: &mut [i16],
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     let f = &EPEL_FILTERS[frac];
     for y in 0..h {
         let base = y * src_stride;
@@ -582,7 +776,15 @@ fn epel_h_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: us
     }
 }
 
-fn epel_v_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn epel_v_scalar<S: Sample>(
+    dst: &mut [i16],
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     let f = &EPEL_FILTERS[frac];
     for y in 0..h {
         for x in 0..w {
@@ -595,7 +797,14 @@ fn epel_v_scalar<S: Sample>(dst: &mut [i16], src: &[S], src_stride: usize, w: us
     }
 }
 
-fn epel_v2_scalar(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+fn epel_v2_scalar(
+    dst: &mut [i16],
+    src: &[i16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+) {
     let f = &EPEL_FILTERS[frac];
     for y in 0..h {
         for x in 0..w {
@@ -611,7 +820,18 @@ fn epel_v2_scalar(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: 
 /// The two-pass scalar interpolation into `pred` (14-bit), for the fused
 /// reference kernels: `src` starts at the window origin.
 #[allow(clippy::too_many_arguments)]
-fn interp_scalar<S: Sample>(luma: bool, pred: &mut [i16], tmp: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, bit_depth: u32) {
+fn interp_scalar<S: Sample>(
+    luma: bool,
+    pred: &mut [i16],
+    tmp: &mut [i16],
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    bit_depth: u32,
+) {
     let (reach, taps) = if luma { (3usize, 8usize) } else { (1, 4) };
     let shift1 = bit_depth.min(12) as i32 - 8;
     let shift3 = 14 - bit_depth as i32;
@@ -620,9 +840,25 @@ fn interp_scalar<S: Sample>(luma: bool, pred: &mut [i16], tmp: &mut [i16], src: 
         (0, 0) => copy_scalar(pred, &src[at_block..], src_stride, w, h, shift3),
         (_, 0) => {
             if luma {
-                qpel_h_scalar(pred, &src[reach * src_stride..], src_stride, w, h, fx, shift1)
+                qpel_h_scalar(
+                    pred,
+                    &src[reach * src_stride..],
+                    src_stride,
+                    w,
+                    h,
+                    fx,
+                    shift1,
+                )
             } else {
-                epel_h_scalar(pred, &src[reach * src_stride..], src_stride, w, h, fx, shift1)
+                epel_h_scalar(
+                    pred,
+                    &src[reach * src_stride..],
+                    src_stride,
+                    w,
+                    h,
+                    fx,
+                    shift1,
+                )
             }
         }
         (0, _) => {
@@ -648,61 +884,173 @@ fn interp_scalar<S: Sample>(luma: bool, pred: &mut [i16], tmp: &mut [i16], src: 
 /// Where the fused reference kernels keep the 14-bit prediction in `tmp`.
 const PRED_AT: usize = 64 * (64 + 7);
 
-fn qpel_uni_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
+fn qpel_uni_scalar<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    bit_depth: u32,
+) {
     let (tmp, pred) = tmp.split_at_mut(PRED_AT);
     interp_scalar(true, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
-    uni_scalar(dst, dst_stride, pred, w, h, 14 - bit_depth as i32, (1 << bit_depth) - 1);
+    uni_scalar(
+        dst,
+        dst_stride,
+        pred,
+        w,
+        h,
+        14 - bit_depth as i32,
+        (1 << bit_depth) - 1,
+    );
 }
 
-fn epel_uni_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
+fn epel_uni_scalar<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    bit_depth: u32,
+) {
     let (tmp, pred) = tmp.split_at_mut(PRED_AT);
     interp_scalar(false, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
-    uni_scalar(dst, dst_stride, pred, w, h, 14 - bit_depth as i32, (1 << bit_depth) - 1);
+    uni_scalar(
+        dst,
+        dst_stride,
+        pred,
+        w,
+        h,
+        14 - bit_depth as i32,
+        (1 << bit_depth) - 1,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
-fn qpel_bi_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
+fn qpel_bi_scalar<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+) {
     let (tmp, pred) = tmp.split_at_mut(PRED_AT);
     interp_scalar(true, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
-    bi_scalar(dst, dst_stride, other, pred, w, h, 15 - bit_depth as i32, (1 << bit_depth) - 1);
+    bi_scalar(
+        dst,
+        dst_stride,
+        other,
+        pred,
+        w,
+        h,
+        15 - bit_depth as i32,
+        (1 << bit_depth) - 1,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
-fn epel_bi_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
+fn epel_bi_scalar<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+) {
     let (tmp, pred) = tmp.split_at_mut(PRED_AT);
     interp_scalar(false, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
-    bi_scalar(dst, dst_stride, other, pred, w, h, 15 - bit_depth as i32, (1 << bit_depth) - 1);
+    bi_scalar(
+        dst,
+        dst_stride,
+        other,
+        pred,
+        w,
+        h,
+        15 - bit_depth as i32,
+        (1 << bit_depth) - 1,
+    );
 }
 
 // ----------------------------------------------------------------------
 // Combination / weighting
 // ----------------------------------------------------------------------
 
-fn uni_scalar<S: Sample>(dst: &mut [S], stride: usize, src: &[i16], w: usize, h: usize, shift: i32, max: i32) {
+fn uni_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    src: &[i16],
+    w: usize,
+    h: usize,
+    shift: i32,
+    max: i32,
+) {
     let round = if shift > 0 { 1 << (shift - 1) } else { 0 };
     for y in 0..h {
         for x in 0..w {
-            dst[y * stride + x] = S::from_i32(((src[y * w + x] as i32 + round) >> shift).clamp(0, max));
+            dst[y * stride + x] =
+                S::from_i32(((src[y * w + x] as i32 + round) >> shift).clamp(0, max));
         }
     }
 }
 
-fn bi_scalar<S: Sample>(dst: &mut [S], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, shift: i32, max: i32) {
+fn bi_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    shift: i32,
+    max: i32,
+) {
     let round = 1 << (shift - 1);
     for y in 0..h {
         for x in 0..w {
-            dst[y * stride + x] = S::from_i32(((a[y * w + x] as i32 + b[y * w + x] as i32 + round) >> shift).clamp(0, max));
+            dst[y * stride + x] = S::from_i32(
+                ((a[y * w + x] as i32 + b[y * w + x] as i32 + round) >> shift).clamp(0, max),
+            );
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_uni_scalar<S: Sample>(dst: &mut [S], stride: usize, src: &[i16], w: usize, h: usize, log2_wd: i32, wt: i32, o: i32, max: i32) {
+fn weighted_uni_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    src: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+) {
     if log2_wd >= 1 {
         let round = 1 << (log2_wd - 1);
         for y in 0..h {
             for x in 0..w {
-                dst[y * stride + x] = S::from_i32((((src[y * w + x] as i32 * wt + round) >> log2_wd) + o).clamp(0, max));
+                dst[y * stride + x] = S::from_i32(
+                    (((src[y * w + x] as i32 * wt + round) >> log2_wd) + o).clamp(0, max),
+                );
             }
         }
     } else {
@@ -715,7 +1063,20 @@ fn weighted_uni_scalar<S: Sample>(dst: &mut [S], stride: usize, src: &[i16], w: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi_scalar<S: Sample>(dst: &mut [S], stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, log2_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32) {
+fn weighted_bi_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    a: &[i16],
+    b: &[i16],
+    w: usize,
+    h: usize,
+    log2_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+) {
     let round = (o0 + o1 + 1) << log2_wd;
     for y in 0..h {
         for x in 0..w {
@@ -729,22 +1090,45 @@ fn weighted_bi_scalar<S: Sample>(dst: &mut [S], stride: usize, a: &[i16], b: &[i
 // Intra prediction
 // ----------------------------------------------------------------------
 
-fn intra_planar_scalar<S: Sample>(dst: &mut [S], stride: usize, left: &[u16], top: &[u16], n: usize) {
+fn intra_planar_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    left: &[u16],
+    top: &[u16],
+    n: usize,
+) {
     let log2n = n.trailing_zeros();
     let (ln, tn) = (left[n] as i32, top[n] as i32);
     for y in 0..n {
         let row = &mut dst[y * stride..y * stride + n];
         let (ly, ry) = (left[y] as i32, n as i32 - 1 - y as i32);
         for (x, d) in row.iter_mut().enumerate() {
-            let v = ((n as i32 - 1 - x as i32) * ly + (x as i32 + 1) * tn + ry * top[x] as i32 + (y as i32 + 1) * ln + n as i32) >> (log2n + 1);
+            let v = ((n as i32 - 1 - x as i32) * ly
+                + (x as i32 + 1) * tn
+                + ry * top[x] as i32
+                + (y as i32 + 1) * ln
+                + n as i32)
+                >> (log2n + 1);
             *d = S::from_i32(v);
         }
     }
 }
 
-fn intra_dc_scalar<S: Sample>(dst: &mut [S], stride: usize, left: &[u16], top: &[u16], n: usize, edge: bool) {
+fn intra_dc_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    left: &[u16],
+    top: &[u16],
+    n: usize,
+    edge: bool,
+) {
     let log2n = n.trailing_zeros();
-    let sum = n as i32 + top[..n].iter().chain(&left[..n]).map(|&v| v as i32).sum::<i32>();
+    let sum = n as i32
+        + top[..n]
+            .iter()
+            .chain(&left[..n])
+            .map(|&v| v as i32)
+            .sum::<i32>();
     let dc = sum >> (log2n + 1);
     for y in 0..n {
         dst[y * stride..y * stride + n].fill(S::from_i32(dc));
@@ -760,15 +1144,30 @@ fn intra_dc_scalar<S: Sample>(dst: &mut [S], stride: usize, left: &[u16], top: &
     }
 }
 
-fn intra_angular_scalar<S: Sample>(dst: &mut [S], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
+fn intra_angular_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    refs: &[u16],
+    n: usize,
+    angle: i32,
+    transposed: bool,
+) {
     for y in 0..n {
         let i_idx = ((y as i32 + 1) * angle) >> 5;
         let i_fact = ((y as i32 + 1) * angle) & 31;
         let start = (i_idx + 1 + n as i32) as usize;
         for x in 0..n {
             let (a, b) = (refs[start + x] as i32, refs[start + x + 1] as i32);
-            let v = if i_fact != 0 { ((32 - i_fact) * a + i_fact * b + 16) >> 5 } else { a };
-            let at = if transposed { x * stride + y } else { y * stride + x };
+            let v = if i_fact != 0 {
+                ((32 - i_fact) * a + i_fact * b + 16) >> 5
+            } else {
+                a
+            };
+            let at = if transposed {
+                x * stride + y
+            } else {
+                y * stride + x
+            };
             dst[at] = S::from_i32(v);
         }
     }
@@ -779,17 +1178,39 @@ fn intra_angular_scalar<S: Sample>(dst: &mut [S], stride: usize, refs: &[u16], n
 // ----------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-fn sao_band_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, table: &[i16; 32], shift: i32, max: i32) {
+fn sao_band_scalar<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &[S],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    table: &[i16; 32],
+    shift: i32,
+    max: i32,
+) {
     for y in 0..h {
         for x in 0..w {
             let v = src[y * src_stride + x].to_i32();
-            dst[y * dst_stride + x] = S::from_i32((v + table[(v >> shift) as usize] as i32).clamp(0, max));
+            dst[y * dst_stride + x] =
+                S::from_i32((v + table[(v >> shift) as usize] as i32).clamp(0, max));
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sao_edge_scalar<S: Sample>(dst: &mut [S], src: &[S], origin: usize, stride: usize, w: usize, h: usize, na: isize, nb: isize, off: &[i16; 5], max: i32) {
+fn sao_edge_scalar<S: Sample>(
+    dst: &mut [S],
+    src: &[S],
+    origin: usize,
+    stride: usize,
+    w: usize,
+    h: usize,
+    na: isize,
+    nb: isize,
+    off: &[i16; 5],
+    max: i32,
+) {
     for y in 0..h {
         for x in 0..w {
             let i = origin + y * stride + x;
@@ -834,7 +1255,9 @@ mod tests {
     }
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -846,7 +1269,11 @@ mod tests {
         for &(n, log2) in &[(4usize, 2u32), (8, 3), (16, 4), (32, 5)] {
             for trial in 0..100 {
                 let mut c = vec![0i16; n * n];
-                let (mx, my) = if trial % 3 == 0 { (n - 1, n - 1) } else { ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n) };
+                let (mx, my) = if trial % 3 == 0 {
+                    (n - 1, n - 1)
+                } else {
+                    ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n)
+                };
                 for y in 0..=my {
                     for x in 0..=mx {
                         if lcg(&mut seed) % 3 == 0 {
@@ -860,13 +1287,21 @@ mod tests {
                 (HevcDsp::<u16>::SCALAR.idct[(log2 - 2) as usize])(&mut want, bd_shift, mx, my);
                 let mut got: Vec<i32> = c.iter().map(|&v| v as i32).collect();
                 idct_wide(&mut got, log2, 15, bd_shift, mx, my);
-                assert_eq!(got, want.iter().map(|&v| v as i32).collect::<Vec<_>>(), "n={n} trial={trial}");
+                assert_eq!(
+                    got,
+                    want.iter().map(|&v| v as i32).collect::<Vec<_>>(),
+                    "n={n} trial={trial}"
+                );
                 if n == 4 {
                     let mut want = c.clone();
                     (HevcDsp::<u16>::SCALAR.idst4)(&mut want, bd_shift, mx, my);
                     let mut got: Vec<i32> = c.iter().map(|&v| v as i32).collect();
                     idst4_wide(&mut got, 15, bd_shift);
-                    assert_eq!(got, want.iter().map(|&v| v as i32).collect::<Vec<_>>(), "dst trial={trial}");
+                    assert_eq!(
+                        got,
+                        want.iter().map(|&v| v as i32).collect::<Vec<_>>(),
+                        "dst trial={trial}"
+                    );
                 }
             }
         }
@@ -892,7 +1327,11 @@ mod tests {
             for trial in 0..200 {
                 let mut c = vec![0i16; n * n];
                 // Sparse blocks with a bounding box, plus dense ones.
-                let (mx, my) = if trial % 3 == 0 { (n - 1, n - 1) } else { ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n) };
+                let (mx, my) = if trial % 3 == 0 {
+                    (n - 1, n - 1)
+                } else {
+                    ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n)
+                };
                 for y in 0..=my {
                     for x in 0..=mx {
                         if lcg(&mut seed) % 3 == 0 {
@@ -918,8 +1357,20 @@ mod tests {
 /// first line, `step` the distance across the edge, `along` the distance
 /// between lines.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn luma_edge_scalar<S: Sample>(d: &mut [S], pos: usize, step: usize, along: usize, beta: i32, tc: i32, no_p: bool, no_q: bool, max: i32) {
-    let s = |d: &[S], line: usize, k: isize| -> i32 { d[(pos as isize + (line * along) as isize + k * step as isize) as usize].to_i32() };
+pub(crate) fn luma_edge_scalar<S: Sample>(
+    d: &mut [S],
+    pos: usize,
+    step: usize,
+    along: usize,
+    beta: i32,
+    tc: i32,
+    no_p: bool,
+    no_q: bool,
+    max: i32,
+) {
+    let s = |d: &[S], line: usize, k: isize| -> i32 {
+        d[(pos as isize + (line * along) as isize + k * step as isize) as usize].to_i32()
+    };
     let dp0 = (s(d, 0, -3) - 2 * s(d, 0, -2) + s(d, 0, -1)).abs();
     let dp3 = (s(d, 3, -3) - 2 * s(d, 3, -2) + s(d, 3, -1)).abs();
     let dq0 = (s(d, 0, 2) - 2 * s(d, 0, 1) + s(d, 0, 0)).abs();
@@ -934,7 +1385,8 @@ pub(crate) fn luma_edge_scalar<S: Sample>(d: &mut [S], pos: usize, step: usize, 
     }
     let dsam = |d: &[S], line: usize, dpq: i32| -> bool {
         dpq < (beta >> 2)
-            && (s(d, line, -4) - s(d, line, -1)).abs() + (s(d, line, 0) - s(d, line, 3)).abs() < (beta >> 3)
+            && (s(d, line, -4) - s(d, line, -1)).abs() + (s(d, line, 0) - s(d, line, 3)).abs()
+                < (beta >> 3)
             && (s(d, line, -1) - s(d, line, 0)).abs() < ((5 * tc + 1) >> 1)
     };
     let strong = dsam(d, 0, 2 * dpq0) && dsam(d, 3, 2 * dpq3);
@@ -953,14 +1405,24 @@ pub(crate) fn luma_edge_scalar<S: Sample>(d: &mut [S], pos: usize, step: usize, 
         let q3 = d[at(3)].to_i32();
         if strong {
             if !no_p {
-                d[at(-1)] = S::from_i32(((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3).clamp(p0 - 2 * tc, p0 + 2 * tc));
-                d[at(-2)] = S::from_i32(((p2 + p1 + p0 + q0 + 2) >> 2).clamp(p1 - 2 * tc, p1 + 2 * tc));
-                d[at(-3)] = S::from_i32(((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3).clamp(p2 - 2 * tc, p2 + 2 * tc));
+                d[at(-1)] = S::from_i32(
+                    ((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3).clamp(p0 - 2 * tc, p0 + 2 * tc),
+                );
+                d[at(-2)] =
+                    S::from_i32(((p2 + p1 + p0 + q0 + 2) >> 2).clamp(p1 - 2 * tc, p1 + 2 * tc));
+                d[at(-3)] = S::from_i32(
+                    ((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3).clamp(p2 - 2 * tc, p2 + 2 * tc),
+                );
             }
             if !no_q {
-                d[at(0)] = S::from_i32(((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3).clamp(q0 - 2 * tc, q0 + 2 * tc));
-                d[at(1)] = S::from_i32(((p0 + q0 + q1 + q2 + 2) >> 2).clamp(q1 - 2 * tc, q1 + 2 * tc));
-                d[at(2)] = S::from_i32(((p0 + q0 + q1 + 3 * q2 + 2 * q3 + 4) >> 3).clamp(q2 - 2 * tc, q2 + 2 * tc));
+                d[at(0)] = S::from_i32(
+                    ((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3).clamp(q0 - 2 * tc, q0 + 2 * tc),
+                );
+                d[at(1)] =
+                    S::from_i32(((p0 + q0 + q1 + q2 + 2) >> 2).clamp(q1 - 2 * tc, q1 + 2 * tc));
+                d[at(2)] = S::from_i32(
+                    ((p0 + q0 + q1 + 3 * q2 + 2 * q3 + 4) >> 3).clamp(q2 - 2 * tc, q2 + 2 * tc),
+                );
             }
         } else {
             let mut delta = (9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4;
@@ -987,7 +1449,17 @@ pub(crate) fn luma_edge_scalar<S: Sample>(d: &mut [S], pos: usize, step: usize, 
 
 /// Filter `n` lines of a chroma edge.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn chroma_edge_scalar<S: Sample>(d: &mut [S], pos: usize, step: usize, along: usize, n: usize, tc: i32, no_p: bool, no_q: bool, max: i32) {
+pub(crate) fn chroma_edge_scalar<S: Sample>(
+    d: &mut [S],
+    pos: usize,
+    step: usize,
+    along: usize,
+    n: usize,
+    tc: i32,
+    no_p: bool,
+    no_q: bool,
+    max: i32,
+) {
     for line in 0..n {
         let base = pos + line * along;
         let at = |k: isize| -> usize { (base as isize + k * step as isize) as usize };
@@ -1006,21 +1478,60 @@ pub(crate) fn chroma_edge_scalar<S: Sample>(d: &mut [S], pos: usize, step: usize
 }
 
 #[allow(clippy::too_many_arguments)]
-fn deblock_luma_scalar<S: Sample>(d: &mut [S], off: usize, step: usize, along: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+fn deblock_luma_scalar<S: Sample>(
+    d: &mut [S],
+    off: usize,
+    step: usize,
+    along: usize,
+    beta: [i32; 2],
+    tc: [i32; 2],
+    no_p: [bool; 2],
+    no_q: [bool; 2],
+    max: i32,
+) {
     for seg in 0..2 {
         if beta[seg] == 0 && tc[seg] == 0 {
             continue;
         }
-        luma_edge_scalar(d, off + 4 * seg * along, step, along, beta[seg], tc[seg], no_p[seg], no_q[seg], max);
+        luma_edge_scalar(
+            d,
+            off + 4 * seg * along,
+            step,
+            along,
+            beta[seg],
+            tc[seg],
+            no_p[seg],
+            no_q[seg],
+            max,
+        );
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn deblock_chroma_scalar<S: Sample>(d: &mut [S], off: usize, step: usize, along: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+fn deblock_chroma_scalar<S: Sample>(
+    d: &mut [S],
+    off: usize,
+    step: usize,
+    along: usize,
+    tc: [i32; 4],
+    no_p: [bool; 4],
+    no_q: [bool; 4],
+    max: i32,
+) {
     for seg in 0..4 {
         if tc[seg] == 0 {
             continue;
         }
-        chroma_edge_scalar(d, off + 2 * seg * along, step, along, 2, tc[seg], no_p[seg], no_q[seg], max);
+        chroma_edge_scalar(
+            d,
+            off + 2 * seg * along,
+            step,
+            along,
+            2,
+            tc[seg],
+            no_p[seg],
+            no_q[seg],
+            max,
+        );
     }
 }

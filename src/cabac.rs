@@ -122,6 +122,7 @@ static MLPS_STATE: [u8; 256] = {
 };
 
 /// `transIdxMPS` (Table 9-45): the next state after decoding the MPS.
+#[rustfmt::skip]
 pub static NEXT_STATE_MPS: [u8; 64] = [
      1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16,
     17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -137,7 +138,11 @@ pub type Ctx = u8;
 #[inline]
 pub fn init_ctx_h264(m: i32, n: i32, qp: i32) -> Ctx {
     let pre = (((m * qp.clamp(0, 51)) >> 4) + n).clamp(1, 126);
-    if pre <= 63 { ((63 - pre) << 1) as u8 } else { (((pre - 64) << 1) | 1) as u8 }
+    if pre <= 63 {
+        ((63 - pre) << 1) as u8
+    } else {
+        (((pre - 64) << 1) | 1) as u8
+    }
 }
 
 /// Initialise a context from H.265's 8-bit `initValue` for slice QP `qp`
@@ -147,7 +152,11 @@ pub fn init_ctx_hevc(init_value: u8, qp: i32) -> Ctx {
     let slope = ((init_value >> 4) as i32) * 5 - 45;
     let offset = (((init_value & 15) as i32) << 3) - 16;
     let pre = (((slope * qp.clamp(0, 51)) >> 4) + offset).clamp(1, 126);
-    if pre <= 63 { ((63 - pre) << 1) as u8 } else { (((pre - 64) << 1) | 1) as u8 }
+    if pre <= 63 {
+        ((63 - pre) << 1) as u8
+    } else {
+        (((pre - 64) << 1) | 1) as u8
+    }
 }
 
 /// The arithmetic decoder over one slice's data.
@@ -178,7 +187,15 @@ impl<'a> Cabac<'a> {
     /// Start decoding at the beginning of `data` (which must begin at the
     /// byte-aligned first byte of `slice_data()` / a substream).
     pub fn new(data: &'a [u8]) -> Self {
-        let mut c = Self { data, pos: 0, low: 0, bits: 0, range: 510, fetched: 0, reader: BitReader::new(data) };
+        let mut c = Self {
+            data,
+            pos: 0,
+            low: 0,
+            bits: 0,
+            range: 510,
+            fetched: 0,
+            reader: BitReader::new(data),
+        };
         c.start_at(0);
         c
     }
@@ -464,7 +481,11 @@ mod engine_equivalence {
         pub fn new(data: &'a [u8]) -> Self {
             let mut reader = BitReader::new(data);
             let offset = reader.bits(9);
-            Self { reader, range: 510, offset }
+            Self {
+                reader,
+                range: 510,
+                offset,
+            }
         }
 
         /// Bits consumed from the start of the buffer.
@@ -541,11 +562,15 @@ mod engine_equivalence {
         }
     }
 
-
     #[test]
     fn prefetching_engine_matches_reference() {
         let mut seed = 42u64;
-        let mut lcg = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 33) as u32 };
+        let mut lcg = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
         for trial in 0..200 {
             let len = 4 + (lcg() % 200) as usize;
             let data: Vec<u8> = (0..len).map(|_| lcg() as u8).collect();
@@ -553,17 +578,33 @@ mod engine_equivalence {
             let mut b = OldCabac::new(&data);
             let mut ca = [0u8; 8];
             let mut cb = [0u8; 8];
-            for i in 0..8 { ca[i] = (lcg() % 128) as u8; cb[i] = ca[i]; }
+            for i in 0..8 {
+                ca[i] = (lcg() % 128) as u8;
+                cb[i] = ca[i];
+            }
             for step in 0..(len * 8 + 40) {
                 let op = lcg() % 10;
-                let (x, y) = if op < 6 { let c = (lcg() % 8) as usize; (a.decision(&mut ca[c]), b.decision(&mut cb[c])) }
-                    else if op < 8 { (a.bypass(), b.bypass()) }
-                    else if op < 9 { let n = lcg() % 17; (a.bypass_bits(n), b.bypass_bits(n)) }
-                    else { (a.terminate(), b.terminate()) };
+                let (x, y) = if op < 6 {
+                    let c = (lcg() % 8) as usize;
+                    (a.decision(&mut ca[c]), b.decision(&mut cb[c]))
+                } else if op < 8 {
+                    (a.bypass(), b.bypass())
+                } else if op < 9 {
+                    let n = lcg() % 17;
+                    (a.bypass_bits(n), b.bypass_bits(n))
+                } else {
+                    (a.terminate(), b.terminate())
+                };
                 assert_eq!(x, y, "trial {trial} step {step} op {op}");
-                assert_eq!(a.position(), b.position(), "position trial {trial} step {step}");
+                assert_eq!(
+                    a.position(),
+                    b.position(),
+                    "position trial {trial} step {step}"
+                );
                 assert_eq!(ca, cb);
-                if op >= 9 && x == 1 { break; }
+                if op >= 9 && x == 1 {
+                    break;
+                }
             }
         }
     }

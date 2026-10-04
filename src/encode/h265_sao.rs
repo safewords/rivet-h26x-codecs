@@ -204,8 +204,15 @@ impl Cat {
             return 0;
         }
         let m = o.unsigned_abs() as usize;
-        debug_assert!(m <= CLIP_REACH, "SAO offset {o} is beyond what the syntax can spell");
-        let (side, sign) = if o > 0 { (&self.up, 1i64) } else { (&self.down, -1i64) };
+        debug_assert!(
+            m <= CLIP_REACH,
+            "SAO offset {o} is beyond what the syntax can spell"
+        );
+        let (side, sign) = if o > 0 {
+            (&self.up, 1i64)
+        } else {
+            (&self.down, -1i64)
+        };
         let (mut n, mut s, mut d) = (self.all.count, self.all.sum, 0i64);
         for (h, t) in side[..m.min(CLIP_REACH)].iter().enumerate() {
             n -= t.count;
@@ -224,7 +231,11 @@ impl Cat {
             return 0;
         }
         let (n, s) = (self.all.count, self.all.sum);
-        if s >= 0 { (2 * s + n) / (2 * n) } else { -((-2 * s + n) / (2 * n)) }
+        if s >= 0 {
+            (2 * s + n) / (2 * n)
+        } else {
+            -((-2 * s + n) / (2 * n))
+        }
     }
 
     /// Whether any sample of this category is near enough to a rail for
@@ -311,7 +322,11 @@ fn lambda(qp: i32) -> f32 {
 /// magnitudes, the signs band mode carries, and the position or class.
 fn bins_of(p: &SaoParams, cmax: u32, first_two: bool) -> u32 {
     // `sao_type_idx` exists only for components 0 and 1; Cr inherits.
-    let mut n = if first_two { 1 + u32::from(p.type_idx != 0) } else { 0 };
+    let mut n = if first_two {
+        1 + u32::from(p.type_idx != 0)
+    } else {
+        0
+    };
     if p.type_idx == 0 {
         return n;
     }
@@ -322,7 +337,11 @@ fn bins_of(p: &SaoParams, cmax: u32, first_two: bool) -> u32 {
             n += 1; // sao_offset_sign
         }
     }
-    n += if p.type_idx == 1 { 5 } else { u32::from(first_two) * 2 };
+    n += if p.type_idx == 1 {
+        5
+    } else {
+        u32::from(first_two) * 2
+    };
     n
 }
 
@@ -389,7 +408,13 @@ impl<S: Sample> Comp<'_, S> {
     /// and the rest through the loop below with the `usable` test. The
     /// kernel counts and sums; the few samples near a rail come back in
     /// `near` for their buckets.
-    fn edge_stats(&self, class: u8, usable: &dyn Fn(usize, usize, i32, i32) -> bool, cats: &mut [Cat; 5], near: &mut Vec<(u8, u16, i32)>) {
+    fn edge_stats(
+        &self,
+        class: u8,
+        usable: &dyn Fn(usize, usize, i32, i32) -> bool,
+        cats: &mut [Cat; 5],
+        near: &mut Vec<(u8, u16, i32)>,
+    ) {
         let (hp, vp): ([i32; 2], [i32; 2]) = match class {
             0 => ([-1, 1], [0, 0]),
             1 => ([0, 0], [-1, 1]),
@@ -406,7 +431,10 @@ impl<S: Sample> Comp<'_, S> {
         let interior = ix0 < ix1 && iy0 < iy1;
         if interior {
             let stride = self.rec.stride as isize;
-            let (na, nb) = (vp[0] as isize * stride + hp[0] as isize, vp[1] as isize * stride + hp[1] as isize);
+            let (na, nb) = (
+                vp[0] as isize * stride + hp[0] as isize,
+                vp[1] as isize * stride + hp[1] as isize,
+            );
             let mut tally = [[0i64; 2]; 5];
             near.clear();
             (self.dist.sao_edge_stats)(
@@ -453,7 +481,14 @@ impl<S: Sample> Comp<'_, S> {
 
     /// The best parameters for this component, and the SSD they achieve —
     /// against `ssd_off` as the do-nothing baseline.
-    fn decide(&self, cmax: i64, lam: f32, first_two: bool, usable: &dyn Fn(usize, usize, i32, i32) -> bool, stats: &mut Stats) -> (SaoParams, f32, i64) {
+    fn decide(
+        &self,
+        cmax: i64,
+        lam: f32,
+        first_two: bool,
+        usable: &dyn Fn(usize, usize, i32, i32) -> bool,
+        stats: &mut Stats,
+    ) -> (SaoParams, f32, i64) {
         let base = self.ssd_off();
         let mut best = SaoParams::default();
         let mut best_cost = base as f32 + lam * bins_of(&best, cmax as u32, first_two) as f32;
@@ -466,7 +501,11 @@ impl<S: Sample> Comp<'_, S> {
             per_band[b] = c.choose(-cmax, cmax);
         }
         for pos in 0..32usize {
-            let mut p = SaoParams { type_idx: 1, band_or_class: pos as u8, offsets: [0; 4] };
+            let mut p = SaoParams {
+                type_idx: 1,
+                band_or_class: pos as u8,
+                offsets: [0; 4],
+            };
             let mut delta = 0i64;
             for k in 0..4 {
                 let (o, d) = per_band[(pos + k) & 31];
@@ -493,14 +532,22 @@ impl<S: Sample> Comp<'_, S> {
         // direction simply takes zero.
         for class in 0..4u8 {
             self.edge_stats(class, usable, &mut stats.edge, &mut stats.near);
-            let mut p = SaoParams { type_idx: 2, band_or_class: class, offsets: [0; 4] };
+            let mut p = SaoParams {
+                type_idx: 2,
+                band_or_class: class,
+                offsets: [0; 4],
+            };
             let mut delta = 0i64;
             // off_tab order: categories 0, 1 take offsets 0, 1 (positive);
             // categories 3, 4 take offsets 2, 3 (negative). Category 2 has
             // no offset in the syntax at all.
             for (slot, cat) in [(0usize, 0usize), (1, 1), (2, 3), (3, 4)] {
                 let c = &stats.edge[cat];
-                let (o, d) = if slot < 2 { c.choose(0, cmax) } else { c.choose(-cmax, 0) };
+                let (o, d) = if slot < 2 {
+                    c.choose(0, cmax)
+                } else {
+                    c.choose(-cmax, 0)
+                };
                 if o != 0 && d < 0 {
                     p.offsets[slot] = o as i16;
                     delta += d;
@@ -522,7 +569,12 @@ impl<S: Sample> Comp<'_, S> {
     /// The SSD this component would have under someone else's parameters —
     /// what a merge candidate has to be scored on, since a merged CTB
     /// applies the neighbour's offsets to its own samples.
-    fn ssd_under(&self, p: &SaoParams, usable: &dyn Fn(usize, usize, i32, i32) -> bool, stats: &mut Stats) -> i64 {
+    fn ssd_under(
+        &self,
+        p: &SaoParams,
+        usable: &dyn Fn(usize, usize, i32, i32) -> bool,
+        stats: &mut Stats,
+    ) -> i64 {
         let base = self.ssd_off();
         match p.type_idx {
             0 => base,
@@ -540,7 +592,13 @@ impl<S: Sample> Comp<'_, S> {
             }
             _ => {
                 self.edge_stats(p.band_or_class, usable, &mut stats.edge, &mut stats.near);
-                let tab = [p.offsets[0] as i64, p.offsets[1] as i64, 0, p.offsets[2] as i64, p.offsets[3] as i64];
+                let tab = [
+                    p.offsets[0] as i64,
+                    p.offsets[1] as i64,
+                    0,
+                    p.offsets[2] as i64,
+                    p.offsets[3] as i64,
+                ];
                 let mut d = 0i64;
                 for (i, c) in stats.edge.iter().enumerate() {
                     d += c.delta(tab[i]);
@@ -553,7 +611,10 @@ impl<S: Sample> Comp<'_, S> {
     /// Whether the filter's `max` and `shift` describe this component —
     /// a cheap guard that the caller passed matching geometry.
     fn sane(&self) -> bool {
-        self.max > 0 && self.shift >= 0 && self.x0 + self.w <= self.pw && self.y0 + self.h <= self.ph
+        self.max > 0
+            && self.shift >= 0
+            && self.x0 + self.w <= self.pw
+            && self.y0 + self.h <= self.ph
     }
 }
 
@@ -639,15 +700,28 @@ pub fn sao_picture<S: Sample>(
                     h: (ctb / csh).min(ph - y0),
                     pw,
                     ph,
-                    max: (1i32 << if c == 0 { sps.bit_depth_luma } else { sps.bit_depth_chroma }) - 1,
-                    shift: if c == 0 { sps.bit_depth_luma as i32 } else { sps.bit_depth_chroma as i32 } - 5,
+                    max: (1i32
+                        << if c == 0 {
+                            sps.bit_depth_luma
+                        } else {
+                            sps.bit_depth_chroma
+                        })
+                        - 1,
+                    shift: if c == 0 {
+                        sps.bit_depth_luma as i32
+                    } else {
+                        sps.bit_depth_chroma as i32
+                    } - 5,
                 });
             }
             let usable = |_x: usize, _y: usize, xn: i32, yn: i32, pw: usize, ph: usize| -> bool {
                 xn >= 0 && yn >= 0 && (xn as usize) < pw && (yn as usize) < ph
             };
             for (c, comp) in comps.iter().enumerate() {
-                debug_assert!(comp.sane(), "SAO decision handed a component that does not fit its plane");
+                debug_assert!(
+                    comp.sane(),
+                    "SAO decision handed a component that does not fit its plane"
+                );
                 let (pw, ph) = (comp.pw, comp.ph);
                 let u = move |x: usize, y: usize, xn: i32, yn: i32| usable(x, y, xn, yn, pw, ph);
                 if c == 2 {
@@ -656,7 +730,14 @@ pub fn sao_picture<S: Sample>(
                     // constraint rather than picking a shape it cannot
                     // spell.
                     let fixed = own[1];
-                    let (p, cost, dist) = comp.decide_constrained(fixed.type_idx, fixed.band_or_class, cmax, lam, &u, &mut stats);
+                    let (p, cost, dist) = comp.decide_constrained(
+                        fixed.type_idx,
+                        fixed.band_or_class,
+                        cmax,
+                        lam,
+                        &u,
+                        &mut stats,
+                    );
                     own[2] = p;
                     own_cost += cost;
                     own_dist[2] = dist;
@@ -671,17 +752,22 @@ pub fn sao_picture<S: Sample>(
             // Merge: the neighbour's parameters applied to these samples,
             // priced at the two bins a merge actually costs.
             let mut best = (own_cost, None::<SaoMerge>, own, own_dist);
-            for (which, src_addr) in [(SaoMerge::Left, addr.checked_sub(1).filter(|_| rx > 0)), (SaoMerge::Up, addr.checked_sub(wc).filter(|_| ry > 0))] {
+            for (which, src_addr) in [
+                (SaoMerge::Left, addr.checked_sub(1).filter(|_| rx > 0)),
+                (SaoMerge::Up, addr.checked_sub(wc).filter(|_| ry > 0)),
+            ] {
                 let Some(na) = src_addr else { continue };
                 let cand = params[na];
                 let mut dist = [0i64; 3];
                 for (c, comp) in comps.iter().enumerate() {
                     let (pw, ph) = (comp.pw, comp.ph);
-                    let u = move |x: usize, y: usize, xn: i32, yn: i32| usable(x, y, xn, yn, pw, ph);
+                    let u =
+                        move |x: usize, y: usize, xn: i32, yn: i32| usable(x, y, xn, yn, pw, ph);
                     dist[c] = comp.ssd_under(&cand[c], &u, &mut stats);
                 }
                 // One or two merge bins, and nothing else.
-                let cost = dist.iter().sum::<i64>() as f32 + lam * if which == SaoMerge::Left { 1.0 } else { 2.0 };
+                let cost = dist.iter().sum::<i64>() as f32
+                    + lam * if which == SaoMerge::Left { 1.0 } else { 2.0 };
                 if cost < best.0 {
                     best = (cost, Some(which), cand, dist);
                 }
@@ -706,7 +792,11 @@ pub fn sao_picture<S: Sample>(
         sao_ctb_row(ctx.dsp, recon, &src, &band, info, sps, pps, ry);
     }
 
-    let plan = SaoPlan { params, merges, predicted };
+    let plan = SaoPlan {
+        params,
+        merges,
+        predicted,
+    };
 
     // The decision scored every candidate analytically, never by
     // filtering. That is only sound if this module models the filter
@@ -751,12 +841,24 @@ impl<S: Sample> Comp<'_, S> {
     /// [`Comp::decide`] with the type and class already fixed by another
     /// component — the Cr case, whose `sao_type_idx` and `sao_eo_class`
     /// come from Cb and whose four offsets are its own.
-    fn decide_constrained(&self, type_idx: u8, class: u8, cmax: i64, lam: f32, usable: &dyn Fn(usize, usize, i32, i32) -> bool, stats: &mut Stats) -> (SaoParams, f32, i64) {
+    fn decide_constrained(
+        &self,
+        type_idx: u8,
+        class: u8,
+        cmax: i64,
+        lam: f32,
+        usable: &dyn Fn(usize, usize, i32, i32) -> bool,
+        stats: &mut Stats,
+    ) -> (SaoParams, f32, i64) {
         let base = self.ssd_off();
         if type_idx == 0 {
             return (SaoParams::default(), base as f32, base);
         }
-        let mut p = SaoParams { type_idx, band_or_class: class, offsets: [0; 4] };
+        let mut p = SaoParams {
+            type_idx,
+            band_or_class: class,
+            offsets: [0; 4],
+        };
         let mut delta = 0i64;
         if type_idx == 1 {
             self.band_stats(&mut stats.bands);
@@ -772,7 +874,11 @@ impl<S: Sample> Comp<'_, S> {
             self.edge_stats(class, usable, &mut stats.edge, &mut stats.near);
             for (slot, cat) in [(0usize, 0usize), (1, 1), (2, 3), (3, 4)] {
                 let c = &stats.edge[cat];
-                let (o, d) = if slot < 2 { c.choose(0, cmax) } else { c.choose(-cmax, 0) };
+                let (o, d) = if slot < 2 {
+                    c.choose(0, cmax)
+                } else {
+                    c.choose(-cmax, 0)
+                };
                 if o != 0 && d < 0 {
                     p.offsets[slot] = o as i16;
                     delta += d;
@@ -805,15 +911,35 @@ mod tests {
 
     impl Kit {
         fn new() -> Self {
-            Kit { dsp: HevcDsp::new(Cpu::SCALAR), enc: HevcEncDsp::scalar(), dist: DistortionDsp::scalar() }
+            Kit {
+                dsp: HevcDsp::new(Cpu::SCALAR),
+                enc: HevcEncDsp::scalar(),
+                dist: DistortionDsp::scalar(),
+            }
         }
         fn ctx(&self, qp: i32) -> IntraCtx<'_, u8> {
-            IntraCtx { dsp: &self.dsp, enc: &self.enc, dist: &self.dist, qp, bit_depth: 8, strong_smoothing: false, bypass: false, free_to_trim: false }
+            IntraCtx {
+                dsp: &self.dsp,
+                enc: &self.enc,
+                dist: &self.dist,
+                qp,
+                bit_depth: 8,
+                strong_smoothing: false,
+                bypass: false,
+                free_to_trim: false,
+            }
         }
     }
 
     fn sets(w: u32, h: u32) -> (Sps, Pps) {
-        let cfg = Config { width: w, height: h, chroma: ChromaFormat::Yuv420, bit_depth: 8, sao: true, ..Config::default() };
+        let cfg = Config {
+            width: w,
+            height: h,
+            chroma: ChromaFormat::Yuv420,
+            bit_depth: 8,
+            sao: true,
+            ..Config::default()
+        };
         let g = EncGeometry::new(&cfg);
         let sps = Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &g, 16, None))).unwrap();
         let mut pps = Pps::parse(&crate::nal::unescape_rbsp(&write_pps(30, false, true))).unwrap();
@@ -879,7 +1005,9 @@ mod tests {
         // eight bits, so 96..=127 is exactly bands 12..=15.
         let src_at = |x: usize, y: usize| -> u8 {
             match kind {
-                Err_::Ringing => (60 + ((x % 5) as i32 - 2) * 18 + ((y % 7) as i32 - 3) * 9).clamp(10, 245) as u8,
+                Err_::Ringing => {
+                    (60 + ((x % 5) as i32 - 2) * 18 + ((y % 7) as i32 - 3) * 9).clamp(10, 245) as u8
+                }
                 Err_::BandShift => (96 + ((x / 8 + y / 8) % 32) as i32 % 32).clamp(96, 127) as u8,
                 Err_::Rail => 255,
             }
@@ -926,10 +1054,18 @@ mod tests {
                             }
                         }
                         Err_::BandShift => {
-                            if (96..=127).contains(&v) { amount } else { 0 }
+                            if (96..=127).contains(&v) {
+                                amount
+                            } else {
+                                0
+                            }
                         }
                         Err_::Rail => {
-                            if (x + y) % 8 == 0 { -2 } else { -amount }
+                            if (x + y) % 8 == 0 {
+                                -2
+                            } else {
+                                -amount
+                            }
                         }
                     };
                     plane.data[o + y * stride + x] = (v + e).clamp(0, 255) as u8;
@@ -940,13 +1076,44 @@ mod tests {
         perturb(&mut recon.y, &src_y, w, h);
         perturb(&mut recon.cb, &src_cb, cw, chh);
         perturb(&mut recon.cr, &src_cr, cw, chh);
-        Scene { recon, src_y, src_cb, src_cr, info, sps, pps, w, h }
+        Scene {
+            recon,
+            src_y,
+            src_cb,
+            src_cr,
+            info,
+            sps,
+            pps,
+            w,
+            h,
+        }
     }
 
     impl Scene {
         fn run(&mut self, ctx: &IntraCtx<'_, u8>) -> SaoPlan {
-            let Scene { recon, info, sps, pps, src_y, src_cb, src_cr, w, .. } = self;
-            sao_picture(ctx, recon, info, sps, pps, src_y, *w, src_cb, src_cr, *w / 2)
+            let Scene {
+                recon,
+                info,
+                sps,
+                pps,
+                src_y,
+                src_cb,
+                src_cr,
+                w,
+                ..
+            } = self;
+            sao_picture(
+                ctx,
+                recon,
+                info,
+                sps,
+                pps,
+                src_y,
+                *w,
+                src_cb,
+                src_cr,
+                *w / 2,
+            )
         }
         /// Luma SSD against the source, over the whole picture.
         fn ssd(&self) -> i64 {
@@ -1016,7 +1183,10 @@ mod tests {
                     .sum();
                 assert_eq!(cat.delta(o), slow, "max {max}, offset {o}");
             }
-            assert!(clipped > 0, "max {max}: no sample was ever clipped, so the agreement above is the old model's too");
+            assert!(
+                clipped > 0,
+                "max {max}: no sample was ever clipped, so the agreement above is the old model's too"
+            );
         }
     }
 
@@ -1035,14 +1205,29 @@ mod tests {
         let mut sc = scene(64, 64, Err_::Rail, 7);
         let before = sc.ssd();
         let plan = sc.run(&ctx);
-        assert!(sc.ssd() < before, "SAO made the white picture worse ({before} -> {})", sc.ssd());
-        assert_eq!(plan.predicted, sc.ssd_all(), "the decision's predicted SSD is not what the filter produced");
+        assert!(
+            sc.ssd() < before,
+            "SAO made the white picture worse ({before} -> {})",
+            sc.ssd()
+        );
+        assert_eq!(
+            plan.predicted,
+            sc.ssd_all(),
+            "the decision's predicted SSD is not what the filter produced"
+        );
         // The guard against a vacuous agreement: the scene is only a test
         // of the clip if an offset that reaches past the rail was taken —
         // three or more on band 31, where every sample of the picture sits
         // and the lattice samples have two of room.
-        let clipping = plan.params.iter().any(|p| p[0].type_idx == 1 && (0..4).any(|k| (p[0].band_or_class as usize + k) & 31 == 31 && p[0].offsets[k] >= 3));
-        assert!(clipping, "no luma band offset of three or more reached band 31, so nothing was clipped");
+        let clipping = plan.params.iter().any(|p| {
+            p[0].type_idx == 1
+                && (0..4)
+                    .any(|k| (p[0].band_or_class as usize + k) & 31 == 31 && p[0].offsets[k] >= 3)
+        });
+        assert!(
+            clipping,
+            "no luma band offset of three or more reached band 31, so nothing was clipped"
+        );
     }
 
     /// The property that matters: SAO must leave the picture closer to the
@@ -1059,14 +1244,22 @@ mod tests {
         let kit = Kit::new();
         let ctx = kit.ctx(35);
         for (w, h) in [(64usize, 64usize), (128, 64), (64, 96)] {
-            for (kind, amount, name) in [(Err_::Ringing, 5, "ringing"), (Err_::BandShift, 5, "band shift")] {
+            for (kind, amount, name) in [
+                (Err_::Ringing, 5, "ringing"),
+                (Err_::BandShift, 5, "band shift"),
+            ] {
                 let mut sc = scene(w, h, kind, amount);
                 let before = sc.ssd();
                 let plan = sc.run(&ctx);
                 let after = sc.ssd();
-                assert!(after < before, "{w}x{h} {name}: SAO made the picture worse ({before} -> {after})");
                 assert!(
-                    plan.params.iter().any(|p| p.iter().any(|c| c.type_idx != 0)),
+                    after < before,
+                    "{w}x{h} {name}: SAO made the picture worse ({before} -> {after})"
+                );
+                assert!(
+                    plan.params
+                        .iter()
+                        .any(|p| p.iter().any(|c| c.type_idx != 0)),
                     "{w}x{h} {name}: nothing was chosen, so the improvement is not SAO's"
                 );
             }
@@ -1127,9 +1320,15 @@ mod tests {
                 let mut sc = scene(128, 64, kind, amount);
                 let plan = sc.run(&ctx);
                 for (a, p) in plan.params.iter().enumerate() {
-                    assert_eq!(p[2].type_idx, p[1].type_idx, "CTB {a}: Cr and Cb disagree about sao_type_idx");
+                    assert_eq!(
+                        p[2].type_idx, p[1].type_idx,
+                        "CTB {a}: Cr and Cb disagree about sao_type_idx"
+                    );
                     if p[1].type_idx == 2 {
-                        assert_eq!(p[2].band_or_class, p[1].band_or_class, "CTB {a}: Cr and Cb disagree about sao_eo_class");
+                        assert_eq!(
+                            p[2].band_or_class, p[1].band_or_class,
+                            "CTB {a}: Cr and Cb disagree about sao_eo_class"
+                        );
                     }
                     if p[1].type_idx != 0 {
                         live += 1;
@@ -1137,7 +1336,10 @@ mod tests {
                 }
             }
         }
-        assert!(live > 0, "every chroma component was off; the agreement above was vacuous");
+        assert!(
+            live > 0,
+            "every chroma component was off; the agreement above was vacuous"
+        );
     }
 
     /// Offsets must be spellable: magnitudes within cMax, edge offsets in
@@ -1156,16 +1358,34 @@ mod tests {
                 for (a, p) in plan.params.iter().enumerate() {
                     for (c, comp) in p.iter().enumerate() {
                         for o in comp.offsets {
-                            assert!(o.abs() <= cmax, "CTB {a} comp {c}: offset {o} above cMax {cmax}");
+                            assert!(
+                                o.abs() <= cmax,
+                                "CTB {a} comp {c}: offset {o} above cMax {cmax}"
+                            );
                         }
                         match comp.type_idx {
-                            1 => assert!(comp.band_or_class < 32, "CTB {a} comp {c}: band position out of range"),
+                            1 => assert!(
+                                comp.band_or_class < 32,
+                                "CTB {a} comp {c}: band position out of range"
+                            ),
                             2 => {
-                                assert!(comp.band_or_class < 4, "CTB {a} comp {c}: edge class out of range");
-                                assert!(comp.offsets[0] >= 0 && comp.offsets[1] >= 0, "CTB {a} comp {c}: edge offsets 0/1 must be positive");
-                                assert!(comp.offsets[2] <= 0 && comp.offsets[3] <= 0, "CTB {a} comp {c}: edge offsets 2/3 must be negative");
+                                assert!(
+                                    comp.band_or_class < 4,
+                                    "CTB {a} comp {c}: edge class out of range"
+                                );
+                                assert!(
+                                    comp.offsets[0] >= 0 && comp.offsets[1] >= 0,
+                                    "CTB {a} comp {c}: edge offsets 0/1 must be positive"
+                                );
+                                assert!(
+                                    comp.offsets[2] <= 0 && comp.offsets[3] <= 0,
+                                    "CTB {a} comp {c}: edge offsets 2/3 must be negative"
+                                );
                             }
-                            _ => assert_eq!(comp.offsets, [0; 4], "CTB {a} comp {c}: a component that is off carries offsets"),
+                            _ => assert_eq!(
+                                comp.offsets, [0; 4],
+                                "CTB {a} comp {c}: a component that is off carries offsets"
+                            ),
                         }
                     }
                 }
@@ -1192,7 +1412,10 @@ mod tests {
                 SaoMerge::Left => a - 1,
                 SaoMerge::Up => a - wc,
             };
-            assert_eq!(plan.params[a], plan.params[from], "CTB {a}: merged parameters differ from the neighbour's");
+            assert_eq!(
+                plan.params[a], plan.params[from],
+                "CTB {a}: merged parameters differ from the neighbour's"
+            );
         }
         assert!(seen > 0, "no merge was taken, so nothing was checked");
     }

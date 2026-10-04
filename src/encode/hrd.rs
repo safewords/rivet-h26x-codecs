@@ -121,8 +121,9 @@ pub struct Schedule {
 /// can fail at all. A conformance checker that has never rejected anything
 /// is indistinguishable from one that cannot.
 pub fn simulate(sizes: &[u64], s: &Schedule) -> Report {
-    let removal: Vec<u64> =
-        (0..sizes.len()).map(|n| s.initial_delay_90k * s.tick_den + (n as u64) * s.tick_90k).collect();
+    let removal: Vec<u64> = (0..sizes.len())
+        .map(|n| s.initial_delay_90k * s.tick_den + (n as u64) * s.tick_90k)
+        .collect();
     simulate_at(sizes, &removal, s)
 }
 
@@ -223,7 +224,10 @@ impl ConstantRate {
     /// The buffer `cpb` declares, full at the first removal — the initial
     /// delay [`crate::encode::h265_syntax::Cpb::initial_removal_delay_90k`]
     /// declares — at `fps_num / fps_den` pictures a second.
-    pub fn new(cpb: &crate::encode::h265_syntax::Cpb, (fps_num, fps_den): (u32, u32)) -> ConstantRate {
+    pub fn new(
+        cpb: &crate::encode::h265_syntax::Cpb,
+        (fps_num, fps_den): (u32, u32),
+    ) -> ConstantRate {
         let (tick_90k, tick_den) = removal_interval(fps_den, fps_num);
         ConstantRate {
             schedule: Schedule {
@@ -257,7 +261,9 @@ impl ConstantRate {
     /// `CpbSize`. Zero when the unit spent enough.
     pub fn filler_bits(&self, bits: u64) -> u64 {
         let arrived = arrived_by(&self.schedule, self.removal(self.units + 1));
-        arrived.saturating_sub(self.removed + bits).saturating_sub(self.schedule.cpb_size)
+        arrived
+            .saturating_sub(self.removed + bits)
+            .saturating_sub(self.schedule.cpb_size)
     }
 
     /// The `initial_cpb_removal_delay` a buffering period beginning at the
@@ -273,7 +279,8 @@ impl ConstantRate {
         let s = &self.schedule;
         let den = u128::from(s.tick_den.max(1));
         let rate = u128::from(s.bit_rate.max(1));
-        let num = (rate * u128::from(self.removal(self.units))).saturating_sub(90_000 * den * u128::from(self.removed));
+        let num = (rate * u128::from(self.removal(self.units)))
+            .saturating_sub(90_000 * den * u128::from(self.removed));
         (num / (rate * den)).min(u128::from(u32::MAX)) as u32
     }
 
@@ -375,24 +382,32 @@ fn schedule_from_stream(annexb: &[u8]) -> Result<Schedule> {
             }
         }
     }
-    let sps = sps.ok_or_else(|| Error::bitstream("HRD: the stream carries no sequence parameter set"))?;
-    let vui = sps
-        .vui
-        .as_ref()
-        .ok_or_else(|| Error::bitstream("HRD: the sequence parameter set declares no VUI, so no buffer"))?;
-    let hrd = vui
-        .hrd
-        .ok_or_else(|| Error::bitstream("HRD: the VUI declares no hypothetical reference decoder"))?;
-    let (num_units, time_scale) = vui
-        .timing
-        .ok_or_else(|| Error::bitstream("HRD: the VUI declares no frame rate, so removal times are undefined"))?;
+    let sps =
+        sps.ok_or_else(|| Error::bitstream("HRD: the stream carries no sequence parameter set"))?;
+    let vui = sps.vui.as_ref().ok_or_else(|| {
+        Error::bitstream("HRD: the sequence parameter set declares no VUI, so no buffer")
+    })?;
+    let hrd = vui.hrd.ok_or_else(|| {
+        Error::bitstream("HRD: the VUI declares no hypothetical reference decoder")
+    })?;
+    let (num_units, time_scale) = vui.timing.ok_or_else(|| {
+        Error::bitstream("HRD: the VUI declares no frame rate, so removal times are undefined")
+    })?;
     if time_scale == 0 {
         return Err(Error::bitstream("HRD: time_scale is zero"));
     }
-    let initial_delay_90k =
-        initial_delay.ok_or_else(|| Error::bitstream("HRD: no buffering period SEI, so the initial removal delay is unknown"))?;
+    let initial_delay_90k = initial_delay.ok_or_else(|| {
+        Error::bitstream("HRD: no buffering period SEI, so the initial removal delay is unknown")
+    })?;
     let (tick_90k, tick_den) = removal_interval(num_units, time_scale);
-    Ok(Schedule { bit_rate: hrd.bit_rate, cpb_size: hrd.cpb_size, cbr: hrd.cbr, tick_90k, tick_den, initial_delay_90k })
+    Ok(Schedule {
+        bit_rate: hrd.bit_rate,
+        cpb_size: hrd.cpb_size,
+        cbr: hrd.cbr,
+        tick_90k,
+        tick_den,
+        initial_delay_90k,
+    })
 }
 
 /// `initial_cpb_removal_delay[0]` out of a `buffering_period` SEI payload.
@@ -539,10 +554,17 @@ fn h264_units(annexb: &[u8]) -> Result<(Vec<u64>, Vec<u64>, Schedule)> {
     // `cpb_removal_delay` counts from — like every removal time here, in
     // `1 / (90 000 * tick_den)` seconds.
     let mut base_90k: Option<u64> = None;
-    let mut close = |bytes: u64, sei: &H264Sei, schedule: &Schedule, sizes: &mut Vec<u64>, removal: &mut Vec<u64>| -> Result<()> {
+    let mut close = |bytes: u64,
+                     sei: &H264Sei,
+                     schedule: &Schedule,
+                     sizes: &mut Vec<u64>,
+                     removal: &mut Vec<u64>|
+     -> Result<()> {
         let n = sizes.len();
         let t = match (base_90k, sei.buffering_period, sei.pic_timing) {
-            (None, Some(initial), Some((delay, _))) => initial * schedule.tick_den + delay * schedule.tick_90k,
+            (None, Some(initial), Some((delay, _))) => {
+                initial * schedule.tick_den + delay * schedule.tick_90k
+            }
             (None, Some(initial), None) if n == 0 => initial * schedule.tick_den,
             (None, None, _) => {
                 return Err(Error::bitstream(
@@ -591,7 +613,9 @@ fn h264_units(annexb: &[u8]) -> Result<(Vec<u64>, Vec<u64>, Schedule)> {
         if (in_slices && !vcl && !trails) || (in_tail && !trails) {
             // A new unit begins.
             let Some(s) = schedule.as_ref() else {
-                return Err(Error::bitstream("HRD: slices before any sequence parameter set"));
+                return Err(Error::bitstream(
+                    "HRD: slices before any sequence parameter set",
+                ));
             };
             close(cur_bytes, &cur_sei, s, &mut sizes, &mut removal)?;
             cur_bytes = 0;
@@ -606,13 +630,17 @@ fn h264_units(annexb: &[u8]) -> Result<(Vec<u64>, Vec<u64>, Schedule)> {
             7 if sps.is_none() => {
                 let parsed = Sps::parse(&crate::nal::unescape_rbsp(&nal[1..]))?;
                 let vui = parsed.vui.as_ref().ok_or_else(|| {
-                    Error::bitstream("HRD: the sequence parameter set declares no VUI, so no buffer")
+                    Error::bitstream(
+                        "HRD: the sequence parameter set declares no VUI, so no buffer",
+                    )
                 })?;
                 let hrd = vui.nal_hrd.ok_or_else(|| {
                     Error::bitstream("HRD: the VUI declares no hypothetical reference decoder")
                 })?;
                 let (num_units, time_scale) = vui.timing.ok_or_else(|| {
-                    Error::bitstream("HRD: the VUI declares no clock, so removal times are undefined")
+                    Error::bitstream(
+                        "HRD: the VUI declares no clock, so removal times are undefined",
+                    )
                 })?;
                 if time_scale == 0 {
                     return Err(Error::bitstream("HRD: time_scale is zero"));
@@ -629,7 +657,11 @@ fn h264_units(annexb: &[u8]) -> Result<(Vec<u64>, Vec<u64>, Schedule)> {
                 sps = Some(parsed);
             }
             6 => {
-                if let Some(hrd) = sps.as_ref().and_then(|s| s.vui.as_ref()).and_then(|v| v.nal_hrd) {
+                if let Some(hrd) = sps
+                    .as_ref()
+                    .and_then(|s| s.vui.as_ref())
+                    .and_then(|v| v.nal_hrd)
+                {
                     let sei = h264_sei(&crate::nal::unescape_rbsp(&nal[1..]), &hrd);
                     if sei.buffering_period.is_some() {
                         cur_sei.buffering_period = sei.buffering_period;
@@ -643,7 +675,9 @@ fn h264_units(annexb: &[u8]) -> Result<(Vec<u64>, Vec<u64>, Schedule)> {
         }
     }
     let Some(mut s) = schedule else {
-        return Err(Error::bitstream("HRD: the stream carries no sequence parameter set"));
+        return Err(Error::bitstream(
+            "HRD: the stream carries no sequence parameter set",
+        ));
     };
     if cur_bytes != 0 {
         close(cur_bytes, &cur_sei, &s, &mut sizes, &mut removal)?;
@@ -685,7 +719,14 @@ mod tests {
     /// second at 90 000 ticks a second is one bit per tick, and 30 pictures
     /// a second is 3000 ticks and therefore 3000 bits between removals.
     fn sched(cpb: u64, cbr: bool) -> Schedule {
-        Schedule { bit_rate: 90_000, cpb_size: cpb, cbr, tick_90k: 3_000, tick_den: 1, initial_delay_90k: cpb }
+        Schedule {
+            bit_rate: 90_000,
+            cpb_size: cpb,
+            cbr,
+            tick_90k: 3_000,
+            tick_den: 1,
+            initial_delay_90k: cpb,
+        }
     }
 
     /// A stream that spends exactly what arrives never moves the buffer.
@@ -696,7 +737,11 @@ mod tests {
         // Occupancy is recorded *after* each removal, so a buffer that
         // starts full and gives up one picture's worth sits one picture
         // below full for ever after — steady, which is the point.
-        assert!(r.occupancy.iter().all(|&f| f == 27_000), "{:?}", &r.occupancy[..5]);
+        assert!(
+            r.occupancy.iter().all(|&f| f == 27_000),
+            "{:?}",
+            &r.occupancy[..5]
+        );
     }
 
     /// **The check must be able to fail.** One access unit larger than the
@@ -708,10 +753,16 @@ mod tests {
         let mut sizes = vec![3_000u64; 20];
         sizes[7] = 40_000;
         let r = simulate(&sizes, &sched(30_000, true));
-        assert!(!r.conforms(), "a unit above the buffer size must not conform");
+        assert!(
+            !r.conforms(),
+            "a unit above the buffer size must not conform"
+        );
         let (n, short) = r.underflow.expect("underflow");
         assert_eq!(n, 7, "the failure should be at the oversized unit");
-        assert_eq!(short, 10_000, "40000 bits removed from a 30000-bit buffer is 10000 short");
+        assert_eq!(
+            short, 10_000,
+            "40000 bits removed from a 30000-bit buffer is 10000 short"
+        );
     }
 
     /// Underflow by accumulation rather than by one big picture: spending
@@ -724,10 +775,17 @@ mod tests {
         let r = simulate(&[4_000; 40], &sched(30_000, true));
         assert!(!r.conforms(), "spending above the rate forever must fail");
         let (n, _) = r.underflow.expect("underflow");
-        assert!((28..=34).contains(&n), "the drain should fail around picture 30, not {n}");
+        assert!(
+            (28..=34).contains(&n),
+            "the drain should fail around picture 30, not {n}"
+        );
         // And it is a drain, not a cliff: occupancy falls monotonically
         // until it hits the floor.
-        assert!(r.occupancy[0] > r.occupancy[10] && r.occupancy[10] > r.occupancy[20], "{:?}", &r.occupancy[..21]);
+        assert!(
+            r.occupancy[0] > r.occupancy[10] && r.occupancy[10] > r.occupancy[20],
+            "{:?}",
+            &r.occupancy[..21]
+        );
     }
 
     /// Under a constant rate, spending consistently *below* it overflows —
@@ -737,11 +795,20 @@ mod tests {
     #[test]
     fn underspending_overflows_only_under_a_constant_rate() {
         let cbr = simulate(&[1_000; 60], &sched(30_000, true));
-        assert!(cbr.overflow.is_some(), "constant rate: underspending must overflow");
-        assert!(cbr.underflow.is_none(), "constant rate: underspending must not underflow");
+        assert!(
+            cbr.overflow.is_some(),
+            "constant rate: underspending must overflow"
+        );
+        assert!(
+            cbr.underflow.is_none(),
+            "constant rate: underspending must not underflow"
+        );
 
         let vbr = simulate(&[1_000; 60], &sched(30_000, false));
-        assert!(vbr.conforms(), "variable rate: a full buffer is not an error — {vbr:?}");
+        assert!(
+            vbr.conforms(),
+            "variable rate: a full buffer is not an error — {vbr:?}"
+        );
     }
 
     /// The initial delay is what buys the first picture its room: the same
@@ -750,12 +817,25 @@ mod tests {
     #[test]
     fn the_initial_delay_is_what_the_first_picture_spends() {
         let sizes = [20_000u64, 3_000, 3_000, 3_000];
-        let waited = Schedule { initial_delay_90k: 30_000, ..sched(30_000, false) };
-        assert!(simulate(&sizes, &waited).conforms(), "with a full buffer the first unit fits");
+        let waited = Schedule {
+            initial_delay_90k: 30_000,
+            ..sched(30_000, false)
+        };
+        assert!(
+            simulate(&sizes, &waited).conforms(),
+            "with a full buffer the first unit fits"
+        );
 
-        let eager = Schedule { initial_delay_90k: 3_000, ..sched(30_000, false) };
+        let eager = Schedule {
+            initial_delay_90k: 3_000,
+            ..sched(30_000, false)
+        };
         let r = simulate(&sizes, &eager);
-        assert_eq!(r.underflow, Some((0, 17_000)), "starting after one tick only 3000 bits have arrived");
+        assert_eq!(
+            r.underflow,
+            Some((0, 17_000)),
+            "starting after one tick only 3000 bits have arrived"
+        );
     }
 
     /// A stream with no VUI, or a VUI with no HRD, is not a stream that
@@ -765,9 +845,13 @@ mod tests {
     /// declares no buffer is the second kind: a clock and no HRD.
     #[test]
     fn a_stream_that_declares_no_buffer_is_refused_rather_than_passed() {
-        use crate::encode::h265_syntax::{Geometry, write_sps};
         use crate::encode::Config;
-        let cfg = Config { width: 64, height: 64, ..Config::default() };
+        use crate::encode::h265_syntax::{Geometry, write_sps};
+        let cfg = Config {
+            width: 64,
+            height: 64,
+            ..Config::default()
+        };
         let g = Geometry::new(&cfg);
         let sps = crate::encode::h265_syntax::annexb(33, &write_sps(&cfg, &g, 8, None));
         let err = verify(&sps).expect_err("no HRD means no verdict");
@@ -819,13 +903,26 @@ mod tests {
             let g4 = crate::encode::h264_syntax::Geometry::new(&cfg);
             let sps4 = crate::encode::h264_syntax::write_sps(&cfg, &g4, 16, 16, Some(&cpb));
             let sps4 = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&sps4)).unwrap();
-            assert_eq!(sps4.vui.as_ref().and_then(|v| v.timing), Some((den, 2 * num)), "{tag}: H.264 (num_units_in_tick, time_scale)");
+            assert_eq!(
+                sps4.vui.as_ref().and_then(|v| v.timing),
+                Some((den, 2 * num)),
+                "{tag}: H.264 (num_units_in_tick, time_scale)"
+            );
             let g5 = crate::encode::h265_syntax::Geometry::new(&cfg);
             let sps5 = crate::encode::h265_syntax::write_sps(&cfg, &g5, 8, Some(&cpb));
             let sps5 = Sps::parse(&crate::nal::unescape_rbsp(&sps5)).unwrap();
-            assert_eq!(sps5.vui.as_ref().and_then(|v| v.timing), Some((den, num)), "{tag}: H.265 (num_units_in_tick, time_scale)");
+            assert_eq!(
+                sps5.vui.as_ref().and_then(|v| v.timing),
+                Some((den, num)),
+                "{tag}: H.265 (num_units_in_tick, time_scale)"
+            );
         }
-        let zero = Config { width: 64, height: 64, fps_den: 0, ..Config::default() };
+        let zero = Config {
+            width: 64,
+            height: 64,
+            fps_den: 0,
+            ..Config::default()
+        };
         assert!(zero.validate().unwrap_err().to_string().contains("fps_den"));
     }
 
@@ -837,24 +934,58 @@ mod tests {
     fn every_stream_carries_its_clock() {
         use crate::encode::{Config, FieldOrder};
         for (fps, fps_den) in [(30, 1), (25, 1), (30000, 1001), (60000, 1001)] {
-            let cfg = Config { width: 64, height: 64, fps, fps_den, ..Config::default() };
+            let cfg = Config {
+                width: 64,
+                height: 64,
+                fps,
+                fps_den,
+                ..Config::default()
+            };
             let (num, den) = cfg.frame_rate();
             let g4 = crate::encode::h264_syntax::Geometry::new(&cfg);
             let sps4 = crate::encode::h264_syntax::write_sps(&cfg, &g4, 16, 16, None);
-            let vui4 = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&sps4)).unwrap().vui.expect("an H.264 VUI");
-            assert_eq!((vui4.timing, vui4.fixed_frame_rate), (Some((den, 2 * num)), true), "H.264 {fps}/{fps_den}");
-            assert!(vui4.nal_hrd.is_none(), "H.264 {fps}/{fps_den}: no buffer, no HRD");
+            let vui4 = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&sps4))
+                .unwrap()
+                .vui
+                .expect("an H.264 VUI");
+            assert_eq!(
+                (vui4.timing, vui4.fixed_frame_rate),
+                (Some((den, 2 * num)), true),
+                "H.264 {fps}/{fps_den}"
+            );
+            assert!(
+                vui4.nal_hrd.is_none(),
+                "H.264 {fps}/{fps_den}: no buffer, no HRD"
+            );
             let g5 = crate::encode::h265_syntax::Geometry::new(&cfg);
             let sps5 = crate::encode::h265_syntax::write_sps(&cfg, &g5, 8, None);
-            let vui5 = Sps::parse(&crate::nal::unescape_rbsp(&sps5)).unwrap().vui.expect("an H.265 VUI");
+            let vui5 = Sps::parse(&crate::nal::unescape_rbsp(&sps5))
+                .unwrap()
+                .vui
+                .expect("an H.265 VUI");
             assert_eq!(vui5.timing, Some((den, num)), "H.265 {fps}/{fps_den}");
-            assert!(vui5.hrd.is_none(), "H.265 {fps}/{fps_den}: no buffer, no HRD");
+            assert!(
+                vui5.hrd.is_none(),
+                "H.265 {fps}/{fps_den}: no buffer, no HRD"
+            );
         }
-        let cfg = Config { width: 64, height: 64, interlace: Some(FieldOrder::TopFirst), ..Config::default() };
+        let cfg = Config {
+            width: 64,
+            height: 64,
+            interlace: Some(FieldOrder::TopFirst),
+            ..Config::default()
+        };
         let g = crate::encode::h264_syntax::Geometry::new(&cfg);
         let sps = crate::encode::h264_syntax::write_sps(&cfg, &g, 16, 16, None);
-        let vui = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&sps)).unwrap().vui.expect("a VUI");
-        assert_eq!((vui.timing, vui.fixed_frame_rate), (Some((1, 60)), false), "interlaced: the clock, no fixed-rate claim");
+        let vui = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&sps))
+            .unwrap()
+            .vui
+            .expect("a VUI");
+        assert_eq!(
+            (vui.timing, vui.fixed_frame_rate),
+            (Some((1, 60)), false),
+            "interlaced: the clock, no fixed-rate claim"
+        );
     }
 
     /// At 29.97 H.264's clock tick is 1501.5 of the 90 kHz ones — 3003/2,
@@ -867,8 +998,19 @@ mod tests {
         assert_eq!(removal_interval(1001, 60_000), (3003, 2));
         assert_eq!(removal_interval(1001, 30_000), (3003, 1));
         assert_eq!(removal_interval(1, 60), (1500, 1));
-        assert_eq!(removal_interval(2, 50), (3600, 1), "12.5 pictures a second: 7200 a tick pair");
-        let s = Schedule { bit_rate: 90_000, cpb_size: 1 << 30, cbr: false, tick_90k: 3003, tick_den: 2, initial_delay_90k: 9000 };
+        assert_eq!(
+            removal_interval(2, 50),
+            (3600, 1),
+            "12.5 pictures a second: 7200 a tick pair"
+        );
+        let s = Schedule {
+            bit_rate: 90_000,
+            cpb_size: 1 << 30,
+            cbr: false,
+            tick_90k: 3003,
+            tick_den: 2,
+            initial_delay_90k: 9000,
+        };
         // A frame is two ticks: unit n of a fixed-rate walk is removed
         // `n` ticks after the first, which for H.264 is half a frame; the
         // H.264 walk counts two per frame through cpb_removal_delay.
@@ -878,7 +1020,11 @@ mod tests {
         // After 2000 ticks (1000 frames) at 90 000 bits a second, exactly
         // 90 000 * (0.1 + 1000 * 1001 / 30000) bits have arrived.
         let arrived = 9_000 + 1000 * 3003;
-        assert_eq!(r.occupancy[2000], arrived - 2001, "the buffer after the last removal, to the bit");
+        assert_eq!(
+            r.occupancy[2000],
+            arrived - 2001,
+            "the buffer after the last removal, to the bit"
+        );
     }
 
     /// Streams coded at 29.97 by both encoders, against a declared
@@ -915,18 +1061,34 @@ mod tests {
         }
         s264.extend(e.flush().unwrap().into_iter().flat_map(|a| a.data));
         let mut s265 = Vec::new();
-        let mut e = crate::encode::h265::H265Encoder::new(Config { max_cu_depth: Some(0), ..cfg }).unwrap();
+        let mut e = crate::encode::h265::H265Encoder::new(Config {
+            max_cu_depth: Some(0),
+            ..cfg
+        })
+        .unwrap();
         for f in &frames {
             s265.extend(e.push(f).unwrap().into_iter().flat_map(|a| a.data));
         }
         s265.extend(e.flush().unwrap().into_iter().flat_map(|a| a.data));
         let (_, _, sched) = h264_units(&s264).unwrap();
-        assert_eq!((sched.tick_90k, sched.tick_den), (3003, 2), "H.264 at 29.97: a 1501.5-tick field clock");
-        assert_eq!(schedule_from_stream(&s265).map(|s| (s.tick_90k, s.tick_den)).unwrap(), (3003, 1));
+        assert_eq!(
+            (sched.tick_90k, sched.tick_den),
+            (3003, 2),
+            "H.264 at 29.97: a 1501.5-tick field clock"
+        );
+        assert_eq!(
+            schedule_from_stream(&s265)
+                .map(|s| (s.tick_90k, s.tick_den))
+                .unwrap(),
+            (3003, 1)
+        );
         for (codec, stream) in [("H.264", &s264), ("H.265", &s265)] {
             let r = verify(stream).unwrap_or_else(|err| panic!("{codec}: {err}"));
             assert_eq!(r.units, frames.len(), "{codec}");
-            assert!(r.conforms(), "{codec} at 29.97 breaks its own buffer: {r:?}");
+            assert!(
+                r.conforms(),
+                "{codec} at 29.97 breaks its own buffer: {r:?}"
+            );
         }
     }
 
@@ -939,8 +1101,8 @@ mod tests {
     #[test]
     fn an_h264_schedule_is_read_off_the_stream() {
         use crate::encode::h264_syntax::{
-            Cpb, Geometry, NAL_IDR, NAL_PPS, NAL_SEI, NAL_SLICE, NAL_SPS, annexb, write_pps,
-            write_buffering_period_sei, write_pic_timing_sei, write_sps,
+            Cpb, Geometry, NAL_IDR, NAL_PPS, NAL_SEI, NAL_SLICE, NAL_SPS, annexb,
+            write_buffering_period_sei, write_pic_timing_sei, write_pps, write_sps,
         };
         use crate::encode::{Config, RateControl};
         let cfg = Config {
@@ -960,12 +1122,20 @@ mod tests {
         let mut stream = Vec::new();
         let unit = |idr: bool, delay: u32, bytes: usize, out: &mut Vec<u8>| {
             if idr {
-                out.extend_from_slice(&annexb(NAL_SPS, 3, &write_sps(&cfg, &g, 16, 16, Some(&cpb))));
+                out.extend_from_slice(&annexb(
+                    NAL_SPS,
+                    3,
+                    &write_sps(&cfg, &g, 16, 16, Some(&cpb)),
+                ));
                 out.extend_from_slice(&annexb(NAL_PPS, 3, &write_pps(&cfg, 26)));
                 out.extend_from_slice(&annexb(NAL_SEI, 0, &write_buffering_period_sei(&cpb)));
             }
             out.extend_from_slice(&annexb(NAL_SEI, 0, &write_pic_timing_sei(&cpb, delay, 0)));
-            out.extend_from_slice(&annexb(if idr { NAL_IDR } else { NAL_SLICE }, 3, &slice(bytes)));
+            out.extend_from_slice(&annexb(
+                if idr { NAL_IDR } else { NAL_SLICE },
+                3,
+                &slice(bytes),
+            ));
         };
         unit(true, 0, 3000, &mut stream);
         unit(false, 2, 200, &mut stream);
@@ -980,10 +1150,16 @@ mod tests {
         // 60 ticks a second: one clock tick is 1500 of the 90 kHz.
         assert_eq!(s.tick_90k, 1500);
         let t0 = cpb.initial_removal_delay_90k() as u64;
-        assert_eq!(removal, vec![t0, t0 + 3000, t0 + 6000, t0 + 9000, t0 + 9000 + 3000]);
+        assert_eq!(
+            removal,
+            vec![t0, t0 + 3000, t0 + 6000, t0 + 9000, t0 + 9000 + 3000]
+        );
         // The unit sizes are the whole units: for an IDR, SPS + PPS + two
         // SEI + slice, start codes and headers included.
-        assert!(sizes[0] > 3000 * 8 && sizes[1] > 200 * 8 && sizes[1] < 300 * 8, "{sizes:?}");
+        assert!(
+            sizes[0] > 3000 * 8 && sizes[1] > 200 * 8 && sizes[1] < 300 * 8,
+            "{sizes:?}"
+        );
         let r = verify(&stream).unwrap();
         assert_eq!(r, simulate_at(&sizes, &removal, &s));
         assert!(r.conforms(), "{r:?}");
@@ -1010,23 +1186,47 @@ mod tests {
         use crate::encode::h265_syntax::Cpb;
         let cpb = Cpb::new(90_000, 500).unwrap().with_cbr(true);
         let mut buffer = ConstantRate::new(&cpb, (30, 1));
-        assert_eq!(buffer.initial_delay_90k(), cpb.initial_removal_delay_90k(), "the first period's delay is the declared one");
-        let spent = [20_000u64, 100, 100, 3_000, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100];
+        assert_eq!(
+            buffer.initial_delay_90k(),
+            cpb.initial_removal_delay_90k(),
+            "the first period's delay is the declared one"
+        );
+        let spent = [
+            20_000u64, 100, 100, 3_000, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
+        ];
         let mut stuffed = Vec::new();
         for &bits in &spent {
-            assert!(bits <= buffer.available(), "{bits} bits against {} available", buffer.available());
+            assert!(
+                bits <= buffer.available(),
+                "{bits} bits against {} available",
+                buffer.available()
+            );
             let filler = buffer.filler_bits(bits);
             // Whole bytes, never below the smallest filler unit: what the
             // encoder's NAL would add.
-            let filler = if filler > 0 { filler.div_ceil(8).max(6) * 8 } else { 0 };
+            let filler = if filler > 0 {
+                filler.div_ceil(8).max(6) * 8
+            } else {
+                0
+            };
             buffer.remove(bits + filler);
             stuffed.push(bits + filler);
         }
-        let schedule = Schedule { bit_rate: cpb.bit_rate, cpb_size: cpb.size, cbr: true, tick_90k: 3_000, tick_den: 1, initial_delay_90k: u64::from(cpb.initial_removal_delay_90k()) };
+        let schedule = Schedule {
+            bit_rate: cpb.bit_rate,
+            cpb_size: cpb.size,
+            cbr: true,
+            tick_90k: 3_000,
+            tick_den: 1,
+            initial_delay_90k: u64::from(cpb.initial_removal_delay_90k()),
+        };
         let r = simulate(&stuffed, &schedule);
         assert!(r.conforms(), "{r:?}");
         let unstuffed = simulate(&spent, &schedule);
-        assert!(unstuffed.overflow.is_some(), "the same sizes without filler must overflow, or this proved nothing");
+        assert!(
+            unstuffed.overflow.is_some(),
+            "the same sizes without filler must overflow, or this proved nothing"
+        );
         // After the keyframe drains it, a unit at the arrival rate (3000
         // bits a picture) needs no filler until the buffer is full again.
         let mut fresh = ConstantRate::new(&cpb, (30, 1));
@@ -1096,25 +1296,38 @@ mod tests {
         // attempt went to quantiser 51 (`rc::MAX_ATTEMPTS`) a stop of two
         // seconds was refused by name, the law's three codings all missing
         // the 300 ms buffer; a three-second stop now conforms too.
-        let mixed: Vec<Vec<u8>> = (0..n).map(|i| if (4 * FPS as usize..5 * FPS as usize).contains(&i) { still[0].clone() } else { moving[i].clone() }).collect();
-        let encode = |h264: bool, cfg: &Config, frames: &[Vec<u8>]| -> (Vec<Access>, Vec<Vec<u8>>) {
-            let mut units = Vec::new();
-            if h264 {
-                let mut e = crate::encode::h264::H264Encoder::new(cfg.clone()).unwrap();
-                for f in frames {
-                    units.extend(e.push(f).unwrap());
+        let mixed: Vec<Vec<u8>> = (0..n)
+            .map(|i| {
+                if (4 * FPS as usize..5 * FPS as usize).contains(&i) {
+                    still[0].clone()
+                } else {
+                    moving[i].clone()
                 }
-                units.extend(e.flush().unwrap());
-                (units, e.reconstructions().to_vec())
-            } else {
-                let mut e = crate::encode::h265::H265Encoder::new(Config { max_cu_depth: Some(0), ..cfg.clone() }).unwrap();
-                for f in frames {
-                    units.extend(e.push(f).unwrap());
+            })
+            .collect();
+        let encode =
+            |h264: bool, cfg: &Config, frames: &[Vec<u8>]| -> (Vec<Access>, Vec<Vec<u8>>) {
+                let mut units = Vec::new();
+                if h264 {
+                    let mut e = crate::encode::h264::H264Encoder::new(cfg.clone()).unwrap();
+                    for f in frames {
+                        units.extend(e.push(f).unwrap());
+                    }
+                    units.extend(e.flush().unwrap());
+                    (units, e.reconstructions().to_vec())
+                } else {
+                    let mut e = crate::encode::h265::H265Encoder::new(Config {
+                        max_cu_depth: Some(0),
+                        ..cfg.clone()
+                    })
+                    .unwrap();
+                    for f in frames {
+                        units.extend(e.push(f).unwrap());
+                    }
+                    units.extend(e.flush().unwrap());
+                    (units, e.reconstructions().to_vec())
                 }
-                units.extend(e.flush().unwrap());
-                (units, e.reconstructions().to_vec())
-            }
-        };
+            };
         let decode = |h264: bool, stream: &[u8]| -> Vec<Vec<u8>> {
             let mut out = Vec::new();
             if h264 {
@@ -1137,7 +1350,12 @@ mod tests {
             out
         };
         for (h264, codec) in [(true, "H.264"), (false, "H.265")] {
-            for (content, frames, bframes) in [("still", &still, 0u32), ("moving", &moving, 0), ("moving IPB", &moving, 2), ("mixed", &mixed, 0)] {
+            for (content, frames, bframes) in [
+                ("still", &still, 0u32),
+                ("moving", &moving, 0),
+                ("moving IPB", &moving, 2),
+                ("mixed", &mixed, 0),
+            ] {
                 let tag = format!("{codec} {content}");
                 let cfg = Config {
                     width: W as u32,
@@ -1156,14 +1374,34 @@ mod tests {
 
                 // The buffer, read off the stream.
                 let r = verify(&stream).unwrap_or_else(|err| panic!("{tag}: {err}"));
-                assert_eq!(r.units, n, "{tag}: the filler must not split an access unit");
-                assert!(r.overflow.is_none(), "{tag}: overflows its constant-rate buffer: {:?}", r.overflow);
-                assert!(r.underflow.is_none(), "{tag}: underflows its buffer: {:?}", r.underflow);
+                assert_eq!(
+                    r.units, n,
+                    "{tag}: the filler must not split an access unit"
+                );
+                assert!(
+                    r.overflow.is_none(),
+                    "{tag}: overflows its constant-rate buffer: {:?}",
+                    r.overflow
+                );
+                assert!(
+                    r.underflow.is_none(),
+                    "{tag}: underflows its buffer: {:?}",
+                    r.underflow
+                );
 
                 // cbr_flag, and the declared rate the average is held to.
-                let first = crate::nal::annexb_nals(&stream).find(|nal| if h264 { nal[0] & 0x1f == 7 } else { (nal[0] >> 1) & 0x3f == 33 }).unwrap();
+                let first = crate::nal::annexb_nals(&stream)
+                    .find(|nal| {
+                        if h264 {
+                            nal[0] & 0x1f == 7
+                        } else {
+                            (nal[0] >> 1) & 0x3f == 33
+                        }
+                    })
+                    .unwrap();
                 let (cbr, rate, size) = if h264 {
-                    let sps = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&first[1..])).unwrap();
+                    let sps =
+                        crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&first[1..])).unwrap();
                     let hrd = sps.vui.and_then(|v| v.nal_hrd).unwrap();
                     (hrd.cbr, hrd.bit_rate, hrd.cpb_size)
                 } else {
@@ -1174,21 +1412,43 @@ mod tests {
                 assert!(cbr, "{tag}: cbr_flag clear");
                 let total: u64 = units.iter().map(|u| u.data.len() as u64 * 8).sum();
                 let achieved = total as f64 / SECONDS as f64;
-                assert!((achieved / rate as f64 - 1.0).abs() < 0.01, "{tag}: {achieved:.0} bits a second against a declared {rate}");
+                assert!(
+                    (achieved / rate as f64 - 1.0).abs() < 0.01,
+                    "{tag}: {achieved:.0} bits a second against a declared {rate}"
+                );
 
                 // Every filler unit: after a slice of its access unit,
                 // nal_ref_idc 0, a run of 0xFF and the trailing bits.
                 let mut filler = 0u64;
                 for u in &units {
                     let nals: Vec<&[u8]> = crate::nal::annexb_nals(&u.data).collect();
-                    let is_filler = |nal: &[u8]| if h264 { nal[0] & 0x1f == 12 } else { (nal[0] >> 1) & 0x3f == 38 };
-                    let is_slice = |nal: &[u8]| if h264 { (1..=5).contains(&(nal[0] & 0x1f)) } else { (nal[0] >> 1) & 0x3f < 32 };
+                    let is_filler = |nal: &[u8]| {
+                        if h264 {
+                            nal[0] & 0x1f == 12
+                        } else {
+                            (nal[0] >> 1) & 0x3f == 38
+                        }
+                    };
+                    let is_slice = |nal: &[u8]| {
+                        if h264 {
+                            (1..=5).contains(&(nal[0] & 0x1f))
+                        } else {
+                            (nal[0] >> 1) & 0x3f < 32
+                        }
+                    };
                     for (k, nal) in nals.iter().enumerate() {
                         if !is_filler(nal) {
                             continue;
                         }
-                        assert!(k > 0 && is_slice(nals[k - 1]), "{tag}: filler before its picture's slice");
-                        assert_eq!(k, nals.len() - 1, "{tag}: filler is the last NAL of its unit");
+                        assert!(
+                            k > 0 && is_slice(nals[k - 1]),
+                            "{tag}: filler before its picture's slice"
+                        );
+                        assert_eq!(
+                            k,
+                            nals.len() - 1,
+                            "{tag}: filler is the last NAL of its unit"
+                        );
                         let body = if h264 {
                             assert_eq!(nal[0], 12, "{tag}: filler nal_ref_idc must be 0");
                             &nal[1..]
@@ -1197,14 +1457,26 @@ mod tests {
                             &nal[2..]
                         };
                         let (last, run) = body.split_last().unwrap();
-                        assert!(*last == 0x80 && run.iter().all(|&b| b == 0xff), "{tag}: filler payload");
+                        assert!(
+                            *last == 0x80 && run.iter().all(|&b| b == 0xff),
+                            "{tag}: filler payload"
+                        );
                         filler += (nal.len() + 4) as u64 * 8;
                     }
                 }
                 match content {
-                    "still" => assert!(filler > total / 2, "{tag}: a still picture is mostly filler at this rate ({filler} of {total})"),
-                    "mixed" => assert!(filler > 0 && filler * 5 < total, "{tag}: the stop is stuffed, the motion is not ({filler} of {total})"),
-                    _ => assert!(filler * 50 < total, "{tag}: filler is the exception, not the norm ({filler} of {total} bits)"),
+                    "still" => assert!(
+                        filler > total / 2,
+                        "{tag}: a still picture is mostly filler at this rate ({filler} of {total})"
+                    ),
+                    "mixed" => assert!(
+                        filler > 0 && filler * 5 < total,
+                        "{tag}: the stop is stuffed, the motion is not ({filler} of {total})"
+                    ),
+                    _ => assert!(
+                        filler * 50 < total,
+                        "{tag}: filler is the exception, not the norm ({filler} of {total} bits)"
+                    ),
                 }
 
                 // Each buffering period's delay: the time the buffer has
@@ -1219,8 +1491,14 @@ mod tests {
                             if nal[0] & 0x1f != 6 {
                                 return None;
                             }
-                            let sps = crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&first[1..])).unwrap();
-                            h264_sei(&crate::nal::unescape_rbsp(&nal[1..]), &sps.vui.unwrap().nal_hrd.unwrap()).buffering_period
+                            let sps =
+                                crate::h264::Sps::parse(&crate::nal::unescape_rbsp(&first[1..]))
+                                    .unwrap();
+                            h264_sei(
+                                &crate::nal::unescape_rbsp(&nal[1..]),
+                                &sps.vui.unwrap().nal_hrd.unwrap(),
+                            )
+                            .buffering_period
                         } else {
                             if (nal[0] >> 1) & 0x3f != 39 {
                                 return None;
@@ -1232,9 +1510,19 @@ mod tests {
                     if let Some(delay) = delay {
                         let t0 = *t0.get_or_insert(delay);
                         let removal = u128::from(t0 * den + u.encode_index * tick);
-                        let want = (u128::from(rate) * removal - 90_000 * u128::from(den) * u128::from(removed)) / (u128::from(rate) * u128::from(den));
-                        assert_eq!(u128::from(delay), want, "{tag}: the buffering period at unit {}", u.encode_index);
-                        assert!(delay > 0 && delay <= size * 90_000 / rate, "{tag}: a delay the buffer cannot hold");
+                        let want = (u128::from(rate) * removal
+                            - 90_000 * u128::from(den) * u128::from(removed))
+                            / (u128::from(rate) * u128::from(den));
+                        assert_eq!(
+                            u128::from(delay),
+                            want,
+                            "{tag}: the buffering period at unit {}",
+                            u.encode_index
+                        );
+                        assert!(
+                            delay > 0 && delay <= size * 90_000 / rate,
+                            "{tag}: a delay the buffer cannot hold"
+                        );
                         periods += 1;
                     }
                     removed += u.data.len() as u64 * 8;
@@ -1246,7 +1534,11 @@ mod tests {
                 let decoded = decode(h264, &stream);
                 assert_eq!(decoded.len(), n, "{tag}");
                 for u in &units {
-                    assert!(decoded[u.display as usize] == recon[u.encode_index as usize], "{tag}: picture {} decoded differently", u.display);
+                    assert!(
+                        decoded[u.display as usize] == recon[u.encode_index as usize],
+                        "{tag}: picture {} decoded differently",
+                        u.display
+                    );
                 }
                 let mut stripped = Vec::new();
                 for nal in crate::nal::annexb_nals(&stream) {
@@ -1256,21 +1548,42 @@ mod tests {
                     stripped.extend_from_slice(&[0, 0, 0, 1]);
                     stripped.extend_from_slice(nal);
                 }
-                assert_eq!(stripped.len() as u64 + filler / 8, stream.len() as u64, "{tag}: the filler stripped is the filler counted");
+                assert_eq!(
+                    stripped.len() as u64 + filler / 8,
+                    stream.len() as u64,
+                    "{tag}: the filler stripped is the filler counted"
+                );
                 if filler > 0 {
-                    assert!(decode(h264, &stripped) == decoded, "{tag}: the filler changed what decodes");
+                    assert!(
+                        decode(h264, &stripped) == decoded,
+                        "{tag}: the filler changed what decodes"
+                    );
                 }
 
                 // And without `cbr`: no flag, no filler.
-                let (plain, _) = encode(h264, &Config { cbr: false, ..cfg.clone() }, &frames[..60]);
+                let (plain, _) = encode(
+                    h264,
+                    &Config {
+                        cbr: false,
+                        ..cfg.clone()
+                    },
+                    &frames[..60],
+                );
                 let plain: Vec<u8> = plain.iter().flat_map(|u| u.data.iter().copied()).collect();
                 let r = verify(&plain).unwrap();
                 assert!(r.conforms(), "{tag} without cbr: {r:?}");
                 for nal in crate::nal::annexb_nals(&plain) {
-                    let t = if h264 { nal[0] & 0x1f } else { (nal[0] >> 1) & 0x3f };
+                    let t = if h264 {
+                        nal[0] & 0x1f
+                    } else {
+                        (nal[0] >> 1) & 0x3f
+                    };
                     assert_ne!(t, if h264 { 12 } else { 38 }, "{tag}: filler without cbr");
                 }
-                eprintln!("{tag}: {achieved:.0} b/s against {rate}, filler {:.2}% of the stream", 100.0 * filler as f64 / total as f64);
+                eprintln!(
+                    "{tag}: {achieved:.0} b/s against {rate}, filler {:.2}% of the stream",
+                    100.0 * filler as f64 / total as f64
+                );
             }
         }
     }
@@ -1280,17 +1593,34 @@ mod tests {
     #[test]
     fn a_constant_rate_without_a_buffer_is_refused() {
         use crate::encode::{Config, RateControl};
-        let base = Config { width: 64, height: 64, cbr: true, ..Config::default() };
+        let base = Config {
+            width: 64,
+            height: 64,
+            cbr: true,
+            ..Config::default()
+        };
         for cfg in [
-            Config { rate: RateControl::Bitrate { bps: 100_000 }, cpb_ms: 0, ..base.clone() },
-            Config { rate: RateControl::ConstantQp(26), cpb_ms: 0, ..base.clone() },
+            Config {
+                rate: RateControl::Bitrate { bps: 100_000 },
+                cpb_ms: 0,
+                ..base.clone()
+            },
+            Config {
+                rate: RateControl::ConstantQp(26),
+                cpb_ms: 0,
+                ..base.clone()
+            },
         ] {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains("constant bit rate"), "{err}");
             assert!(crate::encode::h264::H264Encoder::new(cfg.clone()).is_err());
             assert!(crate::encode::h265::H265Encoder::new(cfg).is_err());
         }
-        let ok = Config { rate: RateControl::Bitrate { bps: 100_000 }, cpb_ms: 500, ..base };
+        let ok = Config {
+            rate: RateControl::Bitrate { bps: 100_000 },
+            cpb_ms: 500,
+            ..base
+        };
         assert!(ok.validate().is_ok());
     }
 
@@ -1336,8 +1666,12 @@ mod tests {
             }
             f
         };
-        let noise: Vec<Vec<u8>> = (0..n).map(|_| (0..W * H * 3 / 2).map(|_| rnd() as u8).collect()).collect();
-        let motion: Vec<Vec<u8>> = (0..n).map(|i| frame(&|x, y| (((x + 5 * i) * 9) ^ ((y + 3 * i) * 7)) as u8, 128)).collect();
+        let noise: Vec<Vec<u8>> = (0..n)
+            .map(|_| (0..W * H * 3 / 2).map(|_| rnd() as u8).collect())
+            .collect();
+        let motion: Vec<Vec<u8>> = (0..n)
+            .map(|i| frame(&|x, y| (((x + 5 * i) * 9) ^ ((y + 3 * i) * 7)) as u8, 128))
+            .collect();
         let held = vec![frame(&|x, y| ((x * 3) ^ (y * 5)) as u8, 120); n];
         // Four unrelated scenes, cut every 41 pictures — never on the
         // 30-picture GOP — between smooth, detailed, noisy and moving.
@@ -1351,7 +1685,12 @@ mod tests {
             .collect();
         for (codec, lookahead) in [("H.264", 0u32), ("H.265", 0), ("H.265 lookahead", 8)] {
             let h264 = codec == "H.264";
-            for (content, frames) in [("noise", &noise), ("cuts", &cuts), ("motion", &motion), ("held", &held)] {
+            for (content, frames) in [
+                ("noise", &noise),
+                ("cuts", &cuts),
+                ("motion", &motion),
+                ("held", &held),
+            ] {
                 for cpb_ms in [1000u32, 300] {
                     let tag = format!("{codec} {content} {cpb_ms} ms");
                     let cfg = Config {
@@ -1393,10 +1732,25 @@ mod tests {
                     let (rate, size) = (r.bit_rate as f64, r.cpb_size as f64);
                     let total: u64 = sizes.iter().sum();
                     let average = total as f64 / SECONDS as f64;
-                    assert!((average / f64::from(BPS) - 1.0).abs() <= 0.10, "{tag}: {average:.0} b/s against {BPS}");
-                    let peak = sizes.windows(FPS as usize).map(|w| w.iter().sum::<u64>()).max().unwrap() as f64;
-                    assert!(peak <= rate + size, "{tag}: a one-second window spent {peak:.0} bits, over the rate plus the buffer ({:.0})", rate + size);
-                    eprintln!("{tag}: average {:.3}x, peak one-second window {:.3}x of rate + buffer", average / rate, peak / (rate + size));
+                    assert!(
+                        (average / f64::from(BPS) - 1.0).abs() <= 0.10,
+                        "{tag}: {average:.0} b/s against {BPS}"
+                    );
+                    let peak = sizes
+                        .windows(FPS as usize)
+                        .map(|w| w.iter().sum::<u64>())
+                        .max()
+                        .unwrap() as f64;
+                    assert!(
+                        peak <= rate + size,
+                        "{tag}: a one-second window spent {peak:.0} bits, over the rate plus the buffer ({:.0})",
+                        rate + size
+                    );
+                    eprintln!(
+                        "{tag}: average {:.3}x, peak one-second window {:.3}x of rate + buffer",
+                        average / rate,
+                        peak / (rate + size)
+                    );
                 }
             }
         }

@@ -190,7 +190,9 @@ impl Scheduler {
     /// than the caller simply dropping the tail.
     pub fn flush(&mut self) -> Vec<Coded> {
         let held = std::mem::take(&mut self.pending);
-        held.into_iter().map(|d| self.emit(d, Kind::P, true)).collect()
+        held.into_iter()
+            .map(|d| self.emit(d, Kind::P, true))
+            .collect()
     }
 
     /// What the pictures not yet released would be coded as if the next
@@ -337,8 +339,11 @@ mod tests {
             }
             coded.extend(s.flush());
 
-            let idrs: Vec<u64> =
-                coded.iter().filter(|c| c.kind == Kind::Idr).map(|c| c.display).collect();
+            let idrs: Vec<u64> = coded
+                .iter()
+                .filter(|c| c.kind == Kind::Idr)
+                .map(|c| c.display)
+                .collect();
             // Picture 0 by rule, 5 by request, then 13 because the cadence
             // counts from 5 — and NOT 8, where it would have fallen.
             assert_eq!(idrs, vec![0, 5, 13], "bframes={b}: {coded:?}");
@@ -347,8 +352,14 @@ mod tests {
             // Nothing predicts forwards across it: whatever was held back
             // before display 5 is coded before it, and none of it as a B.
             let at = coded.iter().position(|c| c.display == 5).unwrap();
-            assert!(coded[..at].iter().all(|c| c.display < 5), "bframes={b}: {coded:?}");
-            assert!(coded[at..].iter().all(|c| c.display >= 5), "bframes={b}: {coded:?}");
+            assert!(
+                coded[..at].iter().all(|c| c.display < 5),
+                "bframes={b}: {coded:?}"
+            );
+            assert!(
+                coded[at..].iter().all(|c| c.display >= 5),
+                "bframes={b}: {coded:?}"
+            );
             // With bframes=2, display 4 was held back waiting for an anchor
             // at 6 when the request came; the forced IDR releases it, and it
             // cannot be a B because nothing may predict across the IDR.
@@ -394,20 +405,44 @@ mod tests {
                         // appears exactly once, and none from outside it.
                         let mut seen: Vec<u64> = preview.iter().map(|c| c.display).collect();
                         seen.sort_unstable();
-                        assert!(seen.iter().all(|d| *d < horizon), "gop={gop} b={b} n={n} t={t}: {seen:?} past the horizon {horizon}");
-                        assert!(seen.windows(2).all(|w| w[0] != w[1]), "gop={gop} b={b} n={n} t={t}: a display previewed twice: {seen:?}");
-                        for r in real.iter().filter(|r| r.display < horizon && r.encode >= released) {
-                            assert!(seen.contains(&r.display), "gop={gop} b={b} n={n} t={t}: display {} was unreleased inside the horizon and not previewed: {seen:?}", r.display);
+                        assert!(
+                            seen.iter().all(|d| *d < horizon),
+                            "gop={gop} b={b} n={n} t={t}: {seen:?} past the horizon {horizon}"
+                        );
+                        assert!(
+                            seen.windows(2).all(|w| w[0] != w[1]),
+                            "gop={gop} b={b} n={n} t={t}: a display previewed twice: {seen:?}"
+                        );
+                        for r in real
+                            .iter()
+                            .filter(|r| r.display < horizon && r.encode >= released)
+                        {
+                            assert!(
+                                seen.contains(&r.display),
+                                "gop={gop} b={b} n={n} t={t}: display {} was unreleased inside the horizon and not previewed: {seen:?}",
+                                r.display
+                            );
                         }
                         for p in &preview {
-                            let r = real.iter().find(|c| c.display == p.display).expect("previewed a picture the run never coded");
+                            let r = real
+                                .iter()
+                                .find(|c| c.display == p.display)
+                                .expect("previewed a picture the run never coded");
                             // The kinds agree except at the stream's end,
                             // where flush makes a P of a held B, and past
                             // an IDR forced *after* the preview was taken,
                             // which nothing could have foreseen.
-                            let flushed_b = p.kind == Kind::B && r.kind == Kind::P && p.display + u64::from(b) >= n;
+                            let flushed_b = p.kind == Kind::B
+                                && r.kind == Kind::P
+                                && p.display + u64::from(b) >= n;
                             let forced_later = t < 7 && p.display >= 7;
-                            assert!(p.kind == r.kind || flushed_b || forced_later, "gop={gop} b={b} n={n} t={t}: display {} previewed as {:?}, coded as {:?}", p.display, p.kind, r.kind);
+                            assert!(
+                                p.kind == r.kind || flushed_b || forced_later,
+                                "gop={gop} b={b} n={n} t={t}: display {} previewed as {:?}, coded as {:?}",
+                                p.display,
+                                p.kind,
+                                r.kind
+                            );
                         }
                     }
                 }

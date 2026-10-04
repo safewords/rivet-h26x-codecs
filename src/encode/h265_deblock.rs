@@ -47,9 +47,11 @@
 
 use std::sync::Arc;
 
-use crate::encode::h265_intra::{luma_tbs, z_within_ctb, CuDecision, IntraCtx, IntraPicture, TreeCu};
+use crate::encode::h265_intra::{
+    CuDecision, IntraCtx, IntraPicture, TreeCu, luma_tbs, z_within_ctb,
+};
 use crate::encode::h265_me::{InterPicture, PCuDecision};
-use crate::hevc::deblock::{deblock_rows, DeblockScratch};
+use crate::hevc::deblock::{DeblockScratch, deblock_rows};
 use crate::hevc::frame::Frame;
 use crate::hevc::pic::{Geometry, PicInfo};
 use crate::hevc::pps::Pps;
@@ -73,7 +75,11 @@ use crate::sample::Sample;
 /// and reads the same arrays — the CTB slice marks, the filter-exempt map,
 /// the geometry — so handing them on is what keeps the two filters
 /// agreeing about the picture rather than each building its own idea of it.
-pub fn deblock_picture<S: Sample>(ctx: &IntraCtx<'_, S>, pic: &mut IntraPicture<S>, cus: &[TreeCu<CuDecision>]) -> PicInfo {
+pub fn deblock_picture<S: Sample>(
+    ctx: &IntraCtx<'_, S>,
+    pic: &mut IntraPicture<S>,
+    cus: &[TreeCu<CuDecision>],
+) -> PicInfo {
     let mut info = build_info(pic, cus);
     run_filter(ctx, &mut pic.recon, &info);
     info.sao.fill([crate::hevc::pic::SaoParams::default(); 3]);
@@ -104,7 +110,11 @@ pub fn deblock_picture<S: Sample>(ctx: &IntraCtx<'_, S>, pic: &mut IntraPicture<
 /// `pic.info`, stored by the walk when it chose intra, and that is what
 /// gives every one of its edges boundary strength 2 (8.7.2.4
 /// short-circuits on intra before it looks at cbf or motion).
-pub fn deblock_inter_picture<S: Sample>(ctx: &IntraCtx<'_, S>, pic: &mut InterPicture<S>, cus: &[TreeCu<PCuDecision>]) {
+pub fn deblock_inter_picture<S: Sample>(
+    ctx: &IntraCtx<'_, S>,
+    pic: &mut InterPicture<S>,
+    cus: &[TreeCu<PCuDecision>],
+) {
     let w4 = pic.recon.width / 4;
     {
         for cu in cus {
@@ -228,10 +238,22 @@ pub fn deblock_inter_picture<S: Sample>(ctx: &IntraCtx<'_, S>, pic: &mut InterPi
 /// stream will hold.
 fn run_filter<S: Sample>(ctx: &IntraCtx<'_, S>, recon: &mut Frame<S>, info: &PicInfo) {
     let h4 = recon.height / 4;
-    let pps = Pps::parse(&crate::nal::unescape_rbsp(&crate::encode::h265_syntax::write_pps(ctx.qp.clamp(0, 51), ctx.bypass, true)))
-        .expect("the encoder's own PPS parses");
+    let pps = Pps::parse(&crate::nal::unescape_rbsp(
+        &crate::encode::h265_syntax::write_pps(ctx.qp.clamp(0, 51), ctx.bypass, true),
+    ))
+    .expect("the encoder's own PPS parses");
     let mut scratch = DeblockScratch::default();
-    deblock_rows(ctx.dsp, &mut scratch, recon, info, &pps, ctx.bit_depth, ctx.bit_depth, 0, h4);
+    deblock_rows(
+        ctx.dsp,
+        &mut scratch,
+        recon,
+        info,
+        &pps,
+        ctx.bit_depth,
+        ctx.bit_depth,
+        0,
+        h4,
+    );
 }
 
 /// Build the per-picture side data the decoder's filter reads, from the
@@ -271,7 +293,8 @@ fn build_info<S: Sample>(pic: &IntraPicture<S>, cus: &[TreeCu<CuDecision>]) -> P
     for y4 in 0..h4 {
         for x4 in 0..w4 {
             let ctb = (y4 >> shift) * wc + (x4 >> shift);
-            min_tb_addr_zs[y4 * w4 + x4] = ((ctb as u32) << (2 * shift)) + z_within_ctb(log2, x4 * 4, y4 * 4);
+            min_tb_addr_zs[y4 * w4 + x4] =
+                ((ctb as u32) << (2 * shift)) + z_within_ctb(log2, x4 * 4, y4 * 4);
         }
     }
     let nc = wc * hc;
@@ -327,11 +350,11 @@ fn build_info<S: Sample>(pic: &IntraPicture<S>, cus: &[TreeCu<CuDecision>]) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::h265_me::{InterCuDecision, InterCuKind};
+    use crate::dsp::Cpu;
+    use crate::dsp::distortion::DistortionDsp;
     use crate::dsp::hevc::HevcDsp;
     use crate::dsp::hevc_enc::HevcEncDsp;
-    use crate::dsp::distortion::DistortionDsp;
-    use crate::dsp::Cpu;
+    use crate::encode::h265_me::{InterCuDecision, InterCuKind};
     use crate::picture::ChromaFormat;
 
     struct Kit {
@@ -342,7 +365,11 @@ mod tests {
 
     impl Kit {
         fn new() -> Self {
-            Kit { dsp: HevcDsp::new(Cpu::SCALAR), enc: HevcEncDsp::scalar(), dist: DistortionDsp::scalar() }
+            Kit {
+                dsp: HevcDsp::new(Cpu::SCALAR),
+                enc: HevcEncDsp::scalar(),
+                dist: DistortionDsp::scalar(),
+            }
         }
         fn ctx(&self, qp: i32, bypass: bool) -> IntraCtx<'_, u8> {
             IntraCtx {
@@ -352,7 +379,8 @@ mod tests {
                 qp,
                 bit_depth: 8,
                 strong_smoothing: false,
-                bypass, free_to_trim: false,
+                bypass,
+                free_to_trim: false,
             }
         }
     }
@@ -363,7 +391,13 @@ mod tests {
     /// the decoder's business (conformance-proven); what these tests pin
     /// is that the *derived state* makes it act exactly where a decoder
     /// of this stream would.
-    fn synthetic(w: usize, h: usize, log2_cu: u32, chroma: ChromaFormat, luma: &dyn Fn(usize, usize) -> u8) -> (IntraPicture<u8>, Vec<CuDecision>) {
+    fn synthetic(
+        w: usize,
+        h: usize,
+        log2_cu: u32,
+        chroma: ChromaFormat,
+        luma: &dyn Fn(usize, usize) -> u8,
+    ) -> (IntraPicture<u8>, Vec<CuDecision>) {
         let mut pic = IntraPicture::<u8>::new_with_chroma(w, h, log2_cu, 8, chroma);
         let off = pic.recon.y.origin();
         let stride = pic.recon.y.stride;
@@ -384,7 +418,13 @@ mod tests {
         let n = 1usize << log2_cu;
         let count = (w >> log2_cu) * (h >> log2_cu);
         let _ = n;
-        let decisions = vec![CuDecision { log2_cu, ..CuDecision::default() }; count];
+        let decisions = vec![
+            CuDecision {
+                log2_cu,
+                ..CuDecision::default()
+            };
+            count
+        ];
         (pic, decisions)
     }
 
@@ -413,7 +453,14 @@ mod tests {
             let (w, h) = (2 * n, 2 * n);
             let (mut pic, decisions) = synthetic(w, h, log2_cu, ChromaFormat::Yuv420, &|_, _| 128);
             let before = luma_snapshot(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_picture(&ctx, &mut pic, &cus) };
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_picture(&ctx, &mut pic, &cus)
+            };
             assert_eq!(before, luma_snapshot(&pic), "log2_cu={log2_cu}");
             for plane in [&pic.recon.cb, &pic.recon.cr] {
                 let o = plane.origin();
@@ -440,29 +487,64 @@ mod tests {
         for log2_cu in 4..=5u32 {
             let n = 1usize << log2_cu;
             let (w, h) = (2 * n, n);
-            let (mut pic, decisions) = synthetic(w, h, log2_cu, ChromaFormat::Yuv420, &|x, _| if x < n { 120 } else { 126 });
+            let (mut pic, decisions) = synthetic(w, h, log2_cu, ChromaFormat::Yuv420, &|x, _| {
+                if x < n { 120 } else { 126 }
+            });
             let before = luma_snapshot(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_picture(&ctx, &mut pic, &cus) };
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_picture(&ctx, &mut pic, &cus)
+            };
             let after = luma_snapshot(&pic);
-            assert_ne!(before, after, "log2_cu={log2_cu}: the small step was not filtered");
+            assert_ne!(
+                before, after,
+                "log2_cu={log2_cu}: the small step was not filtered"
+            );
             for y in 0..h {
                 // The boundary pair moved toward each other...
-                assert!(after[y * w + n - 1] > 120, "left edge column did not rise at row {y}");
-                assert!(after[y * w + n] < 126, "right edge column did not fall at row {y}");
+                assert!(
+                    after[y * w + n - 1] > 120,
+                    "left edge column did not rise at row {y}"
+                );
+                assert!(
+                    after[y * w + n] < 126,
+                    "right edge column did not fall at row {y}"
+                );
                 // ...and nothing farther than the filter's three-sample
                 // reach moved at all.
                 for x in 0..w {
                     let dist = (x as i32 - n as i32).min(n as i32 - 1 - x as i32).abs();
                     if !(x as i32 >= n as i32 - 3 && (x as i32) < n as i32 + 3) {
-                        assert_eq!(after[y * w + x], before[y * w + x], "({x},{y}) is {dist} from the edge and moved");
+                        assert_eq!(
+                            after[y * w + x],
+                            before[y * w + x],
+                            "({x},{y}) is {dist} from the edge and moved"
+                        );
                     }
                 }
             }
 
-            let (mut pic, decisions) = synthetic(w, h, log2_cu, ChromaFormat::Yuv420, &|x, _| if x < n { 120 } else { 250 });
+            let (mut pic, decisions) = synthetic(w, h, log2_cu, ChromaFormat::Yuv420, &|x, _| {
+                if x < n { 120 } else { 250 }
+            });
             let before = luma_snapshot(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_picture(&ctx, &mut pic, &cus) };
-            assert_eq!(before, luma_snapshot(&pic), "log2_cu={log2_cu}: a real edge was smoothed away");
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_picture(&ctx, &mut pic, &cus)
+            };
+            assert_eq!(
+                before,
+                luma_snapshot(&pic),
+                "log2_cu={log2_cu}: a real edge was smoothed away"
+            );
         }
     }
 
@@ -483,19 +565,46 @@ mod tests {
 
             let (mut pic, decisions) = synthetic(w, h, log2_cu, ChromaFormat::Yuv420, step);
             let before = luma_snapshot(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_picture(&ctx, &mut pic, &cus) };
-            assert_eq!(before, luma_snapshot(&pic), "log2_cu={log2_cu}: an unsplit CU has no interior edge to filter");
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_picture(&ctx, &mut pic, &cus)
+            };
+            assert_eq!(
+                before,
+                luma_snapshot(&pic),
+                "log2_cu={log2_cu}: an unsplit CU has no interior edge to filter"
+            );
 
             let (mut pic, mut decisions) = synthetic(w, h, log2_cu, ChromaFormat::Yuv420, step);
             decisions[0].split_tu = true;
             let before = luma_snapshot(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_picture(&ctx, &mut pic, &cus) };
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_picture(&ctx, &mut pic, &cus)
+            };
             let after = luma_snapshot(&pic);
-            assert_ne!(before, after, "log2_cu={log2_cu}: the split's interior edge was not filtered");
+            assert_ne!(
+                before, after,
+                "log2_cu={log2_cu}: the split's interior edge was not filtered"
+            );
             let mid = n / 2;
             for x in 0..w {
-                assert!(after[(mid - 1) * w + x] > 120, "top side did not rise at column {x}");
-                assert!(after[mid * w + x] < 126, "bottom side did not fall at column {x}");
+                assert!(
+                    after[(mid - 1) * w + x] > 120,
+                    "top side did not rise at column {x}"
+                );
+                assert!(
+                    after[mid * w + x] < 126,
+                    "bottom side did not fall at column {x}"
+                );
             }
         }
     }
@@ -508,13 +617,26 @@ mod tests {
         let kit = Kit::new();
         let ctx = kit.ctx(32, true);
         let (w, h) = (32, 16);
-        let (mut pic, mut decisions) = synthetic(w, h, 4, ChromaFormat::Yuv420, &|x, _| if x < 16 { 120 } else { 126 });
+        let (mut pic, mut decisions) = synthetic(w, h, 4, ChromaFormat::Yuv420, &|x, _| {
+            if x < 16 { 120 } else { 126 }
+        });
         for d in &mut decisions {
             d.bypass = true;
         }
         let before = luma_snapshot(&pic);
-        { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_picture(&ctx, &mut pic, &cus) };
-        assert_eq!(before, luma_snapshot(&pic), "a lossless picture was filtered");
+        {
+            let cus = TreeCu::whole_ctbs(
+                decisions.clone(),
+                pic.log2_ctb,
+                pic.recon.width >> pic.log2_ctb,
+            );
+            deblock_picture(&ctx, &mut pic, &cus)
+        };
+        assert_eq!(
+            before,
+            luma_snapshot(&pic),
+            "a lossless picture was filtered"
+        );
     }
 
     /// The parameter sets of a `w` by `h` P picture coded as whole CTBs:
@@ -522,10 +644,19 @@ mod tests {
     /// describe (under the quadtree a 32x16 picture is one partial 32x32
     /// CTB, and a whole-CTB decision list for it would be empty).
     fn parsed_sets(w: u32, h: u32) -> (crate::hevc::sps::Sps, Pps) {
-        use crate::encode::h265_syntax::{write_pps, write_sps, Geometry as SynGeometry};
-        let cfg = crate::encode::Config { width: w, height: h, gop: 8, max_cu_depth: Some(0), ..crate::encode::Config::default() };
+        use crate::encode::h265_syntax::{Geometry as SynGeometry, write_pps, write_sps};
+        let cfg = crate::encode::Config {
+            width: w,
+            height: h,
+            gop: 8,
+            max_cu_depth: Some(0),
+            ..crate::encode::Config::default()
+        };
         let syn = SynGeometry::new(&cfg);
-        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &syn, 16, None))).unwrap();
+        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&write_sps(
+            &cfg, &syn, 16, None,
+        )))
+        .unwrap();
         let mut pps = Pps::parse(&crate::nal::unescape_rbsp(&write_pps(26, false, true))).unwrap();
         pps.resolve_tiles(&sps).unwrap();
         (sps, pps)
@@ -537,8 +668,13 @@ mod tests {
     /// exactly as `InterPicture::code_ctu` fills it, so a test can dial
     /// each CU's motion and cbf and read the boundary strength off the
     /// filter's behaviour. Decisions default to `Skip` (no residual).
-    fn synthetic_p(w: usize, h: usize, luma: &dyn Fn(usize, usize) -> u8, chroma: &dyn Fn(usize, usize) -> u8) -> (InterPicture<u8>, Vec<PCuDecision>) {
-        use crate::hevc::frame::{fill_motion, MotionInfo, Mv};
+    fn synthetic_p(
+        w: usize,
+        h: usize,
+        luma: &dyn Fn(usize, usize) -> u8,
+        chroma: &dyn Fn(usize, usize) -> u8,
+    ) -> (InterPicture<u8>, Vec<PCuDecision>) {
+        use crate::hevc::frame::{MotionInfo, Mv, fill_motion};
         let (sps, pps) = parsed_sets(w as u32, h as u32);
         let mut pic = InterPicture::new(&sps, &pps, 1);
         let off = pic.recon.y.origin();
@@ -561,12 +697,24 @@ mod tests {
         pic.info.ctb_slice_addr.fill(0);
         let w4 = pic.recon.w4;
         PicInfo::fill4(&mut pic.info.pred_mode, w4, 0, 0, w, h, 0u8);
-        let mi = MotionInfo { mv: [Mv::ZERO, Mv::ZERO], ref_delta: [1, 0], ref_idx: [0, -1], flags: 0, pad: 0 };
+        let mi = MotionInfo {
+            mv: [Mv::ZERO, Mv::ZERO],
+            ref_delta: [1, 0],
+            ref_idx: [0, -1],
+            flags: 0,
+            pad: 0,
+        };
         fill_motion(&mut pic.recon.motion, w4, 0, 0, w, h, mi);
         let n = 1usize << pic.log2_ctb;
         let count = (w >> pic.log2_ctb) * (h >> pic.log2_ctb);
         let _ = n;
-        let decisions = vec![PCuDecision::Inter(InterCuDecision { log2_cu: pic.log2_ctb, ..InterCuDecision::default() }); count];
+        let decisions = vec![
+            PCuDecision::Inter(InterCuDecision {
+                log2_cu: pic.log2_ctb,
+                ..InterCuDecision::default()
+            });
+            count
+        ];
         (pic, decisions)
     }
 
@@ -593,10 +741,22 @@ mod tests {
         let ctx = kit.ctx(32, false);
         for (w, h) in [(32usize, 16usize), (64, 32)] {
             let n = h; // one CTB row: CTB size == h by the writer's choice
-            let (mut pic, decisions) = synthetic_p(w, h, &|x, _| if x < n { 120 } else { 126 }, &|_, _| 128);
+            let (mut pic, decisions) =
+                synthetic_p(w, h, &|x, _| if x < n { 120 } else { 126 }, &|_, _| 128);
             let before = luma_snapshot_p(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_inter_picture(&ctx, &mut pic, &cus) };
-            assert_eq!(before, luma_snapshot_p(&pic), "{w}x{h}: a bS-0 edge was filtered");
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_inter_picture(&ctx, &mut pic, &cus)
+            };
+            assert_eq!(
+                before,
+                luma_snapshot_p(&pic),
+                "{w}x{h}: a bS-0 edge was filtered"
+            );
         }
     }
 
@@ -614,30 +774,47 @@ mod tests {
         let ctx = kit.ctx(32, false);
         for (w, h) in [(32usize, 16usize), (64, 32)] {
             let n = h;
-            let (mut pic, mut decisions) = synthetic_p(
-                w,
-                h,
-                &|x, _| if x < n { 120 } else { 126 },
-                &|x, _| if x < n / 2 { 120 } else { 126 },
-            );
-            let PCuDecision::Inter(d1) = &mut decisions[1] else { unreachable!("synthetic_p builds inter CUs") };
+            let (mut pic, mut decisions) =
+                synthetic_p(w, h, &|x, _| if x < n { 120 } else { 126 }, &|x, _| {
+                    if x < n / 2 { 120 } else { 126 }
+                });
+            let PCuDecision::Inter(d1) = &mut decisions[1] else {
+                unreachable!("synthetic_p builds inter CUs")
+            };
             d1.kind = InterCuKind::Merge { merge_idx: 0 };
             d1.rqt_root_cbf = true;
             d1.cbf_luma = true;
             let before = luma_snapshot_p(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_inter_picture(&ctx, &mut pic, &cus) };
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_inter_picture(&ctx, &mut pic, &cus)
+            };
             let after = luma_snapshot_p(&pic);
             assert_ne!(before, after, "{w}x{h}: a bS-1 edge was not filtered");
             for y in 0..h {
-                assert!(after[y * w + n - 1] > 120, "left of the edge did not rise at row {y}");
-                assert!(after[y * w + n] < 126, "right of the edge did not fall at row {y}");
+                assert!(
+                    after[y * w + n - 1] > 120,
+                    "left of the edge did not rise at row {y}"
+                );
+                assert!(
+                    after[y * w + n] < 126,
+                    "right of the edge did not fall at row {y}"
+                );
             }
             for plane in [&pic.recon.cb, &pic.recon.cr] {
                 let o = plane.origin();
                 for y in 0..plane.height {
                     for x in 0..plane.width {
                         let want = if x < n / 2 { 120 } else { 126 };
-                        assert_eq!(plane.data[o + y * plane.stride + x], want, "chroma moved at a bS-1 edge");
+                        assert_eq!(
+                            plane.data[o + y * plane.stride + x],
+                            want,
+                            "chroma moved at a bS-1 edge"
+                        );
                     }
                 }
             }
@@ -651,20 +828,37 @@ mod tests {
     /// test here, read through `motion_bs` exactly as a decoder reads it.
     #[test]
     fn a_motion_difference_raises_the_edge_to_bs_one() {
-        use crate::hevc::frame::{fill_motion, MotionInfo, Mv};
+        use crate::hevc::frame::{MotionInfo, Mv, fill_motion};
         let kit = Kit::new();
         let ctx = kit.ctx(32, false);
         for (delta, expect_filtered) in [(4i16, true), (3, false)] {
             let (w, h) = (32usize, 16usize);
             let n = h;
-            let (mut pic, decisions) = synthetic_p(w, h, &|x, _| if x < n { 120 } else { 126 }, &|_, _| 128);
-            let mi = MotionInfo { mv: [Mv::new(delta, 0), Mv::ZERO], ref_delta: [1, 0], ref_idx: [0, -1], flags: 0, pad: 0 };
+            let (mut pic, decisions) =
+                synthetic_p(w, h, &|x, _| if x < n { 120 } else { 126 }, &|_, _| 128);
+            let mi = MotionInfo {
+                mv: [Mv::new(delta, 0), Mv::ZERO],
+                ref_delta: [1, 0],
+                ref_idx: [0, -1],
+                flags: 0,
+                pad: 0,
+            };
             let w4 = pic.recon.w4;
             fill_motion(&mut pic.recon.motion, w4, n, 0, n, h, mi);
             let before = luma_snapshot_p(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_inter_picture(&ctx, &mut pic, &cus) };
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_inter_picture(&ctx, &mut pic, &cus)
+            };
             let changed = before != luma_snapshot_p(&pic);
-            assert_eq!(changed, expect_filtered, "delta {delta}: filtered={changed}");
+            assert_eq!(
+                changed, expect_filtered,
+                "delta {delta}: filtered={changed}"
+            );
         }
     }
 
@@ -700,7 +894,8 @@ mod tests {
         refp.extend_rows(0, h);
         let mut src_y = vec![0u8; w * h];
         for y in 0..h {
-            src_y[y * w..y * w + w].copy_from_slice(&refp.y.data[off + y * stride..off + y * stride + w]);
+            src_y[y * w..y * w + w]
+                .copy_from_slice(&refp.y.data[off + y * stride..off + y * stride + w]);
         }
         let mut src_cb = vec![0u8; w * h / 4];
         let mut src_cr = vec![0u8; w * h / 4];
@@ -715,16 +910,39 @@ mod tests {
         let mut decisions = Vec::new();
         for cy in 0..h / n {
             for cx in 0..w / n {
-                decisions.push(PCuDecision::Inter(pic.code_ctu(&ctx, &[&refp], cx, cy, &src_y, w, &src_cb, &src_cr, w / 2)));
+                decisions.push(PCuDecision::Inter(pic.code_ctu(
+                    &ctx,
+                    &[&refp],
+                    cx,
+                    cy,
+                    &src_y,
+                    w,
+                    &src_cb,
+                    &src_cr,
+                    w / 2,
+                )));
             }
         }
         assert!(
-            decisions.iter().all(|d| matches!(d, PCuDecision::Inter(d) if matches!(d.kind, InterCuKind::Skip { .. }))),
+            decisions.iter().all(
+                |d| matches!(d, PCuDecision::Inter(d) if matches!(d.kind, InterCuKind::Skip { .. }))
+            ),
             "a source equal to its reference should skip everywhere"
         );
         let before = luma_snapshot_p(&pic);
-        { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_inter_picture(&ctx, &mut pic, &cus) };
-        assert_eq!(before, luma_snapshot_p(&pic), "a pure-skip picture was filtered");
+        {
+            let cus = TreeCu::whole_ctbs(
+                decisions.clone(),
+                pic.log2_ctb,
+                pic.recon.width >> pic.log2_ctb,
+            );
+            deblock_inter_picture(&ctx, &mut pic, &cus)
+        };
+        assert_eq!(
+            before,
+            luma_snapshot_p(&pic),
+            "a pure-skip picture was filtered"
+        );
     }
 
     /// A really coded picture, end to end: code a gentle ramp at a high
@@ -761,9 +979,19 @@ mod tests {
                 }
             }
             let before = luma_snapshot(&pic);
-            { let cus = TreeCu::whole_ctbs(decisions.clone(), pic.log2_ctb, pic.recon.width >> pic.log2_ctb); deblock_picture(&ctx, &mut pic, &cus) };
+            {
+                let cus = TreeCu::whole_ctbs(
+                    decisions.clone(),
+                    pic.log2_ctb,
+                    pic.recon.width >> pic.log2_ctb,
+                );
+                deblock_picture(&ctx, &mut pic, &cus)
+            };
             let after = luma_snapshot(&pic);
-            assert_ne!(before, after, "log2_cu={log2_cu}: filtering a coded noisy picture changed nothing");
+            assert_ne!(
+                before, after,
+                "log2_cu={log2_cu}: filtering a coded noisy picture changed nothing"
+            );
             // Within three samples of an interior 8-grid line, on either
             // axis: the farthest any legal luma deblocking reaches.
             let near = |c: usize, limit: usize| -> bool {
@@ -773,7 +1001,10 @@ mod tests {
             for y in 0..h {
                 for x in 0..w {
                     if before[y * w + x] != after[y * w + x] {
-                        assert!(near(x, w) || near(y, h), "({x},{y}) changed but is not within 3 of an interior 8-grid line");
+                        assert!(
+                            near(x, w) || near(y, h),
+                            "({x},{y}) changed but is not within 3 of an interior 8-grid line"
+                        );
                     }
                 }
             }

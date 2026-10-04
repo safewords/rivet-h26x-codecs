@@ -42,7 +42,11 @@ impl BitWriter {
 
     /// An empty writer with room for `bytes` reserved.
     pub fn with_capacity(bytes: usize) -> Self {
-        Self { out: Vec::with_capacity(bytes), cache: 0, bits: 0 }
+        Self {
+            out: Vec::with_capacity(bytes),
+            cache: 0,
+            bits: 0,
+        }
     }
 
     /// Bits written so far, including any not yet flushed to a whole byte.
@@ -68,7 +72,11 @@ impl BitWriter {
         if n == 0 {
             return;
         }
-        let masked = if n == 32 { v as u64 } else { (v as u64) & ((1u64 << n) - 1) };
+        let masked = if n == 32 {
+            v as u64
+        } else {
+            (v as u64) & ((1u64 << n) - 1)
+        };
         self.cache = (self.cache << n) | masked;
         self.bits += n;
         while self.bits >= 8 {
@@ -242,10 +250,37 @@ mod tests {
             ops.push(Op::Bits(n, hi));
             ops.push(Op::Bits(n, hi / 3));
         }
-        for v in [0u32, 1, 2, 3, 14, 15, 16, 17, 254, 65534, 65535, 65536, 1 << 20, u32::MAX - 1] {
+        for v in [
+            0u32,
+            1,
+            2,
+            3,
+            14,
+            15,
+            16,
+            17,
+            254,
+            65534,
+            65535,
+            65536,
+            1 << 20,
+            u32::MAX - 1,
+        ] {
             ops.push(Op::Ue(v));
         }
-        for v in [0i32, 1, -1, 2, -2, 100, -100, 32767, -32768, 1 << 20, -(1 << 20)] {
+        for v in [
+            0i32,
+            1,
+            -1,
+            2,
+            -2,
+            100,
+            -100,
+            32767,
+            -32768,
+            1 << 20,
+            -(1 << 20),
+        ] {
             ops.push(Op::Se(v));
         }
         for (v, max) in [(0u32, 1u32), (1, 1), (0, 5), (4, 5)] {

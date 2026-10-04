@@ -205,4 +205,3 @@ pub static DEFAULT_SCALING_INTRA: [u8; 64] = [16, 16, 16, 16, 17, 18, 21, 24, 16
 /// Default 8x8 inter scaling list, Table 7-6, in up-right diagonal scan order.
 #[rustfmt::skip]
 pub static DEFAULT_SCALING_INTER: [u8; 64] = [16, 16, 16, 16, 17, 18, 20, 24, 16, 16, 16, 17, 18, 20, 24, 25, 16, 16, 17, 18, 20, 24, 25, 28, 16, 17, 18, 20, 24, 25, 28, 33, 17, 18, 20, 24, 25, 28, 33, 41, 18, 20, 24, 25, 28, 33, 41, 54, 20, 24, 25, 28, 33, 41, 54, 71, 24, 25, 28, 33, 41, 54, 71, 91];
-

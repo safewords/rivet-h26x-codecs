@@ -71,9 +71,15 @@ macro_rules! kernels {
                 && (origin + (h - 1) * stride + w) as isize + hi <= rec.len() as isize
                 && (h - 1) * src_stride + w <= src.len();
             if !fits || max > 32767 || w < 8 {
-                return sao_edge_stats_scalar(rec, origin, stride, src, src_stride, w, h, na, nb, max, reach, tally, near);
+                return sao_edge_stats_scalar(
+                    rec, origin, stride, src, src_stride, w, h, na, nb, max, reach, tally, near,
+                );
             }
-            unsafe { edge_impl(rec, origin, stride, src, src_stride, w, h, na, nb, max, reach, tally, near) }
+            unsafe {
+                edge_impl(
+                    rec, origin, stride, src, src_stride, w, h, na, nb, max, reach, tally, near,
+                )
+            }
         }
 
         #[target_feature(enable = $feat)]
@@ -123,9 +129,11 @@ macro_rules! kernels {
                         for c in 0..5 {
                             let m = _mm_cmpeq_epi16(e, cats[c]);
                             cnt[c] = _mm_sub_epi16(cnt[c], m);
-                            sums[c] = _mm_add_epi32(sums[c], _mm_madd_epi16(_mm_and_si128(err, m), ones));
+                            sums[c] =
+                                _mm_add_epi32(sums[c], _mm_madd_epi16(_mm_and_si128(err, m), ones));
                         }
-                        let rail = _mm_or_si128(_mm_cmpgt_epi16(lo_rail, r), _mm_cmpgt_epi16(r, hi_rail));
+                        let rail =
+                            _mm_or_si128(_mm_cmpgt_epi16(lo_rail, r), _mm_cmpgt_epi16(r, hi_rail));
                         let bits = _mm_movemask_epi8(rail);
                         if bits != 0 {
                             let (mut rv, mut ev, mut dv) = ([0i16; 8], [0i16; 8], [0i16; 8]);
@@ -143,14 +151,29 @@ macro_rules! kernels {
                     for c in 0..5 {
                         let fold = |q: __m128i| {
                             let q = _mm_add_epi32(q, _mm_shuffle_epi32(q, 0b01_00_11_10));
-                            _mm_cvtsi128_si32(_mm_add_epi32(q, _mm_shuffle_epi32(q, 0b10_11_00_01))) as i64
+                            _mm_cvtsi128_si32(_mm_add_epi32(q, _mm_shuffle_epi32(q, 0b10_11_00_01)))
+                                as i64
                         };
                         totals[c][0] += fold(_mm_madd_epi16(cnt[c], ones));
                         totals[c][1] += fold(sums[c]);
                     }
                     if x < w {
                         // The last few samples of the row, as the reference does them.
-                        sao_edge_stats_scalar(recs, origin + y * stride + x, stride, &srcs[y * src_stride + x..], src_stride, w - x, 1, na, nb, max, reach, tally, near);
+                        sao_edge_stats_scalar(
+                            recs,
+                            origin + y * stride + x,
+                            stride,
+                            &srcs[y * src_stride + x..],
+                            src_stride,
+                            w - x,
+                            1,
+                            na,
+                            nb,
+                            max,
+                            reach,
+                            tally,
+                            near,
+                        );
                     }
                 }
                 for c in 0..5 {
@@ -198,25 +221,35 @@ mod tests {
     use super::*;
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
     fn rungs<S: Sample>() -> Vec<(&'static str, DistortionDsp<S>)> {
         let b = Cpu::SCALAR;
         let sse2 = Cpu { sse2: true, ..b };
-        let sse41 = Cpu { ssse3: true, sse41: true, ..sse2 };
+        let sse41 = Cpu {
+            ssse3: true,
+            sse41: true,
+            ..sse2
+        };
         let avx = Cpu { avx: true, ..sse41 };
         let top = Cpu::detect();
-        [("sse2", sse2, top.sse2), ("sse4.1", sse41, top.sse41), ("avx", avx, top.avx)]
-            .into_iter()
-            .filter(|&(_, _, have)| have)
-            .map(|(n, c, _)| {
-                let mut d = DistortionDsp::<S>::scalar();
-                install(&mut d, c);
-                (n, d)
-            })
-            .collect()
+        [
+            ("sse2", sse2, top.sse2),
+            ("sse4.1", sse41, top.sse41),
+            ("avx", avx, top.avx),
+        ]
+        .into_iter()
+        .filter(|&(_, _, have)| have)
+        .map(|(n, c, _)| {
+            let mut d = DistortionDsp::<S>::scalar();
+            install(&mut d, c);
+            (n, d)
+        })
+        .collect()
     }
 
     /// Every rung against the reference: the four classes' neighbour
@@ -243,22 +276,65 @@ mod tests {
                         S::from_i32(v)
                     })
                     .collect();
-                let src: Vec<S> = (0..stride * 80).map(|_| S::from_i32(lcg(&mut seed) as i32 % (max + 1))).collect();
+                let src: Vec<S> = (0..stride * 80)
+                    .map(|_| S::from_i32(lcg(&mut seed) as i32 % (max + 1)))
+                    .collect();
                 for &(dx, dy) in &[(1isize, 0isize), (0, 1), (1, 1), (-1, 1)] {
                     let (na, nb) = (-dy * stride as isize - dx, dy * stride as isize + dx);
-                    for &(w, h) in &[(8usize, 8usize), (13, 7), (32, 32), (64, 64), (5, 3), (61, 2)] {
+                    for &(w, h) in &[
+                        (8usize, 8usize),
+                        (13, 7),
+                        (32, 32),
+                        (64, 64),
+                        (5, 3),
+                        (61, 2),
+                    ] {
                         let origin = 2 * stride + 2;
                         let mut want = [[0i64; 2]; 5];
                         let mut near_want = Vec::new();
-                        (s.sao_edge_stats)(&plane, origin, stride, &src[origin..], stride, w, h, na, nb, max, 31, &mut want, &mut near_want);
+                        (s.sao_edge_stats)(
+                            &plane,
+                            origin,
+                            stride,
+                            &src[origin..],
+                            stride,
+                            w,
+                            h,
+                            na,
+                            nb,
+                            max,
+                            31,
+                            &mut want,
+                            &mut near_want,
+                        );
                         near_want.sort();
                         for (name, d) in &tables {
                             let mut got = [[0i64; 2]; 5];
                             let mut near_got = Vec::new();
-                            (d.sao_edge_stats)(&plane, origin, stride, &src[origin..], stride, w, h, na, nb, max, 31, &mut got, &mut near_got);
+                            (d.sao_edge_stats)(
+                                &plane,
+                                origin,
+                                stride,
+                                &src[origin..],
+                                stride,
+                                w,
+                                h,
+                                na,
+                                nb,
+                                max,
+                                31,
+                                &mut got,
+                                &mut near_got,
+                            );
                             near_got.sort();
-                            assert_eq!(got, want, "{name}: {bd} bits, plane {kind}, class ({dx}, {dy}), {w}x{h}");
-                            assert_eq!(near_got, near_want, "{name}: near, {bd} bits, plane {kind}, class ({dx}, {dy}), {w}x{h}");
+                            assert_eq!(
+                                got, want,
+                                "{name}: {bd} bits, plane {kind}, class ({dx}, {dy}), {w}x{h}"
+                            );
+                            assert_eq!(
+                                near_got, near_want,
+                                "{name}: near, {bd} bits, plane {kind}, class ({dx}, {dy}), {w}x{h}"
+                            );
                         }
                     }
                 }

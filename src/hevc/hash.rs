@@ -23,7 +23,9 @@ pub enum PictureHash {
 /// Whether hash verification is on (`H26X_VERIFY_HASH=1`).
 pub fn verify_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("H26X_VERIFY_HASH").is_some_and(|v| v == "1" || v == "true"))
+    *ON.get_or_init(|| {
+        std::env::var_os("H26X_VERIFY_HASH").is_some_and(|v| v == "1" || v == "true")
+    })
 }
 
 /// Find a `decoded_picture_hash` message in an SEI RBSP (the payload after
@@ -89,7 +91,11 @@ pub fn parse_sei(rbsp: &[u8], chroma_format_idc: u32) -> Option<PictureHash> {
 
 /// Check `frame` against `hash`; the mismatching components on failure.
 pub fn verify<S: Sample>(frame: &Frame<S>, hash: &PictureHash) -> Result<(), String> {
-    let comps = if frame.chroma == ChromaFormat::Monochrome { 1 } else { 3 };
+    let comps = if frame.chroma == ChromaFormat::Monochrome {
+        1
+    } else {
+        3
+    };
     let mut bad = Vec::new();
     for c in 0..comps {
         let plane = match c {
@@ -100,7 +106,11 @@ pub fn verify<S: Sample>(frame: &Frame<S>, hash: &PictureHash) -> Result<(), Str
         // Each component at its own depth (the MD5 / CRC / checksum are
         // per component, 8.4 of the SEI semantics: two bytes when its
         // depth exceeds 8), so unequal depths can mix one- and two-byte planes.
-        let bd = if c == 0 { frame.bit_depth } else { frame.bit_depth_chroma };
+        let bd = if c == 0 {
+            frame.bit_depth
+        } else {
+            frame.bit_depth_chroma
+        };
         let wide = bd > 8;
         // The component's samples in raster order, as bytes (low byte first
         // when the depth needs two).
@@ -127,7 +137,9 @@ pub fn verify<S: Sample>(frame: &Frame<S>, hash: &PictureHash) -> Result<(), Str
     if bad.is_empty() {
         Ok(())
     } else {
-        Err(format!("component(s) {bad:?} differ from the picture hash SEI"))
+        Err(format!(
+            "component(s) {bad:?} differ from the picture hash SEI"
+        ))
     }
 }
 
@@ -168,10 +180,12 @@ fn checksum(bytes: &[u8], width: usize, wide: bool) -> u32 {
 /// MD5 (RFC 1321).
 pub fn md5(data: &[u8]) -> [u8; 16] {
     const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
-        16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
-    let k: [u32; 64] = std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32);
+    let k: [u32; 64] =
+        std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32);
     let mut a0: u32 = 0x67452301;
     let mut b0: u32 = 0xefcdab89;
     let mut c0: u32 = 0x98badcfe;
@@ -184,7 +198,14 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
     }
     msg.extend_from_slice(&bit_len.to_le_bytes());
     for chunk in msg.chunks_exact(64) {
-        let m: [u32; 16] = std::array::from_fn(|i| u32::from_le_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]));
+        let m: [u32; 16] = std::array::from_fn(|i| {
+            u32::from_le_bytes([
+                chunk[4 * i],
+                chunk[4 * i + 1],
+                chunk[4 * i + 2],
+                chunk[4 * i + 3],
+            ])
+        });
         let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
         for i in 0..64 {
             let (f, g) = match i / 16 {
@@ -221,7 +242,10 @@ mod tests {
         let hex = |d: [u8; 16]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(hex(md5(b"")), "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(hex(md5(b"abc")), "900150983cd24fb0d6963f7d28e17f72");
-        assert_eq!(hex(md5(b"The quick brown fox jumps over the lazy dog")), "9e107d9d372bb6826bd81d3542a419d6");
+        assert_eq!(
+            hex(md5(b"The quick brown fox jumps over the lazy dog")),
+            "9e107d9d372bb6826bd81d3542a419d6"
+        );
         let long: Vec<u8> = (0..1000u32).map(|i| (i * 7 % 251) as u8).collect();
         assert_eq!(hex(md5(&long)), hex(md5(&long)));
     }

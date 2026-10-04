@@ -230,9 +230,14 @@ impl SliceHeader {
             no_output_of_prior_pics = r.flag();
         }
         let pps_id = r.ue();
-        let pps = pps_lookup(pps_id).ok_or_else(|| Error::bitstream(format!("slice references unknown PPS {pps_id}")))?;
-        let sps = sps_lookup(pps.sps_id)
-            .ok_or_else(|| Error::bitstream(format!("PPS {pps_id} references unknown SPS {}", pps.sps_id)))?;
+        let pps = pps_lookup(pps_id)
+            .ok_or_else(|| Error::bitstream(format!("slice references unknown PPS {pps_id}")))?;
+        let sps = sps_lookup(pps.sps_id).ok_or_else(|| {
+            Error::bitstream(format!(
+                "PPS {pps_id} references unknown SPS {}",
+                pps.sps_id
+            ))
+        })?;
         let mut dependent = false;
         let mut segment_address = 0;
         if !first_slice_segment_in_pic {
@@ -257,7 +262,9 @@ impl SliceHeader {
         // independent one it follows.
         if dependent {
             let Some(ind) = independent else {
-                return Err(Error::bitstream("dependent slice segment without a preceding independent one"));
+                return Err(Error::bitstream(
+                    "dependent slice segment without a preceding independent one",
+                ));
             };
             let mut hdr = ind.clone();
             hdr.first_slice_segment_in_pic = false;
@@ -310,10 +317,16 @@ impl SliceHeader {
                 st_rps_bits = (r.position() - before) as u32;
             } else {
                 if num_sets == 0 {
-                    return Err(Error::bitstream("short_term_ref_pic_set_sps_flag with no SPS sets"));
+                    return Err(Error::bitstream(
+                        "short_term_ref_pic_set_sps_flag with no SPS sets",
+                    ));
                 }
                 let bits = 32 - ((num_sets as u32).saturating_sub(1)).leading_zeros();
-                let idx = if num_sets > 1 { r.bits(bits) as usize } else { 0 };
+                let idx = if num_sets > 1 {
+                    r.bits(bits) as usize
+                } else {
+                    0
+                };
                 if idx >= num_sets {
                     return Err(Error::bitstream("short_term_ref_pic_set_idx out of range"));
                 }
@@ -334,8 +347,13 @@ impl SliceHeader {
                 let mut prev_msb_cycle: i32 = 0;
                 for i in 0..(num_lt_sps + num_lt_pics) {
                     let (lsb, used) = if i < num_lt_sps {
-                        let bits = 32 - ((sps.lt_ref_pics.len() as u32).saturating_sub(1)).leading_zeros();
-                        let idx = if sps.lt_ref_pics.len() > 1 { r.bits(bits) as usize } else { 0 };
+                        let bits =
+                            32 - ((sps.lt_ref_pics.len() as u32).saturating_sub(1)).leading_zeros();
+                        let idx = if sps.lt_ref_pics.len() > 1 {
+                            r.bits(bits) as usize
+                        } else {
+                            0
+                        };
                         if idx >= sps.lt_ref_pics.len() {
                             return Err(Error::bitstream("lt_idx_sps out of range"));
                         }
@@ -350,14 +368,26 @@ impl SliceHeader {
                     // i == 0 and i == num_long_term_sps; an entry without the
                     // flag contributes 0.
                     let cycle = if msb_present { r.ue() as i32 } else { 0 };
-                    let delta_msb_cycle = if i == 0 || i == num_lt_sps { cycle } else { cycle + prev_msb_cycle };
+                    let delta_msb_cycle = if i == 0 || i == num_lt_sps {
+                        cycle
+                    } else {
+                        cycle + prev_msb_cycle
+                    };
                     prev_msb_cycle = delta_msb_cycle;
                     // With the flag, the full POC is
                     //   PicOrderCntVal - DeltaPocMsbCycleLt * MaxPocLsb - slice_pic_order_cnt_lsb + PocLsbLt;
                     // stored here as (PocLsbLt - cycle * MaxPocLsb) and completed
                     // by the DPB, which knows PicOrderCntVal.
-                    let poc = if msb_present { lsb as i32 - delta_msb_cycle * sps.max_poc_lsb() } else { lsb as i32 };
-                    lt.push(LtEntry { poc, msb_present, used });
+                    let poc = if msb_present {
+                        lsb as i32 - delta_msb_cycle * sps.max_poc_lsb()
+                    } else {
+                        lsb as i32
+                    };
+                    lt.push(LtEntry {
+                        poc,
+                        msb_present,
+                        used,
+                    });
                 }
             }
             if sps.temporal_mvp_enabled {
@@ -381,7 +411,14 @@ impl SliceHeader {
         let mut pred_weights = None;
         let mut max_num_merge_cand = 5;
         if slice_type != SliceType::I {
-            num_ref_idx = [pps.num_ref_idx_l0_default, if slice_type == SliceType::B { pps.num_ref_idx_l1_default } else { 0 }];
+            num_ref_idx = [
+                pps.num_ref_idx_l0_default,
+                if slice_type == SliceType::B {
+                    pps.num_ref_idx_l1_default
+                } else {
+                    0
+                },
+            ];
             if r.flag() {
                 num_ref_idx[0] = r.ue() + 1;
                 if slice_type == SliceType::B {
@@ -430,20 +467,35 @@ impl SliceHeader {
                 if slice_type == SliceType::B {
                     collocated_from_l0 = r.flag();
                 }
-                if (collocated_from_l0 && num_ref_idx[0] > 1) || (!collocated_from_l0 && num_ref_idx[1] > 1) {
+                if (collocated_from_l0 && num_ref_idx[0] > 1)
+                    || (!collocated_from_l0 && num_ref_idx[1] > 1)
+                {
                     collocated_ref_idx = r.ue();
-                    let n = if collocated_from_l0 { num_ref_idx[0] } else { num_ref_idx[1] };
+                    let n = if collocated_from_l0 {
+                        num_ref_idx[0]
+                    } else {
+                        num_ref_idx[1]
+                    };
                     if collocated_ref_idx >= n {
                         return Err(Error::bitstream("collocated_ref_idx out of range"));
                     }
                 }
             }
-            if (pps.weighted_pred && slice_type == SliceType::P) || (pps.weighted_bipred && slice_type == SliceType::B) {
-                pred_weights = Some(parse_pred_weight_table(&mut r, &sps, slice_type, num_ref_idx)?);
+            if (pps.weighted_pred && slice_type == SliceType::P)
+                || (pps.weighted_bipred && slice_type == SliceType::B)
+            {
+                pred_weights = Some(parse_pred_weight_table(
+                    &mut r,
+                    &sps,
+                    slice_type,
+                    num_ref_idx,
+                )?);
             }
             let five_minus = r.ue();
             if five_minus > 4 {
-                return Err(Error::bitstream("five_minus_max_num_merge_cand out of range"));
+                return Err(Error::bitstream(
+                    "five_minus_max_num_merge_cand out of range",
+                ));
             }
             max_num_merge_cand = 5 - five_minus;
         }
@@ -487,7 +539,9 @@ impl SliceHeader {
         if pps.slice_header_extension_present {
             let n = r.ue();
             if n > 256 {
-                return Err(Error::bitstream("slice_segment_header_extension_length out of range"));
+                return Err(Error::bitstream(
+                    "slice_segment_header_extension_length out of range",
+                ));
             }
             for _ in 0..n {
                 r.bits(8);
@@ -570,17 +624,26 @@ fn parse_entry_points(r: &mut BitReader, pps: &Pps) -> Result<Vec<u32>> {
 
 fn byte_alignment(r: &mut BitReader) -> Result<()> {
     if r.bit() != 1 {
-        return Err(Error::bitstream("byte_alignment(): alignment_bit_equal_to_one is 0"));
+        return Err(Error::bitstream(
+            "byte_alignment(): alignment_bit_equal_to_one is 0",
+        ));
     }
     while !r.byte_aligned() {
         if r.bit() != 0 {
-            return Err(Error::bitstream("byte_alignment(): alignment_bit_equal_to_zero is 1"));
+            return Err(Error::bitstream(
+                "byte_alignment(): alignment_bit_equal_to_zero is 1",
+            ));
         }
     }
     Ok(())
 }
 
-fn parse_pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: SliceType, num_ref_idx: [u32; 2]) -> Result<PredWeightTable> {
+fn parse_pred_weight_table(
+    r: &mut BitReader,
+    sps: &Sps,
+    slice_type: SliceType,
+    num_ref_idx: [u32; 2],
+) -> Result<PredWeightTable> {
     let luma_log2_denom = r.ue();
     if luma_log2_denom > 7 {
         return Err(Error::bitstream("luma_log2_weight_denom out of range"));
@@ -600,7 +663,11 @@ fn parse_pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: SliceType, 
     // process adds them directly.
     let hp = sps.high_precision_offsets();
     let shift_y = if hp { 0 } else { sps.bit_depth_luma as i32 - 8 };
-    let shift_c = if hp { 0 } else { sps.bit_depth_chroma as i32 - 8 };
+    let shift_c = if hp {
+        0
+    } else {
+        sps.bit_depth_chroma as i32 - 8
+    };
     let half_y: i32 = 1 << if hp { sps.bit_depth_luma - 1 } else { 7 };
     let half_c: i32 = 1 << if hp { sps.bit_depth_chroma - 1 } else { 7 };
     for (l, list) in lists.iter_mut().enumerate().take(nlists) {
@@ -616,7 +683,10 @@ fn parse_pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: SliceType, 
             }
         }
         for i in 0..n {
-            let mut e = WeightEntry { luma: (1 << luma_log2_denom, 0), chroma: [(1 << chroma_log2_denom, 0); 2] };
+            let mut e = WeightEntry {
+                luma: (1 << luma_log2_denom, 0),
+                chroma: [(1 << chroma_log2_denom, 0); 2],
+            };
             if luma_flags[i] {
                 let dw = r.se();
                 let off = r.se();
@@ -629,16 +699,23 @@ fn parse_pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: SliceType, 
                 for c in 0..2 {
                     let dw = r.se();
                     let doff = r.se();
-                    if !(-128..=127).contains(&dw) || !(-4 * half_c..=4 * half_c - 1).contains(&doff) {
+                    if !(-128..=127).contains(&dw)
+                        || !(-4 * half_c..=4 * half_c - 1).contains(&doff)
+                    {
                         return Err(Error::bitstream("chroma weight/offset out of range"));
                     }
                     let w = (1 << chroma_log2_denom) + dw;
-                    let o = (half_c + doff - ((half_c * w) >> chroma_log2_denom)).clamp(-half_c, half_c - 1);
+                    let o = (half_c + doff - ((half_c * w) >> chroma_log2_denom))
+                        .clamp(-half_c, half_c - 1);
                     e.chroma[c] = (w, o << shift_c);
                 }
             }
             list.push(e);
         }
     }
-    Ok(PredWeightTable { luma_log2_denom, chroma_log2_denom, lists })
+    Ok(PredWeightTable {
+        luma_log2_denom,
+        chroma_log2_denom,
+        lists,
+    })
 }

@@ -240,18 +240,20 @@
 //! files next change hands. `lambda` duplicates the intra module's
 //! Lagrangian constant for the same reason.
 
-use crate::dsp::hevc_enc::{qbits, quant_offset, quant_scale};
-use crate::encode::h265_intra::{
-    CuDecision, Geo, IntraCtx, MIN_CB_LOG2, RegionSave, Srcs, TreeCu, chroma_tbs, code_cu_2nx2n_intra, code_cu_nxn_intra, cu_ssd, restore4, satd_lambda_scale,
-    save4, ssd_lambda, sub_wh,
-};
 use crate::cabac_enc::CabacEncoder;
-use crate::hevc::ctu::{
-    PartMode, SplitCuNb, chroma_qp, explicit_weighting, write_cu_skip_flag, write_inter_pred_idc, write_merge_flag,
-    write_merge_idx, write_mvd, write_mvp_flag, write_part_mode_inter, write_part_mode_inter_at, write_pred_mode_flag,
-    write_ref_idx, write_rqt_root_cbf, write_split_cu_flag,
-};
+use crate::dsp::hevc_enc::{qbits, quant_offset, quant_scale};
 use crate::encode::InterParts;
+use crate::encode::h265_intra::{
+    CuDecision, Geo, IntraCtx, MIN_CB_LOG2, RegionSave, Srcs, TreeCu, chroma_tbs,
+    code_cu_2nx2n_intra, code_cu_nxn_intra, cu_ssd, restore4, satd_lambda_scale, save4, ssd_lambda,
+    sub_wh,
+};
+use crate::hevc::ctu::{
+    PartMode, SplitCuNb, chroma_qp, explicit_weighting, write_cu_skip_flag, write_inter_pred_idc,
+    write_merge_flag, write_merge_idx, write_mvd, write_mvp_flag, write_part_mode_inter,
+    write_part_mode_inter_at, write_pred_mode_flag, write_ref_idx, write_rqt_root_cbf,
+    write_split_cu_flag,
+};
 use crate::hevc::ctx::Contexts;
 use crate::hevc::frame::{Frame, MotionInfo, Mv, Plane16, fill_motion};
 use crate::hevc::inter::{McScratch, Weighting, predict_block};
@@ -401,7 +403,16 @@ type PartsPick = (PartMode, [PuPick; 2], f32);
 
 impl Default for PuPick {
     fn default() -> Self {
-        PuPick { merge_idx: None, idc: 0, mvd: [Mv::ZERO; 2], mvp_flag: [0; 2], mv: [Mv::ZERO; 2], ref_idx: [0, -1], satd: 0, cost: 0.0 }
+        PuPick {
+            merge_idx: None,
+            idc: 0,
+            mvd: [Mv::ZERO; 2],
+            mvp_flag: [0; 2],
+            mv: [Mv::ZERO; 2],
+            ref_idx: [0, -1],
+            satd: 0,
+            cost: 0.0,
+        }
     }
 }
 
@@ -684,12 +695,19 @@ impl<S: Sample> InterPicture<S> {
     /// applies to everything it writes. Fixed geometry as in the intra
     /// module: whole CTUs, 4:2:0, `log2_cu` 4 or 5.
     pub fn new(sps: &Sps, pps: &Pps, cur_poc: i32) -> Self {
-        assert!((4..=5).contains(&sps.log2_ctb_size), "log2_ctb {} outside 4..=5", sps.log2_ctb_size);
+        assert!(
+            (4..=5).contains(&sps.log2_ctb_size),
+            "log2_ctb {} outside 4..=5",
+            sps.log2_ctb_size
+        );
         let (w, h) = (sps.width as usize, sps.height as usize);
         // Whole minimum coding blocks; edge CTBs may be partial (see
         // `tree_node`).
         let m = 1usize << MIN_CB_LOG2;
-        assert!(w.is_multiple_of(m) && h.is_multiple_of(m), "{w}x{h} is not a whole number of {m}x{m} coding blocks");
+        assert!(
+            w.is_multiple_of(m) && h.is_multiple_of(m),
+            "{w}x{h} is not a whole number of {m}x{m} coding blocks"
+        );
         let geo = std::sync::Arc::new(Geometry::new(sps, pps));
         let info = PicInfo::new(geo);
         // The reconstruction is built in the SPS's own chroma format, and
@@ -738,12 +756,22 @@ impl<S: Sample> InterPicture<S> {
     /// prediction uses, `[0, -1]`, `[-1, 0]` and `[0, 0]` — and, for each
     /// list whose luma entry is not the default, the plane its full-sample
     /// search scores against ([`Self::search_b`]).
-    pub fn set_b_weights(&mut self, t: &PredWeightTable, bit_depth_luma: u32, bit_depth_chroma: u32, ref0: &Frame<S>, ref1: &Frame<S>) {
-        self.wp_b = [[0, -1], [-1, 0], [0, 0]].map(|r| explicit_weighting(t, bit_depth_luma, bit_depth_chroma, r));
+    pub fn set_b_weights(
+        &mut self,
+        t: &PredWeightTable,
+        bit_depth_luma: u32,
+        bit_depth_chroma: u32,
+        ref0: &Frame<S>,
+        ref1: &Frame<S>,
+    ) {
+        self.wp_b = [[0, -1], [-1, 0], [0, 0]]
+            .map(|r| explicit_weighting(t, bit_depth_luma, bit_depth_chroma, r));
         for (list, rf) in [ref0, ref1].into_iter().enumerate() {
             let (w, o) = t.lists[list][0].luma;
             self.search_b[list] = match self.wp_b[list][0] {
-                Weighting::Explicit { log2_wd, .. } if (w, o) != (1 << t.luma_log2_denom, 0) => Some(weighted_search_plane(&rf.y, bit_depth_luma, log2_wd, w, o)),
+                Weighting::Explicit { log2_wd, .. } if (w, o) != (1 << t.luma_log2_denom, 0) => {
+                    Some(weighted_search_plane(&rf.y, bit_depth_luma, log2_wd, w, o))
+                }
                 _ => None,
             };
         }
@@ -835,7 +863,19 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
     ) -> InterCuDecision {
         let n = 1usize << self.log2_ctb;
-        self.code_cu(ctx, refs_l0, cu_x * n, cu_y * n, self.log2_ctb, 0, src_y, y_stride, src_cb, src_cr, c_stride)
+        self.code_cu(
+            ctx,
+            refs_l0,
+            cu_x * n,
+            cu_y * n,
+            self.log2_ctb,
+            0,
+            src_y,
+            y_stride,
+            src_cb,
+            src_cr,
+            c_stride,
+        )
     }
 
     /// [`Self::code_ctu`] for one coding unit of `1 << log2_cu` at luma
@@ -861,7 +901,12 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
     ) -> InterCuDecision {
         let n = 1usize << log2_cu;
-        let out = InterCuDecision { log2_cu, bypass: ctx.bypass, qp_y: ctx.qp, ..InterCuDecision::default() };
+        let out = InterCuDecision {
+            log2_cu,
+            bypass: ctx.bypass,
+            qp_y: ctx.qp,
+            ..InterCuDecision::default()
+        };
 
         // Mark the CTB as this (single) slice's, as the decoder does at CTB
         // start: `avail_ctx` reads the current CTB's slice address, and
@@ -884,12 +929,49 @@ impl<S: Sample> InterPicture<S> {
         let lam = lambda(ctx.qp) * satd_lambda_scale(ctx.bit_depth);
         let rate = Rate::new_at(ctx.qp, false, log2_cu, depth);
         let pick = self.pick_pu(ctx, refs_l0, &pu, src_y, y_stride, &rate, lam);
-        let parts = self.pick_parts(ctx, TreeRefs::P(refs_l0), x0, y0, log2_cu, src_y, y_stride, &rate, lam);
+        let parts = self.pick_parts(
+            ctx,
+            TreeRefs::P(refs_l0),
+            x0,
+            y0,
+            log2_cu,
+            src_y,
+            y_stride,
+            &rate,
+            lam,
+        );
         self.alts = Some((pick, parts));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
-            return self.code_parts(ctx, TreeRefs::P(refs_l0), out, part, pus, x0, y0, log2_cu, src_y, y_stride, src_cb, src_cr, c_stride);
+            return self.code_parts(
+                ctx,
+                TreeRefs::P(refs_l0),
+                out,
+                part,
+                pus,
+                x0,
+                y0,
+                log2_cu,
+                src_y,
+                y_stride,
+                src_cb,
+                src_cr,
+                c_stride,
+            );
         }
-        self.code_whole(ctx, TreeRefs::P(refs_l0), out, pick, x0, y0, log2_cu, src_y, y_stride, src_cb, src_cr, c_stride)
+        self.code_whole(
+            ctx,
+            TreeRefs::P(refs_l0),
+            out,
+            pick,
+            x0,
+            y0,
+            log2_cu,
+            src_y,
+            y_stride,
+            src_cb,
+            src_cr,
+            c_stride,
+        )
     }
 
     /// The motion decision for one prediction unit `pu` of a P CU: the
@@ -899,7 +981,16 @@ impl<S: Sample> InterPicture<S> {
     /// the CU's own rectangle. Reads the decoder-grade state the walk
     /// maintains and writes none of it.
     #[allow(clippy::too_many_arguments)]
-    fn pick_pu(&mut self, ctx: &MeCtx<'_, S>, refs_l0: &[&Frame<S>], pu: &PuPos, src_y: &[S], y_stride: usize, rate: &Rate, lam: f32) -> PuPick {
+    fn pick_pu(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refs_l0: &[&Frame<S>],
+        pu: &PuPos,
+        src_y: &[S],
+        y_stride: usize,
+        rate: &Rate,
+        lam: f32,
+    ) -> PuPick {
         let (x0, y0) = (pu.x_pb as usize, pu.y_pb as usize);
         let wh = (pu.w as usize, pu.h as usize);
         let whole = pu.w == pu.n_cb && pu.h == pu.n_cb;
@@ -911,9 +1002,16 @@ impl<S: Sample> InterPicture<S> {
         // scales a neighbour's vector by the POC-distance ratio between
         // its reference and this one — so they are derived per
         // reference by calling `amvp` once for each.
-        let merge: Vec<Cand> = (0..MAX_MERGE_CAND).map(|i| merge_candidate(&self.info, &self.recon, &refs, pu, i)).collect();
+        let merge: Vec<Cand> = (0..MAX_MERGE_CAND)
+            .map(|i| merge_candidate(&self.info, &self.recon, &refs, pu, i))
+            .collect();
         let mvp: Vec<[Mv; 2]> = (0..refs_l0.len())
-            .map(|r| [amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 0), amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 1)])
+            .map(|r| {
+                [
+                    amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 0),
+                    amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 1),
+                ]
+            })
             .collect();
 
         let src = &src_y[y0 * y_stride + x0..];
@@ -942,7 +1040,12 @@ impl<S: Sample> InterPicture<S> {
         let mut per_ref: Vec<(Mv, u32)> = Vec::with_capacity(refs_l0.len());
         for (r, rf) in refs_l0.iter().enumerate() {
             let mut seeds: Vec<Mv> = vec![Mv::ZERO, mvp[r][0], mvp[r][1]];
-            seeds.extend(merge.iter().filter(|c| c.ref_idx[0] == r as i8).map(|c| c.mv[0]));
+            seeds.extend(
+                merge
+                    .iter()
+                    .filter(|c| c.ref_idx[0] == r as i8)
+                    .map(|c| c.mv[0]),
+            );
             let full = self.search_full(ctx, &rf.y, x0, y0, wh, src, y_stride, &seeds);
             let wp = self.wp_for(r)[0];
             per_ref.push(self.refine_subpel(ctx, &rf.y, wp, 0, x0, y0, wh, src, y_stride, full));
@@ -961,7 +1064,17 @@ impl<S: Sample> InterPicture<S> {
                 continue;
             }
             seen.push((cand.mv[0], ri));
-            let satd = self.satd_at(ctx, &refs_l0[ri as usize].y, ri as usize, x0, y0, wh, src, y_stride, cand.mv[0]);
+            let satd = self.satd_at(
+                ctx,
+                &refs_l0[ri as usize].y,
+                ri as usize,
+                x0,
+                y0,
+                wh,
+                src,
+                y_stride,
+                cand.mv[0],
+            );
             // cu_skip_flag or merge_flag, plus the TR-coded index.
             // Skip and merge differ in signalling, and a zero-residual
             // candidate becomes a skip, so price each at the shape it
@@ -971,7 +1084,15 @@ impl<S: Sample> InterPicture<S> {
             let bits = if whole {
                 rate.skip(idx as u8).min(rate.merge(idx as u8))
             } else {
-                rate.pu(&PuPick { merge_idx: Some(idx as u8), ..PuPick::default() }, false, pu, nref)
+                rate.pu(
+                    &PuPick {
+                        merge_idx: Some(idx as u8),
+                        ..PuPick::default()
+                    },
+                    false,
+                    pu,
+                    nref,
+                )
             };
             let cost = satd as f32 + lam * bits;
             if cost < best_merge_cost {
@@ -994,12 +1115,26 @@ impl<S: Sample> InterPicture<S> {
                 if whole {
                     rate.amvp_ref(d, flag, true, nref, r as u32)
                 } else {
-                    rate.pu(&PuPick { mvd: [d, Mv::ZERO], mvp_flag: [flag, 0], ref_idx: [r as i8, -1], ..PuPick::default() }, false, pu, nref)
+                    rate.pu(
+                        &PuPick {
+                            mvd: [d, Mv::ZERO],
+                            mvp_flag: [flag, 0],
+                            ref_idx: [r as i8, -1],
+                            ..PuPick::default()
+                        },
+                        false,
+                        pu,
+                        nref,
+                    )
                 }
             };
             let c0 = price(d0, 0);
             let c1 = price(d1, 1);
-            let (flag, mvd, bits) = if c1 < c0 { (1u8, d1, c1) } else { (0u8, d0, c0) };
+            let (flag, mvd, bits) = if c1 < c0 {
+                (1u8, d1, c1)
+            } else {
+                (0u8, d0, c0)
+            };
             // merge_flag 0, ref_idx, mvp_l0_flag, rqt_root_cbf, plus the
             // mvd bins (cu_skip_flag and pred_mode/part_mode surround
             // both shapes).
@@ -1079,7 +1214,20 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
     ) -> InterCuDecision {
         let n = 1usize << self.log2_ctb;
-        self.code_cu_b(ctx, ref0, ref1, cu_x * n, cu_y * n, self.log2_ctb, 0, src_y, y_stride, src_cb, src_cr, c_stride)
+        self.code_cu_b(
+            ctx,
+            ref0,
+            ref1,
+            cu_x * n,
+            cu_y * n,
+            self.log2_ctb,
+            0,
+            src_y,
+            y_stride,
+            src_cb,
+            src_cr,
+            c_stride,
+        )
     }
 
     /// [`Self::code_ctu_b`] for one coding unit of `1 << log2_cu` at luma
@@ -1102,7 +1250,12 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
     ) -> InterCuDecision {
         let n = 1usize << log2_cu;
-        let out = InterCuDecision { log2_cu, bypass: ctx.bypass, qp_y: ctx.qp, ..InterCuDecision::default() };
+        let out = InterCuDecision {
+            log2_cu,
+            bypass: ctx.bypass,
+            qp_y: ctx.qp,
+            ..InterCuDecision::default()
+        };
 
         let ctb = self.info.ctb_of(x0, y0);
         self.info.ctb_slice_addr[ctb] = 0;
@@ -1121,12 +1274,49 @@ impl<S: Sample> InterPicture<S> {
         let lam = lambda(ctx.qp) * satd_lambda_scale(ctx.bit_depth);
         let rate = Rate::new_at(ctx.qp, true, log2_cu, depth);
         let pick = self.pick_pu_b(ctx, ref0, ref1, &pu, src_y, y_stride, &rate, lam);
-        let parts = self.pick_parts(ctx, TreeRefs::B(ref0, ref1), x0, y0, log2_cu, src_y, y_stride, &rate, lam);
+        let parts = self.pick_parts(
+            ctx,
+            TreeRefs::B(ref0, ref1),
+            x0,
+            y0,
+            log2_cu,
+            src_y,
+            y_stride,
+            &rate,
+            lam,
+        );
         self.alts = Some((pick, parts));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
-            return self.code_parts(ctx, TreeRefs::B(ref0, ref1), out, part, pus, x0, y0, log2_cu, src_y, y_stride, src_cb, src_cr, c_stride);
+            return self.code_parts(
+                ctx,
+                TreeRefs::B(ref0, ref1),
+                out,
+                part,
+                pus,
+                x0,
+                y0,
+                log2_cu,
+                src_y,
+                y_stride,
+                src_cb,
+                src_cr,
+                c_stride,
+            );
         }
-        self.code_whole(ctx, TreeRefs::B(ref0, ref1), out, pick, x0, y0, log2_cu, src_y, y_stride, src_cb, src_cr, c_stride)
+        self.code_whole(
+            ctx,
+            TreeRefs::B(ref0, ref1),
+            out,
+            pick,
+            x0,
+            y0,
+            log2_cu,
+            src_y,
+            y_stride,
+            src_cb,
+            src_cr,
+            c_stride,
+        )
     }
 
     /// [`Self::pick_pu`] for one prediction unit of a B CU: merge over the
@@ -1135,15 +1325,33 @@ impl<S: Sample> InterPicture<S> {
     /// both, each list searched on its own and the bi trial scored at the
     /// two winners. Writes no decoder-grade state either.
     #[allow(clippy::too_many_arguments)]
-    fn pick_pu_b(&mut self, ctx: &MeCtx<'_, S>, ref0: &Frame<S>, ref1: &Frame<S>, pu: &PuPos, src_y: &[S], y_stride: usize, rate: &Rate, lam: f32) -> PuPick {
+    fn pick_pu_b(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        ref0: &Frame<S>,
+        ref1: &Frame<S>,
+        pu: &PuPos,
+        src_y: &[S],
+        y_stride: usize,
+        rate: &Rate,
+        lam: f32,
+    ) -> PuPick {
         let (x0, y0) = (pu.x_pb as usize, pu.y_pb as usize);
         let wh = (pu.w as usize, pu.h as usize);
         let whole = pu.w == pu.n_cb && pu.h == pu.n_cb;
         let refs = self.ref_ctx_b(ref0.poc, ref1.poc);
-        let merge: Vec<Cand> = (0..MAX_MERGE_CAND).map(|i| merge_candidate(&self.info, &self.recon, &refs, pu, i)).collect();
+        let merge: Vec<Cand> = (0..MAX_MERGE_CAND)
+            .map(|i| merge_candidate(&self.info, &self.recon, &refs, pu, i))
+            .collect();
         let mvp: [[Mv; 2]; 2] = [
-            [amvp(&self.info, &self.recon, &refs, pu, 0, 0, 0), amvp(&self.info, &self.recon, &refs, pu, 0, 0, 1)],
-            [amvp(&self.info, &self.recon, &refs, pu, 1, 0, 0), amvp(&self.info, &self.recon, &refs, pu, 1, 0, 1)],
+            [
+                amvp(&self.info, &self.recon, &refs, pu, 0, 0, 0),
+                amvp(&self.info, &self.recon, &refs, pu, 0, 0, 1),
+            ],
+            [
+                amvp(&self.info, &self.recon, &refs, pu, 1, 0, 0),
+                amvp(&self.info, &self.recon, &refs, pu, 1, 0, 1),
+            ],
         ];
 
         let src = &src_y[y0 * y_stride + x0..];
@@ -1154,18 +1362,31 @@ impl<S: Sample> InterPicture<S> {
         for list in 0..2usize {
             let plane = if list == 0 { &ref0.y } else { &ref1.y };
             let mut seeds: Vec<Mv> = vec![Mv::ZERO, mvp[list][0], mvp[list][1]];
-            seeds.extend(merge.iter().filter(|c| c.ref_idx[list] == 0).map(|c| c.mv[list]));
+            seeds.extend(
+                merge
+                    .iter()
+                    .filter(|c| c.ref_idx[list] == 0)
+                    .map(|c| c.mv[list]),
+            );
             // Whole samples are searched on the weighted reference where the
             // list is weighted (`search_b`), the sub-sample rings below on
             // the reference itself under the weighted scoring.
-            let full = self.search_full(ctx, self.search_b[list].as_ref().unwrap_or(plane), x0, y0, wh, src, y_stride, &seeds);
+            let full = self.search_full(
+                ctx,
+                self.search_b[list].as_ref().unwrap_or(plane),
+                x0,
+                y0,
+                wh,
+                src,
+                y_stride,
+                &seeds,
+            );
             // Scored under the weighting a one-list prediction from this
             // list carries, so the vector is chosen for the prediction
             // that will be made.
             let wp = self.wp_b[list][0];
             uni[list] = self.refine_subpel(ctx, plane, wp, list, x0, y0, wh, src, y_stride, full);
         }
-
 
         // The three AMVP shapes. `inter_pred_idc` costs two bins for a uni
         // shape and one for BI (the reader stops after a set first bin),
@@ -1178,7 +1399,17 @@ impl<S: Sample> InterPicture<S> {
             if whole {
                 rate.amvp_b(idc, mvd, fl, true)
             } else {
-                rate.pu(&PuPick { idc, mvd, mvp_flag: fl, ..PuPick::default() }, true, pu, 1)
+                rate.pu(
+                    &PuPick {
+                        idc,
+                        mvd,
+                        mvp_flag: fl,
+                        ..PuPick::default()
+                    },
+                    true,
+                    pu,
+                    1,
+                )
             }
         };
         let mut best_mvd = [Mv::ZERO; 2];
@@ -1217,7 +1448,23 @@ impl<S: Sample> InterPicture<S> {
         // unit, which the reader gives no PRED_BI spelling (its
         // `inter_pred_idc` codes one bin, L0 or L1, where `w + h == 12`).
         let bi_ok = pu.w + pu.h != 12;
-        let bi_satd = if bi_ok { self.satd_bi_at(ctx, &ref0.y, &ref1.y, x0, y0, wh, src, y_stride, uni[0].0, uni[1].0, self.wp_b[2][0]) } else { u32::MAX };
+        let bi_satd = if bi_ok {
+            self.satd_bi_at(
+                ctx,
+                &ref0.y,
+                &ref1.y,
+                x0,
+                y0,
+                wh,
+                src,
+                y_stride,
+                uni[0].0,
+                uni[1].0,
+                self.wp_b[2][0],
+            )
+        } else {
+            u32::MAX
+        };
         if bi_ok {
             let bits = amvp_bits(2, best_mvd, best_flag);
             let cost = bi_satd as f32 + lam * bits;
@@ -1240,15 +1487,57 @@ impl<S: Sample> InterPicture<S> {
             }
             seen.push(key);
             let satd = match (cand.ref_idx[0] >= 0, cand.ref_idx[1] >= 0) {
-                (true, true) => self.satd_bi_at(ctx, &ref0.y, &ref1.y, x0, y0, wh, src, y_stride, cand.mv[0], cand.mv[1], self.wp_b[2][0]),
-                (true, false) => self.satd_at_weighted(ctx, &ref0.y, x0, y0, wh, src, y_stride, cand.mv[0], self.wp_b[0][0], 0),
-                (false, true) => self.satd_at_weighted(ctx, &ref1.y, x0, y0, wh, src, y_stride, cand.mv[1], self.wp_b[1][0], 1),
+                (true, true) => self.satd_bi_at(
+                    ctx,
+                    &ref0.y,
+                    &ref1.y,
+                    x0,
+                    y0,
+                    wh,
+                    src,
+                    y_stride,
+                    cand.mv[0],
+                    cand.mv[1],
+                    self.wp_b[2][0],
+                ),
+                (true, false) => self.satd_at_weighted(
+                    ctx,
+                    &ref0.y,
+                    x0,
+                    y0,
+                    wh,
+                    src,
+                    y_stride,
+                    cand.mv[0],
+                    self.wp_b[0][0],
+                    0,
+                ),
+                (false, true) => self.satd_at_weighted(
+                    ctx,
+                    &ref1.y,
+                    x0,
+                    y0,
+                    wh,
+                    src,
+                    y_stride,
+                    cand.mv[1],
+                    self.wp_b[1][0],
+                    1,
+                ),
                 (false, false) => unreachable!("filtered above"),
             };
             let bits = if whole {
                 rate.skip(idx as u8).min(rate.merge(idx as u8))
             } else {
-                rate.pu(&PuPick { merge_idx: Some(idx as u8), ..PuPick::default() }, true, pu, 1)
+                rate.pu(
+                    &PuPick {
+                        merge_idx: Some(idx as u8),
+                        ..PuPick::default()
+                    },
+                    true,
+                    pu,
+                    1,
+                )
             };
             let cost = satd as f32 + lam * bits;
             if cost < best_merge_cost {
@@ -1281,7 +1570,10 @@ impl<S: Sample> InterPicture<S> {
                     idc: best_idc,
                     mvd: best_mvd,
                     mvp_flag: best_flag,
-                    mv: [if r[0] >= 0 { uni[0].0 } else { Mv::ZERO }, if r[1] >= 0 { uni[1].0 } else { Mv::ZERO }],
+                    mv: [
+                        if r[0] >= 0 { uni[0].0 } else { Mv::ZERO },
+                        if r[1] >= 0 { uni[1].0 } else { Mv::ZERO },
+                    ],
                     ref_idx: r,
                     satd: amvp_satd,
                     cost: best_cost,
@@ -1328,7 +1620,15 @@ impl<S: Sample> InterPicture<S> {
             out.kind = InterCuKind::UseIntra;
             // An intra CU's motion, stored now so later candidate
             // derivations see what the decoder will see.
-            fill_motion(&mut self.recon.motion, self.recon.w4, x0, y0, n, n, MotionInfo::INTRA);
+            fill_motion(
+                &mut self.recon.motion,
+                self.recon.w4,
+                x0,
+                y0,
+                n,
+                n,
+                MotionInfo::INTRA,
+            );
             PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 1);
             // `coding_unit` records `cu_skip_flag` for every CU before it
             // knows the pred mode (ctu.rs:419), and the *next* CU's
@@ -1344,28 +1644,67 @@ impl<S: Sample> InterPicture<S> {
             TreeRefs::P(l0) => {
                 let r = pick.ref_idx[0] as usize;
                 let wp = self.wp_for(r);
-                predict_block(ctx.dsp, &mut self.scratch, &mut self.recon, x0, y0, n, n, Some((l0[r], pick.mv[0])), None, wp);
+                predict_block(
+                    ctx.dsp,
+                    &mut self.scratch,
+                    &mut self.recon,
+                    x0,
+                    y0,
+                    n,
+                    n,
+                    Some((l0[r], pick.mv[0])),
+                    None,
+                    wp,
+                );
             }
             TreeRefs::B(r0, r1) => {
                 let a = (pick.ref_idx[0] >= 0).then_some((r0, pick.mv[0]));
                 let b = (pick.ref_idx[1] >= 0).then_some((r1, pick.mv[1]));
                 let wp = self.wp_b_for(pick.ref_idx);
-                predict_block(ctx.dsp, &mut self.scratch, &mut self.recon, x0, y0, n, n, a, b, wp);
+                predict_block(
+                    ctx.dsp,
+                    &mut self.scratch,
+                    &mut self.recon,
+                    x0,
+                    y0,
+                    n,
+                    n,
+                    a,
+                    b,
+                    wp,
+                );
             }
         }
 
-        let any = self.code_residual_cu(ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out);
+        let any = self.code_residual_cu(
+            ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out,
+        );
         out.kind = match (pick.merge_idx, any, refs) {
             (Some(merge_idx), false, _) => InterCuKind::Skip { merge_idx },
             (Some(merge_idx), true, _) => InterCuKind::Merge { merge_idx },
-            (None, _, TreeRefs::P(_)) => InterCuKind::Amvp { mvp_flag: pick.mvp_flag[0], mvd: pick.mvd[0] },
-            (None, _, TreeRefs::B(..)) => InterCuKind::BAmvp { idc: pick.idc, mvd: pick.mvd, mvp_flag: pick.mvp_flag },
+            (None, _, TreeRefs::P(_)) => InterCuKind::Amvp {
+                mvp_flag: pick.mvp_flag[0],
+                mvd: pick.mvd[0],
+            },
+            (None, _, TreeRefs::B(..)) => InterCuKind::BAmvp {
+                idc: pick.idc,
+                mvd: pick.mvd,
+                mvp_flag: pick.mvp_flag,
+            },
         };
 
         let mi = self.motion_info(&pick, refs);
         fill_motion(&mut self.recon.motion, self.recon.w4, x0, y0, n, n, mi);
         PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 0);
-        PicInfo::fill4(&mut self.info.skip, w4, x0, y0, n, n, matches!(out.kind, InterCuKind::Skip { .. }) as u8);
+        PicInfo::fill4(
+            &mut self.info.skip,
+            w4,
+            x0,
+            y0,
+            n,
+            n,
+            matches!(out.kind, InterCuKind::Skip { .. }) as u8,
+        );
         out
     }
 
@@ -1409,16 +1748,35 @@ impl<S: Sample> InterPicture<S> {
             let mut picks = [PuPick::default(); 2];
             let mut cost = lam * rate.parts(part);
             for (i, &(px, py, pw, ph)) in part.pus(n as i32).iter().enumerate() {
-                let pu = PuPos { x_cb: x0 as i32, y_cb: y0 as i32, n_cb: n as i32, x_pb: x0 as i32 + px, y_pb: y0 as i32 + py, w: pw, h: ph, part_idx: i as u32 };
+                let pu = PuPos {
+                    x_cb: x0 as i32,
+                    y_cb: y0 as i32,
+                    n_cb: n as i32,
+                    x_pb: x0 as i32 + px,
+                    y_pb: y0 as i32 + py,
+                    w: pw,
+                    h: ph,
+                    part_idx: i as u32,
+                };
                 let pick = match refs {
                     TreeRefs::P(l0) => self.pick_pu(ctx, l0, &pu, src_y, y_stride, rate, lam),
-                    TreeRefs::B(r0, r1) => self.pick_pu_b(ctx, r0, r1, &pu, src_y, y_stride, rate, lam),
+                    TreeRefs::B(r0, r1) => {
+                        self.pick_pu_b(ctx, r0, r1, &pu, src_y, y_stride, rate, lam)
+                    }
                 };
                 cost += pick.cost;
                 picks[i] = pick;
                 if i == 0 {
                     let mi = self.motion_info(&pick, refs);
-                    fill_motion(&mut self.recon.motion, self.recon.w4, pu.x_pb as usize, pu.y_pb as usize, pw as usize, ph as usize, mi);
+                    fill_motion(
+                        &mut self.recon.motion,
+                        self.recon.w4,
+                        pu.x_pb as usize,
+                        pu.y_pb as usize,
+                        pw as usize,
+                        ph as usize,
+                        mi,
+                    );
                 }
             }
             restore4(&mut self.recon.motion, self.recon.w4, x0, y0, n, &motion);
@@ -1435,7 +1793,13 @@ impl<S: Sample> InterPicture<S> {
     /// uses — which is what makes a neighbour's vector scale right in a
     /// later unit's candidate derivation.
     fn motion_info(&self, pick: &PuPick, refs: TreeRefs<'_, S>) -> MotionInfo {
-        let mut mi = MotionInfo { mv: pick.mv, ref_delta: [0; 2], ref_idx: pick.ref_idx, flags: 0, pad: 0 };
+        let mut mi = MotionInfo {
+            mv: pick.mv,
+            ref_delta: [0; 2],
+            ref_idx: pick.ref_idx,
+            flags: 0,
+            pad: 0,
+        };
         for list in 0..2usize {
             if pick.ref_idx[list] >= 0 {
                 let poc = match refs {
@@ -1448,7 +1812,8 @@ impl<S: Sample> InterPicture<S> {
                         }
                     }
                 };
-                mi.ref_delta[list] = (self.cur_poc - poc).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                mi.ref_delta[list] =
+                    (self.cur_poc - poc).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             }
         }
         mi
@@ -1487,10 +1852,24 @@ impl<S: Sample> InterPicture<S> {
         out.ref_idx = pus[0].ref_idx[0];
         out.mv_l1 = pus[0].mv[1];
         out.ref_idx_l1 = pus[0].ref_idx[1];
-        if prefer_intra(ctx, pus[0].satd.saturating_add(pus[1].satd), src, y_stride, n) {
+        if prefer_intra(
+            ctx,
+            pus[0].satd.saturating_add(pus[1].satd),
+            src,
+            y_stride,
+            n,
+        ) {
             out.kind = InterCuKind::UseIntra;
             out.part = PartMode::P2Nx2N;
-            fill_motion(&mut self.recon.motion, self.recon.w4, x0, y0, n, n, MotionInfo::INTRA);
+            fill_motion(
+                &mut self.recon.motion,
+                self.recon.w4,
+                x0,
+                y0,
+                n,
+                n,
+                MotionInfo::INTRA,
+            );
             PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 1);
             PicInfo::fill4(&mut self.info.skip, w4, x0, y0, n, n, 0);
             return out;
@@ -1502,21 +1881,53 @@ impl<S: Sample> InterPicture<S> {
                 TreeRefs::P(l0) => {
                     let r = pk.ref_idx[0] as usize;
                     let wp = self.wp_for(r);
-                    predict_block(ctx.dsp, &mut self.scratch, &mut self.recon, x, y, pw as usize, ph as usize, Some((l0[r], pk.mv[0])), None, wp);
+                    predict_block(
+                        ctx.dsp,
+                        &mut self.scratch,
+                        &mut self.recon,
+                        x,
+                        y,
+                        pw as usize,
+                        ph as usize,
+                        Some((l0[r], pk.mv[0])),
+                        None,
+                        wp,
+                    );
                 }
                 TreeRefs::B(r0, r1) => {
                     let a = (pk.ref_idx[0] >= 0).then_some((r0, pk.mv[0]));
                     let b = (pk.ref_idx[1] >= 0).then_some((r1, pk.mv[1]));
                     let wp = self.wp_b_for(pk.ref_idx);
-                    predict_block(ctx.dsp, &mut self.scratch, &mut self.recon, x, y, pw as usize, ph as usize, a, b, wp);
+                    predict_block(
+                        ctx.dsp,
+                        &mut self.scratch,
+                        &mut self.recon,
+                        x,
+                        y,
+                        pw as usize,
+                        ph as usize,
+                        a,
+                        b,
+                        wp,
+                    );
                 }
             }
         }
-        self.code_residual_cu(ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out);
+        self.code_residual_cu(
+            ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out,
+        );
         out.kind = InterCuKind::Parts;
         for (pk, &(px, py, pw, ph)) in pus.iter().zip(rects.iter()) {
             let mi = self.motion_info(pk, refs);
-            fill_motion(&mut self.recon.motion, self.recon.w4, x0 + px as usize, y0 + py as usize, pw as usize, ph as usize, mi);
+            fill_motion(
+                &mut self.recon.motion,
+                self.recon.w4,
+                x0 + px as usize,
+                y0 + py as usize,
+                pw as usize,
+                ph as usize,
+                mi,
+            );
         }
         PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 0);
         PicInfo::fill4(&mut self.info.skip, w4, x0, y0, n, n, 0);
@@ -1549,7 +1960,17 @@ impl<S: Sample> InterPicture<S> {
         out: &mut InterCuDecision,
     ) -> bool {
         let qp_l = ctx.qp + 6 * (ctx.bit_depth as i32 - 8);
-        let nz_l = code_residual_inter(ctx, &mut self.recon.y, x0, y0, log2_cu, qp_l, src, y_stride, &mut out.luma);
+        let nz_l = code_residual_inter(
+            ctx,
+            &mut self.recon.y,
+            x0,
+            y0,
+            log2_cu,
+            qp_l,
+            src,
+            y_stride,
+            &mut out.luma,
+        );
         let mut nz_c = 0u32;
         if self.cat != 0 {
             // QpC: Table 8-10 for 4:2:0, `Min(qPi, 51)` otherwise — the
@@ -1568,13 +1989,27 @@ impl<S: Sample> InterPicture<S> {
             let (tbs, ntb, log2c) = chroma_tbs(self.cat, x0, y0, log2_cu);
             let nc2 = 1usize << (2 * log2c);
             for comp in 0..2usize {
-                let plane = if comp == 0 { &mut self.recon.cb } else { &mut self.recon.cr };
+                let plane = if comp == 0 {
+                    &mut self.recon.cb
+                } else {
+                    &mut self.recon.cr
+                };
                 let srcp = if comp == 0 { src_cb } else { src_cr };
                 for (t, &(ax, ay)) in tbs[..ntb].iter().enumerate() {
                     let (px, py) = (ax / sw, ay / sh);
                     let soff = py * c_stride + px;
                     let levels = &mut out.chroma[comp][t * nc2..(t + 1) * nc2];
-                    let nz = code_residual_inter(ctx, plane, px, py, log2c, qp_c, &srcp[soff..], c_stride, levels);
+                    let nz = code_residual_inter(
+                        ctx,
+                        plane,
+                        px,
+                        py,
+                        log2c,
+                        qp_c,
+                        &srcp[soff..],
+                        c_stride,
+                        levels,
+                    );
                     if t == 0 {
                         out.cbf_chroma[comp] = nz != 0;
                     } else {
@@ -1635,7 +2070,17 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
     ) -> CuDecision {
         let n = 1usize << self.log2_ctb;
-        self.code_cu_intra(ctx, cu_x * n, cu_y * n, self.log2_ctb, src_y, y_stride, src_cb, src_cr, c_stride)
+        self.code_cu_intra(
+            ctx,
+            cu_x * n,
+            cu_y * n,
+            self.log2_ctb,
+            src_y,
+            y_stride,
+            src_cb,
+            src_cr,
+            c_stride,
+        )
     }
 
     /// [`Self::code_ctu_intra`] for one coding unit of `1 << log2_cu` at
@@ -1656,7 +2101,11 @@ impl<S: Sample> InterPicture<S> {
     ) -> CuDecision {
         // Split the borrows: the mode grid is written, the pred-mode grid
         // is read, and both live in `info` beside each other.
-        let PicInfo { intra_mode, pred_mode, .. } = &mut self.info;
+        let PicInfo {
+            intra_mode,
+            pred_mode,
+            ..
+        } = &mut self.info;
         let (intra_mode, pred_mode) = (&mut intra_mode[..], &pred_mode[..]);
         code_cu_2nx2n_intra(
             ctx,
@@ -1705,7 +2154,18 @@ impl<S: Sample> InterPicture<S> {
     ) -> Vec<TreeCu<PCuDecision>> {
         let log2 = self.log2_ctb;
         let mut out = Vec::new();
-        self.tree_node(ctx, want, max_depth, refs, cu_x << log2, cu_y << log2, log2, 0, src, &mut out);
+        self.tree_node(
+            ctx,
+            want,
+            max_depth,
+            refs,
+            cu_x << log2,
+            cu_y << log2,
+            log2,
+            0,
+            src,
+            &mut out,
+        );
         out
     }
 
@@ -1734,21 +2194,47 @@ impl<S: Sample> InterPicture<S> {
             for i in 0..4 {
                 let (x, y) = (x0 + (i & 1) * half, y0 + (i >> 1) * half);
                 if x < self.geo.width && y < self.geo.height {
-                    j += self.tree_node(ctx, want, max_depth, refs, x, y, log2 - 1, depth + 1, src, out);
+                    j += self.tree_node(
+                        ctx,
+                        want,
+                        max_depth,
+                        refs,
+                        x,
+                        y,
+                        log2 - 1,
+                        depth + 1,
+                        src,
+                        out,
+                    );
                 }
             }
             return j;
         }
         let qp = want(x0, y0, log2);
         let cctx = IntraCtx { qp, ..*ctx };
-        let init = if matches!(refs, TreeRefs::B(..)) { 2 } else { 1 };
+        let init = if matches!(refs, TreeRefs::B(..)) {
+            2
+        } else {
+            1
+        };
         let lam = ssd_lambda(qp, ctx.bit_depth);
         let (d, ssd, unit_bits) = self.tree_leaf(&cctx, refs, x0, y0, log2, depth, src);
-        let flag = if log2 > MIN_CB_LOG2 { crate::encode::h265::split_flag_bits(init, qp, false) } else { 0.0 };
+        let flag = if log2 > MIN_CB_LOG2 {
+            crate::encode::h265::split_flag_bits(init, qp, false)
+        } else {
+            0.0
+        };
         let bits = unit_bits + flag;
         let j_whole = ssd as f64 + lam * f64::from(bits);
         if depth >= max_depth || log2 <= MIN_CB_LOG2 {
-            out.push(TreeCu { x0, y0, log2, depth, bits, d });
+            out.push(TreeCu {
+                x0,
+                y0,
+                log2,
+                depth,
+                bits,
+                d,
+            });
             return j_whole;
         }
         let n = 1usize << log2;
@@ -1760,12 +2246,30 @@ impl<S: Sample> InterPicture<S> {
             if j_split > j_whole {
                 break;
             }
-            j_split += self.tree_node(ctx, want, max_depth, refs, x0 + (i & 1) * half, y0 + (i >> 1) * half, log2 - 1, depth + 1, src, out);
+            j_split += self.tree_node(
+                ctx,
+                want,
+                max_depth,
+                refs,
+                x0 + (i & 1) * half,
+                y0 + (i >> 1) * half,
+                log2 - 1,
+                depth + 1,
+                src,
+                out,
+            );
         }
         if j_whole <= j_split {
             saved.put(self, x0, y0, n);
             out.truncate(mark);
-            out.push(TreeCu { x0, y0, log2, depth, bits, d });
+            out.push(TreeCu {
+                x0,
+                y0,
+                log2,
+                depth,
+                bits,
+                d,
+            });
             j_whole
         } else {
             j_split
@@ -1788,40 +2292,124 @@ impl<S: Sample> InterPicture<S> {
         src: &Srcs<'_, S>,
     ) -> (PCuDecision, u64, f32) {
         let (d, nref, is_b) = match refs {
-            TreeRefs::P(l0) => {
-                (self.code_cu(ctx, l0, x0, y0, log2, depth, src.y, src.y_stride, src.cb, src.cr, src.c_stride), l0.len() as u32, false)
-            }
-            TreeRefs::B(r0, r1) => (self.code_cu_b(ctx, r0, r1, x0, y0, log2, depth, src.y, src.y_stride, src.cb, src.cr, src.c_stride), 1, true),
+            TreeRefs::P(l0) => (
+                self.code_cu(
+                    ctx,
+                    l0,
+                    x0,
+                    y0,
+                    log2,
+                    depth,
+                    src.y,
+                    src.y_stride,
+                    src.cb,
+                    src.cr,
+                    src.c_stride,
+                ),
+                l0.len() as u32,
+                false,
+            ),
+            TreeRefs::B(r0, r1) => (
+                self.code_cu_b(
+                    ctx,
+                    r0,
+                    r1,
+                    x0,
+                    y0,
+                    log2,
+                    depth,
+                    src.y,
+                    src.y_stride,
+                    src.cb,
+                    src.cr,
+                    src.c_stride,
+                ),
+                1,
+                true,
+            ),
         };
         let coded = if matches!(d.kind, InterCuKind::UseIntra) {
-            PCuDecision::Intra(Box::new(self.code_cu_intra(ctx, x0, y0, log2, src.y, src.y_stride, src.cb, src.cr, src.c_stride)))
+            PCuDecision::Intra(Box::new(self.code_cu_intra(
+                ctx,
+                x0,
+                y0,
+                log2,
+                src.y,
+                src.y_stride,
+                src.cb,
+                src.cr,
+                src.c_stride,
+            )))
         } else {
             PCuDecision::Inter(d)
         };
         let n = 1usize << log2;
         let ssd = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
-        let bits = crate::encode::h265::p_cu_bits(&coded, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth);
+        let bits =
+            crate::encode::h265::p_cu_bits(&coded, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth);
         // A 2Nx2N unit and a partitioned shape were chosen between in SATD
         // plus bits (`code_cu`); when the loser came close, code it too and
         // keep the cheaper in SSD plus lambda times the CU's bits, the
         // loser's state put back from a copy. See `PARTS_RD_MARGIN`.
-        if let (Some((whole, Some((part, pus, parts_cost)))), PCuDecision::Inter(d)) = (self.alts.take(), &coded) {
+        if let (Some((whole, Some((part, pus, parts_cost)))), PCuDecision::Inter(d)) =
+            (self.alts.take(), &coded)
+        {
             let chose_parts = d.kind == InterCuKind::Parts;
-            let (mine, other) = if chose_parts { (parts_cost, whole.cost) } else { (whole.cost, parts_cost) };
+            let (mine, other) = if chose_parts {
+                (parts_cost, whole.cost)
+            } else {
+                (whole.cost, parts_cost)
+            };
             if other <= mine * (1.0 + PARTS_RD_MARGIN) {
                 let saved = TrialSave::take(self, x0, y0, n);
-                let out = InterCuDecision { log2_cu: log2, bypass: ctx.bypass, qp_y: ctx.qp, ..InterCuDecision::default() };
+                let out = InterCuDecision {
+                    log2_cu: log2,
+                    bypass: ctx.bypass,
+                    qp_y: ctx.qp,
+                    ..InterCuDecision::default()
+                };
                 let alt = if chose_parts {
-                    self.code_whole(ctx, refs, out, whole, x0, y0, log2, src.y, src.y_stride, src.cb, src.cr, src.c_stride)
+                    self.code_whole(
+                        ctx,
+                        refs,
+                        out,
+                        whole,
+                        x0,
+                        y0,
+                        log2,
+                        src.y,
+                        src.y_stride,
+                        src.cb,
+                        src.cr,
+                        src.c_stride,
+                    )
                 } else {
-                    self.code_parts(ctx, refs, out, part, pus, x0, y0, log2, src.y, src.y_stride, src.cb, src.cr, src.c_stride)
+                    self.code_parts(
+                        ctx,
+                        refs,
+                        out,
+                        part,
+                        pus,
+                        x0,
+                        y0,
+                        log2,
+                        src.y,
+                        src.y_stride,
+                        src.cb,
+                        src.cr,
+                        src.c_stride,
+                    )
                 };
                 if alt.kind != InterCuKind::UseIntra {
                     let alt = PCuDecision::Inter(alt);
                     let ssd_a = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
-                    let bits_a = crate::encode::h265::p_cu_bits(&alt, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth);
+                    let bits_a = crate::encode::h265::p_cu_bits(
+                        &alt, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
+                    );
                     let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
-                    if (ssd_a as f64) + lam * f64::from(bits_a) < (ssd as f64) + lam * f64::from(bits) {
+                    if (ssd_a as f64) + lam * f64::from(bits_a)
+                        < (ssd as f64) + lam * f64::from(bits)
+                    {
                         return (alt, ssd_a, bits_a);
                     }
                 }
@@ -1833,9 +2421,20 @@ impl<S: Sample> InterPicture<S> {
         // loser's state put back from a copy.
         if log2 == MIN_CB_LOG2 && matches!(coded, PCuDecision::Intra(_)) {
             let saved = TrialSave::take(self, x0, y0, n);
-            let nxn = PCuDecision::Intra(Box::new(self.code_cu_intra_nxn(ctx, x0, y0, src.y, src.y_stride, src.cb, src.cr, src.c_stride)));
+            let nxn = PCuDecision::Intra(Box::new(self.code_cu_intra_nxn(
+                ctx,
+                x0,
+                y0,
+                src.y,
+                src.y_stride,
+                src.cb,
+                src.cr,
+                src.c_stride,
+            )));
             let ssd_n = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
-            let bits_n = crate::encode::h265::p_cu_bits(&nxn, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth);
+            let bits_n = crate::encode::h265::p_cu_bits(
+                &nxn, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
+            );
             let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
             if ssd_n as f64 + lam * f64::from(bits_n) < ssd as f64 + lam * f64::from(bits) {
                 return (nxn, ssd_n, bits_n);
@@ -1860,9 +2459,27 @@ impl<S: Sample> InterPicture<S> {
         src_cr: &[S],
         c_stride: usize,
     ) -> CuDecision {
-        let PicInfo { intra_mode, pred_mode, .. } = &mut self.info;
+        let PicInfo {
+            intra_mode,
+            pred_mode,
+            ..
+        } = &mut self.info;
         let (intra_mode, pred_mode) = (&mut intra_mode[..], &pred_mode[..]);
-        code_cu_nxn_intra(ctx, self.geo, &mut self.recon, intra_mode, Some(pred_mode), &mut self.intra_scratch, x0, y0, src_y, y_stride, src_cb, src_cr, c_stride)
+        code_cu_nxn_intra(
+            ctx,
+            self.geo,
+            &mut self.recon,
+            intra_mode,
+            Some(pred_mode),
+            &mut self.intra_scratch,
+            x0,
+            y0,
+            src_y,
+            y_stride,
+            src_cb,
+            src_cr,
+            c_stride,
+        )
     }
 
     /// Greedy small-diamond SAD descent at full-sample positions, seeded
@@ -1870,7 +2487,17 @@ impl<S: Sample> InterPicture<S> {
     /// decoder's `>> 2` addresses them), returning the best vector in
     /// quarter units.
     #[allow(clippy::too_many_arguments)]
-    fn search_full(&self, ctx: &MeCtx<'_, S>, refp: &Plane16<S>, x: usize, y: usize, (w, h): (usize, usize), src: &[S], src_stride: usize, seeds: &[Mv]) -> Mv {
+    fn search_full(
+        &self,
+        ctx: &MeCtx<'_, S>,
+        refp: &Plane16<S>,
+        x: usize,
+        y: usize,
+        (w, h): (usize, usize),
+        src: &[S],
+        src_stride: usize,
+        seeds: &[Mv],
+    ) -> Mv {
         let clamp_pos = |fx: i32, fy: i32| -> (i32, i32) {
             let pad = refp.pad as i32;
             let xi = (x as i32 + fx).clamp(-pad, refp.width as i32 + pad - w as i32);
@@ -1898,7 +2525,9 @@ impl<S: Sample> InterPicture<S> {
             let mut improved = false;
             for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                 let cand = (best.0 + dx, best.1 + dy);
-                if (cand.0 - centre.0).abs() > SEARCH_RANGE || (cand.1 - centre.1).abs() > SEARCH_RANGE {
+                if (cand.0 - centre.0).abs() > SEARCH_RANGE
+                    || (cand.1 - centre.1).abs() > SEARCH_RANGE
+                {
                     continue;
                 }
                 if clamp_pos(cand.0, cand.1) != cand {
@@ -1923,9 +2552,22 @@ impl<S: Sample> InterPicture<S> {
     /// under `wp`, the luma weighting a one-list prediction from `list`
     /// carries (see [`Self::satd_at_weighted`]).
     #[allow(clippy::too_many_arguments)]
-    fn refine_subpel(&mut self, ctx: &MeCtx<'_, S>, refp: &Plane16<S>, wp: Weighting, list: usize, x: usize, y: usize, wh: (usize, usize), src: &[S], src_stride: usize, start: Mv) -> (Mv, u32) {
+    fn refine_subpel(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refp: &Plane16<S>,
+        wp: Weighting,
+        list: usize,
+        x: usize,
+        y: usize,
+        wh: (usize, usize),
+        src: &[S],
+        src_stride: usize,
+        start: Mv,
+    ) -> (Mv, u32) {
         let mut best = start;
-        let mut best_satd = self.satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, start, wp, list);
+        let mut best_satd =
+            self.satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, start, wp, list);
         for step in [2i16, 1] {
             let centre = best;
             for dy in [-step, 0, step] {
@@ -1934,7 +2576,8 @@ impl<S: Sample> InterPicture<S> {
                         continue;
                     }
                     let mv = Mv::new(centre.x.wrapping_add(dx), centre.y.wrapping_add(dy));
-                    let satd = self.satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, mv, wp, list);
+                    let satd =
+                        self.satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, mv, wp, list);
                     if satd < best_satd {
                         best_satd = satd;
                         best = mv;
@@ -1950,7 +2593,18 @@ impl<S: Sample> InterPicture<S> {
     /// `source` in `src/hevc/inter.rs`, and the sample-domain stage is the
     /// default uni-prediction the decoder applies.
     #[allow(clippy::too_many_arguments)]
-    fn satd_at(&mut self, ctx: &MeCtx<'_, S>, refp: &Plane16<S>, r: usize, x: usize, y: usize, wh: (usize, usize), src: &[S], src_stride: usize, mv: Mv) -> u32 {
+    fn satd_at(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refp: &Plane16<S>,
+        r: usize,
+        x: usize,
+        y: usize,
+        wh: (usize, usize),
+        src: &[S],
+        src_stride: usize,
+        mv: Mv,
+    ) -> u32 {
         let wp = self.wp_for(r)[0];
         self.satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, mv, wp, 0)
     }
@@ -1961,14 +2615,34 @@ impl<S: Sample> InterPicture<S> {
     /// `predict_block` takes for a one-list prediction from that list, and
     /// the same kernel it will commit the winner through.
     #[allow(clippy::too_many_arguments)]
-    fn satd_at_weighted(&mut self, ctx: &MeCtx<'_, S>, refp: &Plane16<S>, x: usize, y: usize, (w, h): (usize, usize), src: &[S], src_stride: usize, mv: Mv, wp: Weighting, list: usize) -> u32 {
-        let InterPicture { swin, stmp, spred14, spred, .. } = self;
+    fn satd_at_weighted(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refp: &Plane16<S>,
+        x: usize,
+        y: usize,
+        (w, h): (usize, usize),
+        src: &[S],
+        src_stride: usize,
+        mv: Mv,
+        wp: Weighting,
+        list: usize,
+    ) -> u32 {
+        let InterPicture {
+            swin,
+            stmp,
+            spred14,
+            spred,
+            ..
+        } = self;
         predict14(ctx, refp, x, y, (w, h), mv, swin, stmp, spred14);
         let bd = ctx.bit_depth;
         let max = (1i32 << bd) - 1;
         match wp {
             Weighting::Default => (ctx.dsp.uni)(spred, w, spred14, w, h, 14 - bd as i32, max),
-            Weighting::Explicit { log2_wd, w: wt, o } => (ctx.dsp.weighted_uni)(spred, w, spred14, w, h, log2_wd, wt[list], o[list], max),
+            Weighting::Explicit { log2_wd, w: wt, o } => {
+                (ctx.dsp.weighted_uni)(spred, w, spred14, w, h, log2_wd, wt[list], o[list], max)
+            }
         }
         (ctx.dist.satd)(src, src_stride, spred, w, w, h)
     }
@@ -1978,12 +2652,35 @@ impl<S: Sample> InterPicture<S> {
     /// and with this picture's, so the caller can count whether the
     /// table's fit helped the vectors the search actually chose.
     #[allow(clippy::too_many_arguments)]
-    pub fn weighting_gain(&mut self, ctx: &MeCtx<'_, S>, refp: &Frame<S>, r: usize, x0: usize, y0: usize, log2_cu: u32, src_y: &[S], y_stride: usize, mv: Mv) -> (u32, u32) {
+    pub fn weighting_gain(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refp: &Frame<S>,
+        r: usize,
+        x0: usize,
+        y0: usize,
+        log2_cu: u32,
+        src_y: &[S],
+        y_stride: usize,
+        mv: Mv,
+    ) -> (u32, u32) {
         let n = 1usize << log2_cu;
         let src = &src_y[y0 * y_stride + x0..];
         let wp = self.wp_for(r)[0];
-        let plain = self.satd_at_weighted(ctx, &refp.y, x0, y0, (n, n), src, y_stride, mv, Weighting::Default, 0);
-        let weighted = self.satd_at_weighted(ctx, &refp.y, x0, y0, (n, n), src, y_stride, mv, wp, 0);
+        let plain = self.satd_at_weighted(
+            ctx,
+            &refp.y,
+            x0,
+            y0,
+            (n, n),
+            src,
+            y_stride,
+            mv,
+            Weighting::Default,
+            0,
+        );
+        let weighted =
+            self.satd_at_weighted(ctx, &refp.y, x0, y0, (n, n), src, y_stride, mv, wp, 0);
         (plain, weighted)
     }
 
@@ -2010,13 +2707,65 @@ impl<S: Sample> InterPicture<S> {
         let wp = self.wp_b_for(ref_idx)[0];
         match (ref_idx[0] >= 0, ref_idx[1] >= 0) {
             (true, true) => {
-                let plain = self.satd_bi_at(ctx, &ref0.y, &ref1.y, x0, y0, (n, n), src, y_stride, mv[0], mv[1], Weighting::Default);
-                (plain, self.satd_bi_at(ctx, &ref0.y, &ref1.y, x0, y0, (n, n), src, y_stride, mv[0], mv[1], wp))
+                let plain = self.satd_bi_at(
+                    ctx,
+                    &ref0.y,
+                    &ref1.y,
+                    x0,
+                    y0,
+                    (n, n),
+                    src,
+                    y_stride,
+                    mv[0],
+                    mv[1],
+                    Weighting::Default,
+                );
+                (
+                    plain,
+                    self.satd_bi_at(
+                        ctx,
+                        &ref0.y,
+                        &ref1.y,
+                        x0,
+                        y0,
+                        (n, n),
+                        src,
+                        y_stride,
+                        mv[0],
+                        mv[1],
+                        wp,
+                    ),
+                )
             }
             (one0, _) => {
                 let (refp, list) = if one0 { (&ref0.y, 0) } else { (&ref1.y, 1) };
-                let plain = self.satd_at_weighted(ctx, refp, x0, y0, (n, n), src, y_stride, mv[list], Weighting::Default, list);
-                (plain, self.satd_at_weighted(ctx, refp, x0, y0, (n, n), src, y_stride, mv[list], wp, list))
+                let plain = self.satd_at_weighted(
+                    ctx,
+                    refp,
+                    x0,
+                    y0,
+                    (n, n),
+                    src,
+                    y_stride,
+                    mv[list],
+                    Weighting::Default,
+                    list,
+                );
+                (
+                    plain,
+                    self.satd_at_weighted(
+                        ctx,
+                        refp,
+                        x0,
+                        y0,
+                        (n, n),
+                        src,
+                        y_stride,
+                        mv[list],
+                        wp,
+                        list,
+                    ),
+                )
             }
         }
     }
@@ -2045,14 +2794,25 @@ impl<S: Sample> InterPicture<S> {
         mv1: Mv,
         wp: Weighting,
     ) -> u32 {
-        let InterPicture { swin, stmp, spred14, spred14_b, spred, .. } = self;
+        let InterPicture {
+            swin,
+            stmp,
+            spred14,
+            spred14_b,
+            spred,
+            ..
+        } = self;
         predict14(ctx, ref0, x, y, (w, h), mv0, swin, stmp, spred14);
         predict14(ctx, ref1, x, y, (w, h), mv1, swin, stmp, spred14_b);
         let bd = ctx.bit_depth;
         let max = (1i32 << bd) - 1;
         match wp {
-            Weighting::Default => (ctx.dsp.bi)(spred, w, spred14, spred14_b, w, h, 15 - bd as i32, max),
-            Weighting::Explicit { log2_wd, w: wt, o } => (ctx.dsp.weighted_bi)(spred, w, spred14, spred14_b, w, h, log2_wd, wt[0], wt[1], o[0], o[1], max),
+            Weighting::Default => {
+                (ctx.dsp.bi)(spred, w, spred14, spred14_b, w, h, 15 - bd as i32, max)
+            }
+            Weighting::Explicit { log2_wd, w: wt, o } => (ctx.dsp.weighted_bi)(
+                spred, w, spred14, spred14_b, w, h, log2_wd, wt[0], wt[1], o[0], o[1], max,
+            ),
         }
         (ctx.dist.satd)(src, src_stride, spred, w, w, h)
     }
@@ -2066,9 +2826,19 @@ impl<S: Sample> InterPicture<S> {
 /// full-sample search scores against ([`InterPicture::search_b`]): a search
 /// only ranks candidates, and at whole samples this is exactly the
 /// prediction `predict_block` would make.
-fn weighted_search_plane<S: Sample>(refp: &Plane16<S>, bit_depth: u32, log2_wd: i32, w: i32, o: i32) -> Plane16<S> {
+fn weighted_search_plane<S: Sample>(
+    refp: &Plane16<S>,
+    bit_depth: u32,
+    log2_wd: i32,
+    w: i32,
+    o: i32,
+) -> Plane16<S> {
     let mut out = refp.clone();
-    let (shift, max, round) = (14 - bit_depth as i32, (1i32 << bit_depth) - 1, 1i32 << (log2_wd - 1));
+    let (shift, max, round) = (
+        14 - bit_depth as i32,
+        (1i32 << bit_depth) - 1,
+        1i32 << (log2_wd - 1),
+    );
     for v in out.data.iter_mut() {
         let p = (((v.to_i32() << shift) * w + round) >> log2_wd) + o;
         *v = S::from_i32(p.clamp(0, max));
@@ -2160,9 +2930,15 @@ fn predict14<S: Sample>(
     let (x0, y0) = (xi - 3, yi - 3);
     let (ww, hh) = (w + 7, h + 7);
     let pad = refp.pad as i32;
-    let inside = x0 >= -pad && y0 >= -pad && x0 + ww as i32 <= refp.width as i32 + pad && y0 + hh as i32 <= refp.height as i32 + pad;
+    let inside = x0 >= -pad
+        && y0 >= -pad
+        && x0 + ww as i32 <= refp.width as i32 + pad
+        && y0 + hh as i32 <= refp.height as i32 + pad;
     let (win, stride) = if inside {
-        (&refp.data[refp.offset(x0 as isize, y0 as isize)..], refp.stride)
+        (
+            &refp.data[refp.offset(x0 as isize, y0 as isize)..],
+            refp.stride,
+        )
     } else {
         for yy in 0..hh {
             for xx in 0..ww {
@@ -2251,7 +3027,11 @@ impl Rate {
     /// The rate model for a `1 << log2_cu` CU at coding-tree depth
     /// `depth` of a P (`is_b` false) or B slice at quantiser `qp`.
     pub(crate) fn new_at(qp: i32, is_b: bool, log2_cu: u32, depth: u32) -> Self {
-        Rate { cx: Contexts::new(if is_b { 2 } else { 1 }, qp), log2_cu, depth }
+        Rate {
+            cx: Contexts::new(if is_b { 2 } else { 1 }, qp),
+            log2_cu,
+            depth,
+        }
     }
 
     /// Run `f` over a counting encoder and a private copy of the contexts.
@@ -2274,7 +3054,10 @@ impl Rate {
         // `split_cu_flag` exists only above the 8x8 minimum coding block;
         // at it the reader infers the leaf and takes no bin.
         if self.log2_cu > 3 {
-            let nb = SplitCuNb { left_depth: None, above_depth: None };
+            let nb = SplitCuNb {
+                left_depth: None,
+                above_depth: None,
+            };
             write_split_cu_flag(e, cx, &nb, self.depth, false);
         }
         write_cu_skip_flag(e, cx, None, None, skip);
@@ -2316,7 +3099,14 @@ impl Rate {
     /// entirely when the list has one entry — so at one reference this
     /// prices identically to a stream that never had the choice, which
     /// is what keeps single-reference streams byte-identical.
-    pub(crate) fn amvp_ref(&self, mvd: Mv, mvp_flag: u8, root_cbf: bool, nref: u32, ref_idx: u32) -> f32 {
+    pub(crate) fn amvp_ref(
+        &self,
+        mvd: Mv,
+        mvp_flag: u8,
+        root_cbf: bool,
+        nref: u32,
+        ref_idx: u32,
+    ) -> f32 {
         self.count(|e, cx| {
             self.prefix(e, cx, false);
             write_pred_mode_flag(e, cx, false);
@@ -2389,7 +3179,16 @@ impl Rate {
 /// CU writer, whose shapes (skip, and the inferred `rqt_root_cbf` of a
 /// merge) exist only there.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_prediction_unit(e: &mut CabacEncoder, cx: &mut Contexts, pu: &PuPick, is_b: bool, w: i32, h: i32, depth: u32, nref: u32) {
+pub(crate) fn write_prediction_unit(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    pu: &PuPick,
+    is_b: bool,
+    w: i32,
+    h: i32,
+    depth: u32,
+    nref: u32,
+) {
     if let Some(idx) = pu.merge_idx {
         write_merge_flag(e, cx, true);
         write_merge_idx(e, cx, MAX_MERGE_CAND as u32, u32::from(idx));
@@ -2397,7 +3196,10 @@ pub(crate) fn write_prediction_unit(e: &mut CabacEncoder, cx: &mut Contexts, pu:
     }
     write_merge_flag(e, cx, false);
     debug_assert!(is_b || pu.idc == 0, "a P unit predicts from list 0");
-    debug_assert!(pu.idc != 2 || w + h != 12, "an 8x4 or 4x8 unit has no PRED_BI");
+    debug_assert!(
+        pu.idc != 2 || w + h != 12,
+        "an 8x4 or 4x8 unit has no PRED_BI"
+    );
     if is_b {
         write_inter_pred_idc(e, cx, w, h, depth, u32::from(pu.idc));
     }
@@ -2451,7 +3253,13 @@ pub(crate) fn write_prediction_unit(e: &mut CabacEncoder, cx: &mut Contexts, pu:
 /// improving, the proxy is the thing to attack, and testing that needs a
 /// different probe: code both candidates properly and compare real costs,
 /// rather than asking whether the existing numbers are close.
-pub fn prefer_intra<S: Sample>(ctx: &MeCtx<'_, S>, inter_satd: u32, src: &[S], src_stride: usize, n: usize) -> bool {
+pub fn prefer_intra<S: Sample>(
+    ctx: &MeCtx<'_, S>,
+    inter_satd: u32,
+    src: &[S],
+    src_stride: usize,
+    n: usize,
+) -> bool {
     let mut sum = 0u64;
     for y in 0..n {
         for x in 0..n {
@@ -2491,7 +3299,9 @@ fn code_residual_inter<S: Sample>(
     let mut work = [0i16; 1024];
     for yy in 0..n {
         for xx in 0..n {
-            work[yy * n + xx] = (src[yy * src_stride + xx].to_i32() - plane.data[off + yy * stride + xx].to_i32()) as i16;
+            work[yy * n + xx] = (src[yy * src_stride + xx].to_i32()
+                - plane.data[off + yy * stride + xx].to_i32())
+                as i16;
         }
     }
 
@@ -2511,10 +3321,26 @@ fn code_residual_inter<S: Sample>(
 
     (ctx.enc.fdct[(log2 - 2) as usize])(&mut work, log2, ctx.bit_depth);
     let qb = qbits(qp, log2, ctx.bit_depth);
-    let nz = (ctx.enc.quant)(&work, levels, n, quant_scale((qp % 6) as usize), qb, quant_offset(qb, false));
+    let nz = (ctx.enc.quant)(
+        &work,
+        levels,
+        n,
+        quant_scale((qp % 6) as usize),
+        qb,
+        quant_offset(qb, false),
+    );
 
     work[..n * n].copy_from_slice(&levels[..n * n]);
-    scale_coefficients(&mut work, log2, qp, ctx.bit_depth, ScalingSource::Flat, false, n - 1, n - 1);
+    scale_coefficients(
+        &mut work,
+        log2,
+        qp,
+        ctx.bit_depth,
+        ScalingSource::Flat,
+        false,
+        n - 1,
+        n - 1,
+    );
     let bd_shift = 20 - ctx.bit_depth as i32;
     (ctx.dsp.idct[(log2 - 2) as usize])(&mut work, bd_shift, n - 1, n - 1);
     (ctx.dsp.add_residual)(&mut plane.data[off..], stride, &work, n, max);
@@ -2525,15 +3351,17 @@ fn code_residual_inter<S: Sample>(
 mod tests {
     use super::*;
     use crate::dsp::Cpu;
-    use crate::picture::ChromaFormat;
     use crate::dsp::distortion::DistortionDsp;
     use crate::dsp::hevc::HevcDsp;
     use crate::dsp::hevc_enc::HevcEncDsp;
     use crate::encode::Config;
     use crate::encode::h265_syntax::{Geometry as SynGeometry, write_pps, write_sps};
+    use crate::picture::ChromaFormat;
 
     fn lcg(s: &mut u64) -> u32 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*s >> 33) as u32
     }
 
@@ -2545,10 +3373,23 @@ mod tests {
 
     impl Kit {
         fn new() -> Self {
-            Kit { dsp: HevcDsp::new(Cpu::SCALAR), enc: HevcEncDsp::scalar(), dist: DistortionDsp::scalar() }
+            Kit {
+                dsp: HevcDsp::new(Cpu::SCALAR),
+                enc: HevcEncDsp::scalar(),
+                dist: DistortionDsp::scalar(),
+            }
         }
         fn ctx(&self, qp: i32) -> MeCtx<'_, u8> {
-            IntraCtx { dsp: &self.dsp, enc: &self.enc, dist: &self.dist, qp, bit_depth: 8, strong_smoothing: false, bypass: false, free_to_trim: false }
+            IntraCtx {
+                dsp: &self.dsp,
+                enc: &self.enc,
+                dist: &self.dist,
+                qp,
+                bit_depth: 8,
+                strong_smoothing: false,
+                bypass: false,
+                free_to_trim: false,
+            }
         }
     }
 
@@ -2564,7 +3405,13 @@ mod tests {
     /// decision module reads the format from a round trip rather than from
     /// the caller's word for it.
     fn parsed_sets_fmt(w: u32, h: u32, chroma: ChromaFormat) -> (Sps, Pps) {
-        let cfg = Config { width: w, height: h, gop: 8, chroma, ..Config::default() };
+        let cfg = Config {
+            width: w,
+            height: h,
+            gop: 8,
+            chroma,
+            ..Config::default()
+        };
         let syn = SynGeometry::new(&cfg);
         let sps = Sps::parse(&crate::nal::unescape_rbsp(&write_sps(&cfg, &syn, 16, None))).unwrap();
         let mut pps = Pps::parse(&crate::nal::unescape_rbsp(&write_pps(26, false, false))).unwrap();
@@ -2656,7 +3503,12 @@ mod tests {
     /// shifts by the same vector divided by this format's (SubWidthC,
     /// SubHeightC), so an even vector stays integral in every format.
     /// Monochrome returns empty chroma planes.
-    fn bi_translated(r0: &Frame<u8>, d0: (i32, i32), r1: &Frame<u8>, d1: (i32, i32)) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    fn bi_translated(
+        r0: &Frame<u8>,
+        d0: (i32, i32),
+        r1: &Frame<u8>,
+        d1: (i32, i32),
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let (w, h) = (r0.width, r0.height);
         let mut y = vec![0u8; w * h];
         for yy in 0..h {
@@ -2673,7 +3525,8 @@ mod tests {
         let mut cr = vec![0u8; cw * ch];
         for yy in 0..ch {
             for xx in 0..cw {
-                for (plane0, plane1, dst) in [(&r0.cb, &r1.cb, &mut cb), (&r0.cr, &r1.cr, &mut cr)] {
+                for (plane0, plane1, dst) in [(&r0.cb, &r1.cb, &mut cb), (&r0.cr, &r1.cr, &mut cr)]
+                {
                     let a = plane0.at_clamped(xx as i32 + d0.0 / sw, yy as i32 + d0.1 / sh) as i32;
                     let b = plane1.at_clamped(xx as i32 + d1.0 / sw, yy as i32 + d1.1 / sh) as i32;
                     dst[yy * cw + xx] = ((a + b + 1) >> 1) as u8;
@@ -2695,12 +3548,26 @@ mod tests {
         let (w, h) = (sps.width as usize, sps.height as usize);
         let n = 1usize << sps.log2_ctb_size;
         let (sw, _) = sub_wh(sps.chroma_array_type());
-        let c_stride = if sps.chroma_array_type() == 0 { 0 } else { w / sw };
+        let c_stride = if sps.chroma_array_type() == 0 {
+            0
+        } else {
+            w / sw
+        };
         let mut pic = InterPicture::new(sps, pps, 1);
         let mut decisions = Vec::new();
         for cy in 0..h / n {
             for cx in 0..w / n {
-                decisions.push(pic.code_ctu(ctx, &[refp], cx, cy, src_y, w, src_cb, src_cr, c_stride));
+                decisions.push(pic.code_ctu(
+                    ctx,
+                    &[refp],
+                    cx,
+                    cy,
+                    src_y,
+                    w,
+                    src_cb,
+                    src_cr,
+                    c_stride,
+                ));
             }
         }
         (pic, decisions)
@@ -2716,7 +3583,11 @@ mod tests {
             // The chroma slots this format uses, at this format's TB size.
             let (_, ntb, log2c) = chroma_tbs(cat, 0, 0, d.log2_cu);
             let nc2 = 1usize << (2 * log2c);
-            let slot = |comp: usize, t: usize| d.chroma[comp][t * nc2..(t + 1) * nc2].iter().any(|&v| v != 0);
+            let slot = |comp: usize, t: usize| {
+                d.chroma[comp][t * nc2..(t + 1) * nc2]
+                    .iter()
+                    .any(|&v| v != 0)
+            };
             let mut nz_c = false;
             for comp in 0..2 {
                 assert_eq!(
@@ -2735,34 +3606,58 @@ mod tests {
                 assert!(!nz_c, "cu {i}: monochrome carries a chroma cbf");
             }
             if cat != 2 {
-                assert_eq!(d.cbf_chroma_bot, [false; 2], "cu {i}: only 4:2:2 has a bottom chroma square");
+                assert_eq!(
+                    d.cbf_chroma_bot, [false; 2],
+                    "cu {i}: only 4:2:2 has a bottom chroma square"
+                );
             }
             // Every slot this format does not use must be untouched: the
             // writer indexes by slot, so a stray level there would be
             // spelled into some other format's stream shape.
             for comp in 0..2 {
                 let used = ntb * nc2;
-                assert!(d.chroma[comp][used..].iter().all(|&v| v == 0), "cu {i}: levels beyond the format's chroma slots");
+                assert!(
+                    d.chroma[comp][used..].iter().all(|&v| v == 0),
+                    "cu {i}: levels beyond the format's chroma slots"
+                );
             }
-            assert_eq!(d.cbf_luma, nz_l, "cu {i}: cbf_luma disagrees with the levels");
-            assert_eq!(d.rqt_root_cbf, nz_l || nz_c, "cu {i}: rqt_root_cbf disagrees");
+            assert_eq!(
+                d.cbf_luma, nz_l,
+                "cu {i}: cbf_luma disagrees with the levels"
+            );
+            assert_eq!(
+                d.rqt_root_cbf,
+                nz_l || nz_c,
+                "cu {i}: rqt_root_cbf disagrees"
+            );
             // The inference trap the writer relies on: at an inter leaf of
             // depth 0 with no chroma cbf the reader reads no cbf_luma bin
             // and infers 1, so a coded tree with neither is unspellable.
             if d.rqt_root_cbf && !nz_c {
-                assert!(d.cbf_luma, "cu {i}: a coded tree with no chroma cbf must have cbf_luma 1 (the reader infers it)");
+                assert!(
+                    d.cbf_luma,
+                    "cu {i}: a coded tree with no chroma cbf must have cbf_luma 1 (the reader infers it)"
+                );
             }
             match d.kind {
-                InterCuKind::Skip { .. } => assert!(!d.rqt_root_cbf, "cu {i}: a skip CU carries residual"),
+                InterCuKind::Skip { .. } => {
+                    assert!(!d.rqt_root_cbf, "cu {i}: a skip CU carries residual")
+                }
                 InterCuKind::Merge { .. } => {
                     // The reader infers rqt_root_cbf 1 for a non-skip
                     // 2Nx2N merge CU: producing one without residual
                     // would desync — such a CU must have been Skip.
-                    assert!(d.rqt_root_cbf, "cu {i}: a zero-residual merge CU escaped becoming Skip")
+                    assert!(
+                        d.rqt_root_cbf,
+                        "cu {i}: a zero-residual merge CU escaped becoming Skip"
+                    )
                 }
                 // A partitioned CU codes rqt_root_cbf, so either value is
                 // spellable.
-                InterCuKind::Amvp { .. } | InterCuKind::BAmvp { .. } | InterCuKind::Parts | InterCuKind::UseIntra => {}
+                InterCuKind::Amvp { .. }
+                | InterCuKind::BAmvp { .. }
+                | InterCuKind::Parts
+                | InterCuKind::UseIntra => {}
             }
         }
     }
@@ -2784,14 +3679,25 @@ mod tests {
         let want = Mv::new((dx * 4) as i16, (dy * 4) as i16);
         for (i, d) in decisions.iter().enumerate() {
             assert_eq!(d.mv, want, "cu {i} missed the translation: {:?}", d.kind);
-            assert!(!d.rqt_root_cbf, "cu {i}: an exact translation left residual");
+            assert!(
+                !d.rqt_root_cbf,
+                "cu {i}: an exact translation left residual"
+            );
         }
         // The first CU has no motion neighbours, so its candidates are the
         // zero-vector pads: it signals AMVP with no residual. Every later
         // CU sees the translation in a spatial candidate and skips.
-        assert!(matches!(decisions[0].kind, InterCuKind::Amvp { .. }), "first CU: {:?}", decisions[0].kind);
+        assert!(
+            matches!(decisions[0].kind, InterCuKind::Amvp { .. }),
+            "first CU: {:?}",
+            decisions[0].kind
+        );
         for (i, d) in decisions.iter().enumerate().skip(1) {
-            assert!(matches!(d.kind, InterCuKind::Skip { .. }), "cu {i}: {:?}", d.kind);
+            assert!(
+                matches!(d.kind, InterCuKind::Skip { .. }),
+                "cu {i}: {:?}",
+                d.kind
+            );
         }
         // And the reconstruction is the translated reference, exactly: the
         // prediction was the decoder's own and no residual was added.
@@ -2832,7 +3738,10 @@ mod tests {
         );
         for (i, d) in decisions.iter().enumerate() {
             if d.rqt_root_cbf {
-                assert!(!matches!(d.kind, InterCuKind::Skip { .. }), "cu {i} skipped with residual");
+                assert!(
+                    !matches!(d.kind, InterCuKind::Skip { .. }),
+                    "cu {i} skipped with residual"
+                );
             }
         }
     }
@@ -2850,7 +3759,18 @@ mod tests {
         let mut scratch = McScratch::new();
         for cy in 0..2usize {
             for cx in 0..4usize {
-                predict_block(&kit.dsp, &mut scratch, &mut interp, cx * 16, cy * 16, 16, 16, Some((&refp, want)), None, [Weighting::Default; 3]);
+                predict_block(
+                    &kit.dsp,
+                    &mut scratch,
+                    &mut interp,
+                    cx * 16,
+                    cy * 16,
+                    16,
+                    16,
+                    Some((&refp, want)),
+                    None,
+                    [Weighting::Default; 3],
+                );
             }
         }
         let flat = |p: &Plane16<u8>, w: usize, h: usize| -> Vec<u8> {
@@ -2869,7 +3789,10 @@ mod tests {
         assert_invariants(&decisions, 1);
         for (i, d) in decisions.iter().enumerate() {
             assert_eq!(d.mv, want, "cu {i}: {:?}", d.kind);
-            assert!(!d.rqt_root_cbf, "cu {i}: the exact interpolation left residual");
+            assert!(
+                !d.rqt_root_cbf,
+                "cu {i}: the exact interpolation left residual"
+            );
         }
     }
 
@@ -2890,7 +3813,12 @@ mod tests {
     /// unnoticed, so both are asserted to have occurred.
     #[test]
     fn every_b_decision_replays_through_an_independent_decoder_state() {
-        for chroma in [ChromaFormat::Monochrome, ChromaFormat::Yuv420, ChromaFormat::Yuv422, ChromaFormat::Yuv444] {
+        for chroma in [
+            ChromaFormat::Monochrome,
+            ChromaFormat::Yuv420,
+            ChromaFormat::Yuv422,
+            ChromaFormat::Yuv444,
+        ] {
             // Three sources per format, because ONE source does not reach
             // the shapes. An earlier version of this test used only the
             // bi fixture and every CU came out `Merge` at the zero vector;
@@ -2901,8 +3829,14 @@ mod tests {
             for scen in [BScenario::Uni0, BScenario::Uni1, BScenario::Bi] {
                 replay_b_one_format(chroma, scen, &mut seen_idc, None);
             }
-            assert!(seen_idc[0], "{chroma:?}: no CU ever coded PRED_L0 through AMVP");
-            assert!(seen_idc[1], "{chroma:?}: no CU ever coded PRED_L1 through AMVP");
+            assert!(
+                seen_idc[0],
+                "{chroma:?}: no CU ever coded PRED_L0 through AMVP"
+            );
+            assert!(
+                seen_idc[1],
+                "{chroma:?}: no CU ever coded PRED_L1 through AMVP"
+            );
             // PRED_BI through AMVP is deliberately NOT asserted, and the
             // reason is a property of the decision rather than a gap in
             // this test. Whenever both lists find good vectors, the merge
@@ -2949,14 +3883,28 @@ mod tests {
     /// leaves the search working and the two scorings choosing alike.
     #[test]
     fn every_weighted_b_decision_replays_through_an_independent_decoder_state() {
-        for (name, table) in [("gain and offset", weighted_b_table()), ("offsets", offset_b_table())] {
-            for chroma in [ChromaFormat::Monochrome, ChromaFormat::Yuv420, ChromaFormat::Yuv422, ChromaFormat::Yuv444] {
+        for (name, table) in [
+            ("gain and offset", weighted_b_table()),
+            ("offsets", offset_b_table()),
+        ] {
+            for chroma in [
+                ChromaFormat::Monochrome,
+                ChromaFormat::Yuv420,
+                ChromaFormat::Yuv422,
+                ChromaFormat::Yuv444,
+            ] {
                 let mut seen_idc = [false; 3];
                 for scen in [BScenario::Uni0, BScenario::Uni1, BScenario::Bi] {
                     replay_b_one_format(chroma, scen, &mut seen_idc, Some(&table));
                 }
-                assert!(seen_idc[0], "{chroma:?} weighted ({name}): no CU ever coded PRED_L0 through AMVP");
-                assert!(seen_idc[1], "{chroma:?} weighted ({name}): no CU ever coded PRED_L1 through AMVP");
+                assert!(
+                    seen_idc[0],
+                    "{chroma:?} weighted ({name}): no CU ever coded PRED_L0 through AMVP"
+                );
+                assert!(
+                    seen_idc[1],
+                    "{chroma:?} weighted ({name}): no CU ever coded PRED_L1 through AMVP"
+                );
             }
         }
     }
@@ -2970,7 +3918,16 @@ mod tests {
         PredWeightTable {
             luma_log2_denom: 6,
             chroma_log2_denom: 6,
-            lists: [vec![WeightEntry { luma: (64, 24), chroma: [(64, 8), (64, 8)] }], vec![WeightEntry { luma: (64, -24), chroma: [(64, -8), (64, -8)] }]],
+            lists: [
+                vec![WeightEntry {
+                    luma: (64, 24),
+                    chroma: [(64, 8), (64, 8)],
+                }],
+                vec![WeightEntry {
+                    luma: (64, -24),
+                    chroma: [(64, -8), (64, -8)],
+                }],
+            ],
         }
     }
 
@@ -2982,7 +3939,16 @@ mod tests {
         PredWeightTable {
             luma_log2_denom: 6,
             chroma_log2_denom: 6,
-            lists: [vec![WeightEntry { luma: (56, 12), chroma: [(60, 6), (64, 3)] }], vec![WeightEntry { luma: (72, -10), chroma: [(66, -2), (68, -6)] }]],
+            lists: [
+                vec![WeightEntry {
+                    luma: (56, 12),
+                    chroma: [(60, 6), (64, 3)],
+                }],
+                vec![WeightEntry {
+                    luma: (72, -10),
+                    chroma: [(66, -2), (68, -6)],
+                }],
+            ],
         }
     }
 
@@ -3015,7 +3981,12 @@ mod tests {
         Bi,
     }
 
-    fn replay_b_one_format(chroma: ChromaFormat, scen: BScenario, seen_idc: &mut [bool; 3], weights: Option<&crate::hevc::slice::PredWeightTable>) {
+    fn replay_b_one_format(
+        chroma: ChromaFormat,
+        scen: BScenario,
+        seen_idc: &mut [bool; 3],
+        weights: Option<&crate::hevc::slice::PredWeightTable>,
+    ) {
         let kit = Kit::new();
         let ctx = kit.ctx(30);
         let (sps, pps) = parsed_sets_fmt(64, 64, chroma);
@@ -3079,7 +4050,11 @@ mod tests {
                 f.extend_rows(0, 64);
             }
         }
-        let weighting = |ref_idx: [i8; 2]| weights.map_or([Weighting::Default; 3], |t| crate::hevc::ctu::explicit_weighting(t, 8, 8, ref_idx));
+        let weighting = |ref_idx: [i8; 2]| {
+            weights.map_or([Weighting::Default; 3], |t| {
+                crate::hevc::ctu::explicit_weighting(t, 8, 8, ref_idx)
+            })
+        };
 
         let (w, h) = (64usize, 64usize);
         let n = 1usize << sps.log2_ctb_size;
@@ -3097,11 +4072,15 @@ mod tests {
         let mut decisions = Vec::new();
         for cy in 0..h / n {
             for cx in 0..w / n {
-                decisions.push(pic.code_ctu_b(&ctx, &ref0, &ref1, cx, cy, &sy, w, &scb, &scr, c_stride));
+                decisions
+                    .push(pic.code_ctu_b(&ctx, &ref0, &ref1, cx, cy, &sy, w, &scb, &scr, c_stride));
             }
         }
         assert_invariants(&decisions, cat);
-        let tag = format!("{chroma:?}/{scen:?}{}", if weights.is_some() { " weighted" } else { "" });
+        let tag = format!(
+            "{chroma:?}/{scen:?}{}",
+            if weights.is_some() { " weighted" } else { "" }
+        );
         // Record which `inter_pred_idc` values were reached, for the
         // caller's aggregate coverage check. Only a CODED CU counts: a
         // `UseIntra` decision still carries the motion fields this module
@@ -3114,20 +4093,27 @@ mod tests {
             }
         }
         assert!(
-            decisions.iter().any(|d| !matches!(d.kind, InterCuKind::UseIntra)),
+            decisions
+                .iter()
+                .any(|d| !matches!(d.kind, InterCuKind::UseIntra)),
             "{tag}: every CU went intra; the inter path is untested here"
         );
         // The scenario must actually reach the shape it is named for,
         // through some CU: uni scenarios a single-list CU, the bi scenario
         // a two-list one. Merge candidates count here — they carry lists
         // too — but intra decisions do not.
-        let coded = decisions.iter().filter(|d| !matches!(d.kind, InterCuKind::UseIntra));
+        let coded = decisions
+            .iter()
+            .filter(|d| !matches!(d.kind, InterCuKind::UseIntra));
         let hit = match scen {
             BScenario::Uni0 => coded.clone().any(|d| d.ref_idx >= 0 && d.ref_idx_l1 < 0),
             BScenario::Uni1 => coded.clone().any(|d| d.ref_idx < 0 && d.ref_idx_l1 >= 0),
             BScenario::Bi => coded.clone().any(|d| d.ref_idx >= 0 && d.ref_idx_l1 >= 0),
         };
-        assert!(hit, "{tag}: the scenario never reached its own prediction shape");
+        assert!(
+            hit,
+            "{tag}: the scenario never reached its own prediction shape"
+        );
 
         // The independent state.
         let geo = std::sync::Arc::new(Geometry::new(&sps, &pps));
@@ -3136,7 +4122,10 @@ mod tests {
         frame.poc = 2;
         let mut scratch = McScratch::new();
         let no_backward_pred = [ref0.poc, ref1.poc].iter().all(|&p| p <= 2);
-        assert!(!no_backward_pred, "a future anchor must make NoBackwardPredFlag false");
+        assert!(
+            !no_backward_pred,
+            "a future anchor must make NoBackwardPredFlag false"
+        );
         let refs = RefCtx::<u8> {
             pocs: [vec![ref0.poc], vec![ref1.poc]],
             long_term: [vec![false], vec![false]],
@@ -3182,32 +4171,67 @@ mod tests {
                     for list in 0..2usize {
                         if r[list] >= 0 {
                             let p = amvp(&info, &frame, &refs, &pu, list, 0, mvp_flag[list] as u32);
-                            mv[list] = Mv::new(p.x.wrapping_add(mvd[list].x), p.y.wrapping_add(mvd[list].y));
+                            mv[list] = Mv::new(
+                                p.x.wrapping_add(mvd[list].x),
+                                p.y.wrapping_add(mvd[list].y),
+                            );
                         }
                     }
                     (mv, r)
                 }
                 InterCuKind::Amvp { .. } => unreachable!("the B walk never produces the P shape"),
-                InterCuKind::Parts => unreachable!("this replay codes whole units: the walk it drives leaves partitions off"),
+                InterCuKind::Parts => unreachable!(
+                    "this replay codes whole units: the walk it drives leaves partitions off"
+                ),
                 InterCuKind::UseIntra => {
                     fill_motion(&mut frame.motion, frame.w4, x0, y0, n, n, MotionInfo::INTRA);
                     PicInfo::fill4(&mut info.pred_mode, w4, x0, y0, n, n, 1);
                     continue;
                 }
             };
-            assert_eq!(ref_idx, [d.ref_idx, d.ref_idx_l1], "cu {i}: replayed lists differ ({:?})", d.kind);
-            assert_eq!([mv[0], mv[1]], [d.mv, d.mv_l1], "cu {i}: signalling does not replay to the chosen vectors ({:?})", d.kind);
+            assert_eq!(
+                ref_idx,
+                [d.ref_idx, d.ref_idx_l1],
+                "cu {i}: replayed lists differ ({:?})",
+                d.kind
+            );
+            assert_eq!(
+                [mv[0], mv[1]],
+                [d.mv, d.mv_l1],
+                "cu {i}: signalling does not replay to the chosen vectors ({:?})",
+                d.kind
+            );
 
             let r0 = (ref_idx[0] >= 0).then_some((&ref0, mv[0]));
             let r1 = (ref_idx[1] >= 0).then_some((&ref1, mv[1]));
-            predict_block(&kit.dsp, &mut scratch, &mut frame, x0, y0, n, n, r0, r1, weighting(ref_idx));
+            predict_block(
+                &kit.dsp,
+                &mut scratch,
+                &mut frame,
+                x0,
+                y0,
+                n,
+                n,
+                r0,
+                r1,
+                weighting(ref_idx),
+            );
             if d.rqt_root_cbf {
                 let bd_shift = 20 - 8i32;
                 let mut work = [0i16; 1024];
                 if d.cbf_luma {
                     work[..n * n].copy_from_slice(&d.luma[..n * n]);
                     let log2 = d.log2_cu;
-                    scale_coefficients(&mut work, log2, ctx.qp, 8, ScalingSource::Flat, false, n - 1, n - 1);
+                    scale_coefficients(
+                        &mut work,
+                        log2,
+                        ctx.qp,
+                        8,
+                        ScalingSource::Flat,
+                        false,
+                        n - 1,
+                        n - 1,
+                    );
                     (kit.dsp.idct[(log2 - 2) as usize])(&mut work, bd_shift, n - 1, n - 1);
                     let off = frame.y.offset(x0 as isize, y0 as isize);
                     (kit.dsp.add_residual)(&mut frame.y.data[off..], frame.y.stride, &work, n, 255);
@@ -3220,21 +4244,55 @@ mod tests {
                     let nc2 = nc * nc;
                     for comp in 0..2 {
                         for (t, &(ax, ay)) in tbs[..ntb].iter().enumerate() {
-                            let cbf = if t == 0 { d.cbf_chroma[comp] } else { d.cbf_chroma_bot[comp] };
+                            let cbf = if t == 0 {
+                                d.cbf_chroma[comp]
+                            } else {
+                                d.cbf_chroma_bot[comp]
+                            };
                             if !cbf {
                                 continue;
                             }
                             work[..nc2].copy_from_slice(&d.chroma[comp][t * nc2..(t + 1) * nc2]);
-                            scale_coefficients(&mut work, log2c, qp_c, 8, ScalingSource::Flat, false, nc - 1, nc - 1);
-                            (kit.dsp.idct[(log2c - 2) as usize])(&mut work, bd_shift, nc - 1, nc - 1);
-                            let plane = if comp == 0 { &mut frame.cb } else { &mut frame.cr };
+                            scale_coefficients(
+                                &mut work,
+                                log2c,
+                                qp_c,
+                                8,
+                                ScalingSource::Flat,
+                                false,
+                                nc - 1,
+                                nc - 1,
+                            );
+                            (kit.dsp.idct[(log2c - 2) as usize])(
+                                &mut work,
+                                bd_shift,
+                                nc - 1,
+                                nc - 1,
+                            );
+                            let plane = if comp == 0 {
+                                &mut frame.cb
+                            } else {
+                                &mut frame.cr
+                            };
                             let off = plane.offset((ax / sw) as isize, (ay / sh) as isize);
-                            (kit.dsp.add_residual)(&mut plane.data[off..], plane.stride, &work, nc, 255);
+                            (kit.dsp.add_residual)(
+                                &mut plane.data[off..],
+                                plane.stride,
+                                &work,
+                                nc,
+                                255,
+                            );
                         }
                     }
                 }
             }
-            let mut mi = MotionInfo { mv, ref_idx, ref_delta: [0; 2], flags: 0, pad: 0 };
+            let mut mi = MotionInfo {
+                mv,
+                ref_idx,
+                ref_delta: [0; 2],
+                flags: 0,
+                pad: 0,
+            };
             for list in 0..2usize {
                 if ref_idx[list] >= 0 {
                     let poc = if list == 0 { ref0.poc } else { ref1.poc };
@@ -3244,10 +4302,22 @@ mod tests {
             fill_motion(&mut frame.motion, frame.w4, x0, y0, n, n, mi);
             PicInfo::fill4(&mut info.pred_mode, w4, x0, y0, n, n, 0);
         }
-        assert_eq!(frame.y.data, pic.recon.y.data, "{tag}: luma reconstruction differs from the replay");
-        assert_eq!(frame.cb.data, pic.recon.cb.data, "{tag}: cb reconstruction differs from the replay");
-        assert_eq!(frame.cr.data, pic.recon.cr.data, "{tag}: cr reconstruction differs from the replay");
-        assert_eq!(frame.motion, pic.recon.motion, "{tag}: motion grids diverged");
+        assert_eq!(
+            frame.y.data, pic.recon.y.data,
+            "{tag}: luma reconstruction differs from the replay"
+        );
+        assert_eq!(
+            frame.cb.data, pic.recon.cb.data,
+            "{tag}: cb reconstruction differs from the replay"
+        );
+        assert_eq!(
+            frame.cr.data, pic.recon.cr.data,
+            "{tag}: cr reconstruction differs from the replay"
+        );
+        assert_eq!(
+            frame.motion, pic.recon.motion,
+            "{tag}: motion grids diverged"
+        );
     }
 
     /// The anchor: every decision, replayed through the decoder's own
@@ -3266,7 +4336,12 @@ mod tests {
     /// pass with every other format's chroma wrong.
     #[test]
     fn every_decision_replays_through_an_independent_decoder_state() {
-        for chroma in [ChromaFormat::Monochrome, ChromaFormat::Yuv420, ChromaFormat::Yuv422, ChromaFormat::Yuv444] {
+        for chroma in [
+            ChromaFormat::Monochrome,
+            ChromaFormat::Yuv420,
+            ChromaFormat::Yuv422,
+            ChromaFormat::Yuv444,
+        ] {
             replay_one_format(chroma);
         }
     }
@@ -3313,19 +4388,30 @@ mod tests {
         }
         let (pic, decisions) = code_picture(&ctx, &sps, &pps, &refp, &sy, &scb, &scr);
         assert_invariants(&decisions, cat);
-        let kinds: Vec<_> = decisions.iter().map(|d| std::mem::discriminant(&d.kind)).collect();
-        assert!(kinds.iter().collect::<std::collections::HashSet<_>>().len() >= 2, "one-note content: the replay would prove less ({chroma:?})");
+        let kinds: Vec<_> = decisions
+            .iter()
+            .map(|d| std::mem::discriminant(&d.kind))
+            .collect();
+        assert!(
+            kinds.iter().collect::<std::collections::HashSet<_>>().len() >= 2,
+            "one-note content: the replay would prove less ({chroma:?})"
+        );
         // A format with chroma must actually exercise it, or the replay's
         // chroma comparison below proves nothing about that format.
         if cat != 0 {
             assert!(
-                decisions.iter().any(|d| d.cbf_chroma[0] || d.cbf_chroma[1] || d.cbf_chroma_bot[0] || d.cbf_chroma_bot[1]),
+                decisions.iter().any(|d| d.cbf_chroma[0]
+                    || d.cbf_chroma[1]
+                    || d.cbf_chroma_bot[0]
+                    || d.cbf_chroma_bot[1]),
                 "{chroma:?}: no CU carried a chroma residual"
             );
         }
         if cat == 2 {
             assert!(
-                decisions.iter().any(|d| d.cbf_chroma_bot[0] || d.cbf_chroma_bot[1]),
+                decisions
+                    .iter()
+                    .any(|d| d.cbf_chroma_bot[0] || d.cbf_chroma_bot[1]),
                 "4:2:2: the stacked pair's bottom square never carried anything"
             );
         }
@@ -3370,33 +4456,65 @@ mod tests {
             let mv = match d.kind {
                 InterCuKind::Skip { merge_idx } | InterCuKind::Merge { merge_idx } => {
                     let cand = merge_candidate(&info, &frame, &refs, &pu, merge_idx as usize);
-                    assert_eq!(cand.ref_idx, [0, -1], "cu {i}: replayed merge candidate references differently");
+                    assert_eq!(
+                        cand.ref_idx,
+                        [0, -1],
+                        "cu {i}: replayed merge candidate references differently"
+                    );
                     cand.mv[0]
                 }
                 InterCuKind::Amvp { mvp_flag, mvd } => {
                     let mvp = amvp(&info, &frame, &refs, &pu, 0, 0, mvp_flag as u32);
                     Mv::new(mvp.x.wrapping_add(mvd.x), mvp.y.wrapping_add(mvd.y))
                 }
-                InterCuKind::BAmvp { .. } => unreachable!("this replay drives the P walk, which never produces a B shape"),
-                InterCuKind::Parts => unreachable!("this replay codes whole units: the walk it drives leaves partitions off"),
+                InterCuKind::BAmvp { .. } => {
+                    unreachable!("this replay drives the P walk, which never produces a B shape")
+                }
+                InterCuKind::Parts => unreachable!(
+                    "this replay codes whole units: the walk it drives leaves partitions off"
+                ),
                 InterCuKind::UseIntra => {
                     fill_motion(&mut frame.motion, frame.w4, x0, y0, n, n, MotionInfo::INTRA);
                     PicInfo::fill4(&mut info.pred_mode, w4, x0, y0, n, n, 1);
                     continue;
                 }
             };
-            assert_eq!(mv, d.mv, "cu {i}: the signalling does not replay to the chosen vector ({:?})", d.kind);
+            assert_eq!(
+                mv, d.mv,
+                "cu {i}: the signalling does not replay to the chosen vector ({:?})",
+                d.kind
+            );
 
             // Reconstruct as a decoder would: the prediction, then the
             // carried coefficients through the inverse path.
-            predict_block(&kit.dsp, &mut scratch, &mut frame, x0, y0, n, n, Some((&refp, mv)), None, [Weighting::Default; 3]);
+            predict_block(
+                &kit.dsp,
+                &mut scratch,
+                &mut frame,
+                x0,
+                y0,
+                n,
+                n,
+                Some((&refp, mv)),
+                None,
+                [Weighting::Default; 3],
+            );
             if d.rqt_root_cbf {
                 let bd_shift = 20 - 8i32;
                 let mut work = [0i16; 1024];
                 if d.cbf_luma {
                     work[..n * n].copy_from_slice(&d.luma[..n * n]);
                     let log2 = d.log2_cu;
-                    scale_coefficients(&mut work, log2, ctx.qp, 8, ScalingSource::Flat, false, n - 1, n - 1);
+                    scale_coefficients(
+                        &mut work,
+                        log2,
+                        ctx.qp,
+                        8,
+                        ScalingSource::Flat,
+                        false,
+                        n - 1,
+                        n - 1,
+                    );
                     (kit.dsp.idct[(log2 - 2) as usize])(&mut work, bd_shift, n - 1, n - 1);
                     let off = frame.y.offset(x0 as isize, y0 as isize);
                     (kit.dsp.add_residual)(&mut frame.y.data[off..], frame.y.stride, &work, n, 255);
@@ -3412,31 +4530,74 @@ mod tests {
                     let nc2 = nc * nc;
                     for comp in 0..2 {
                         for (t, &(ax, ay)) in tbs[..ntb].iter().enumerate() {
-                            let cbf = if t == 0 { d.cbf_chroma[comp] } else { d.cbf_chroma_bot[comp] };
+                            let cbf = if t == 0 {
+                                d.cbf_chroma[comp]
+                            } else {
+                                d.cbf_chroma_bot[comp]
+                            };
                             if !cbf {
                                 continue;
                             }
                             work[..nc2].copy_from_slice(&d.chroma[comp][t * nc2..(t + 1) * nc2]);
-                            scale_coefficients(&mut work, log2c, qp_c, 8, ScalingSource::Flat, false, nc - 1, nc - 1);
-                            (kit.dsp.idct[(log2c - 2) as usize])(&mut work, bd_shift, nc - 1, nc - 1);
-                            let plane = if comp == 0 { &mut frame.cb } else { &mut frame.cr };
+                            scale_coefficients(
+                                &mut work,
+                                log2c,
+                                qp_c,
+                                8,
+                                ScalingSource::Flat,
+                                false,
+                                nc - 1,
+                                nc - 1,
+                            );
+                            (kit.dsp.idct[(log2c - 2) as usize])(
+                                &mut work,
+                                bd_shift,
+                                nc - 1,
+                                nc - 1,
+                            );
+                            let plane = if comp == 0 {
+                                &mut frame.cb
+                            } else {
+                                &mut frame.cr
+                            };
                             let off = plane.offset((ax / sw) as isize, (ay / sh) as isize);
-                            (kit.dsp.add_residual)(&mut plane.data[off..], plane.stride, &work, nc, 255);
+                            (kit.dsp.add_residual)(
+                                &mut plane.data[off..],
+                                plane.stride,
+                                &work,
+                                nc,
+                                255,
+                            );
                         }
                     }
                 }
             }
 
             // The decoder's own motion store, on the replay's state.
-            let mut mi = MotionInfo { mv: [mv, Mv::ZERO], ref_delta: [0; 2], ref_idx: [0, -1], flags: 0, pad: 0 };
+            let mut mi = MotionInfo {
+                mv: [mv, Mv::ZERO],
+                ref_delta: [0; 2],
+                ref_idx: [0, -1],
+                flags: 0,
+                pad: 0,
+            };
             mi.ref_delta[0] = (1 - refp.poc).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             fill_motion(&mut frame.motion, frame.w4, x0, y0, n, n, mi);
             PicInfo::fill4(&mut info.pred_mode, w4, x0, y0, n, n, 0);
         }
         // The replayed reconstruction is the encoder's, byte for byte.
-        assert_eq!(frame.y.data, pic.recon.y.data, "{chroma:?}: luma reconstruction differs from the replay");
-        assert_eq!(frame.cb.data, pic.recon.cb.data, "{chroma:?}: cb reconstruction differs from the replay");
-        assert_eq!(frame.cr.data, pic.recon.cr.data, "{chroma:?}: cr reconstruction differs from the replay");
+        assert_eq!(
+            frame.y.data, pic.recon.y.data,
+            "{chroma:?}: luma reconstruction differs from the replay"
+        );
+        assert_eq!(
+            frame.cb.data, pic.recon.cb.data,
+            "{chroma:?}: cb reconstruction differs from the replay"
+        );
+        assert_eq!(
+            frame.cr.data, pic.recon.cr.data,
+            "{chroma:?}: cr reconstruction differs from the replay"
+        );
         // And the two sides' motion state agrees, which is what the next
         // picture would predict TMVP from if the SPS ever enables it.
         assert_eq!(frame.motion, pic.recon.motion, "motion grids diverged");

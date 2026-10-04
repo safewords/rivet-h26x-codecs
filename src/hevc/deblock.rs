@@ -18,7 +18,9 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
     if na != nb {
         return 1;
     }
-    let far = |p: Mv, q: Mv| -> bool { (p.x as i32 - q.x as i32).abs() >= 4 || (p.y as i32 - q.y as i32).abs() >= 4 };
+    let far = |p: Mv, q: Mv| -> bool {
+        (p.x as i32 - q.x as i32).abs() >= 4 || (p.y as i32 - q.y as i32).abs() >= 4
+    };
     if na == 1 {
         let la = if a.uses(0) { 0 } else { 1 };
         let lb = if b.uses(0) { 0 } else { 1 };
@@ -29,8 +31,14 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
         return far(a.mv[la], b.mv[lb]) as u8;
     }
     // Two vectors each.
-    let (pa0, pa1) = ((a.ref_delta[0], a.long_term(0)), (a.ref_delta[1], a.long_term(1)));
-    let (pb0, pb1) = ((b.ref_delta[0], b.long_term(0)), (b.ref_delta[1], b.long_term(1)));
+    let (pa0, pa1) = (
+        (a.ref_delta[0], a.long_term(0)),
+        (a.ref_delta[1], a.long_term(1)),
+    );
+    let (pb0, pb1) = (
+        (b.ref_delta[0], b.long_term(0)),
+        (b.ref_delta[1], b.long_term(1)),
+    );
     let same_set = (pa0 == pb0 && pa1 == pb1) || (pa0 == pb1 && pa1 == pb0);
     if !same_set {
         return 1;
@@ -53,7 +61,15 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
 /// Compute the boundary strengths of the vertical (`ver`) and horizontal
 /// (`hor`) edges at 4x4 granularity (index = 4x4 block whose left / top
 /// side the edge is; only the 8x8 luma grid gets nonzero values).
-fn boundary_strengths<S: Sample>(frame: &Frame<S>, info: &PicInfo, pps: &Pps, by0: usize, by1: usize, ver: &mut Vec<u8>, hor: &mut Vec<u8>) -> [u8; 2] {
+fn boundary_strengths<S: Sample>(
+    frame: &Frame<S>,
+    info: &PicInfo,
+    pps: &Pps,
+    by0: usize,
+    by1: usize,
+    ver: &mut Vec<u8>,
+    hor: &mut Vec<u8>,
+) -> [u8; 2] {
     let w4 = info.w4;
     ver.clear();
     ver.resize(w4 * (by1 - by0), 0);
@@ -111,7 +127,9 @@ fn boundary_strengths<S: Sample>(frame: &Frame<S>, info: &PicInfo, pps: &Pps, by
                     if info.ctb_tile[cq] != info.ctb_tile[cp] && !pps.loop_filter_across_tiles {
                         ok = false;
                     }
-                    if info.ctb_slice_addr[cq] != info.ctb_slice_addr[cp] && !sl.loop_filter_across_slices {
+                    if info.ctb_slice_addr[cq] != info.ctb_slice_addr[cp]
+                        && !sl.loop_filter_across_slices
+                    {
                         ok = false;
                     }
                 }
@@ -137,7 +155,9 @@ fn boundary_strengths<S: Sample>(frame: &Frame<S>, info: &PicInfo, pps: &Pps, by
                     if info.ctb_tile[cq] != info.ctb_tile[cp] && !pps.loop_filter_across_tiles {
                         ok = false;
                     }
-                    if info.ctb_slice_addr[cq] != info.ctb_slice_addr[cp] && !sl.loop_filter_across_slices {
+                    if info.ctb_slice_addr[cq] != info.ctb_slice_addr[cp]
+                        && !sl.loop_filter_across_slices
+                    {
                         ok = false;
                     }
                 }
@@ -187,7 +207,6 @@ pub struct DeblockScratch {
     hor: Vec<u8>,
 }
 
-
 /// Deblock the 4x4-block rows `by0..by1` in place: all their vertical edges,
 /// then all their horizontal edges (including the top edge of row `by0`,
 /// which reaches three samples up). Row-by-row application in order is
@@ -198,12 +217,30 @@ pub struct DeblockScratch {
 /// edge — eight lines per kernel call — with per-segment parameters; a
 /// segment with bS 0 gets tc = beta = 0, which the kernels leave alone.
 #[allow(clippy::too_many_arguments)]
-pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, frame: &mut Frame<S>, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32, by0: usize, by1: usize) {
+pub fn deblock_rows<S: Sample>(
+    dsp: &HevcDsp<S>,
+    scratch: &mut DeblockScratch,
+    frame: &mut Frame<S>,
+    info: &PicInfo,
+    pps: &Pps,
+    bit_depth_luma: u32,
+    bit_depth_chroma: u32,
+    by0: usize,
+    by1: usize,
+) {
     if by0 >= by1 {
         return;
     }
     let w4 = info.w4;
-    let or = boundary_strengths(frame, info, pps, by0, by1, &mut scratch.ver, &mut scratch.hor);
+    let or = boundary_strengths(
+        frame,
+        info,
+        pps,
+        by0,
+        by1,
+        &mut scratch.ver,
+        &mut scratch.hor,
+    );
     let max_l = (1i32 << bit_depth_luma) - 1;
     let max_c = (1i32 << bit_depth_chroma) - 1;
     let sh_l = bit_depth_luma as i32 - 8;
@@ -211,28 +248,54 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
     let has_chroma = frame.chroma != crate::picture::ChromaFormat::Monochrome;
     let (sw, sh) = frame.chroma.subsampling();
     let (sw, sh) = (sw as usize, sh as usize);
-    let cat = if has_chroma { if sw == 2 && sh == 2 { 1 } else if sw == 2 { 2 } else { 3 } } else { 0 };
+    let cat = if has_chroma {
+        if sw == 2 && sh == 2 {
+            1
+        } else if sw == 2 {
+            2
+        } else {
+            3
+        }
+    } else {
+        0
+    };
 
     // Luma parameters of one 4x4 edge segment (bS > 0), given its slice.
-    let luma_params = |sl: &SliceFilterParams, b: u8, p: usize, q: usize| -> (i32, i32, bool, bool) {
-        let qp = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
-        let beta = BETA_TABLE[(qp + sl.beta_offset).clamp(0, 51) as usize] as i32 * (1 << sh_l);
-        let tc = TC_TABLE[(qp + 2 * (b as i32 - 1) + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_l);
-        (beta, tc, info.filter_exempt[p] & 1 != 0, info.filter_exempt[q] & 1 != 0)
-    };
+    let luma_params =
+        |sl: &SliceFilterParams, b: u8, p: usize, q: usize| -> (i32, i32, bool, bool) {
+            let qp = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
+            let beta = BETA_TABLE[(qp + sl.beta_offset).clamp(0, 51) as usize] as i32 * (1 << sh_l);
+            let tc = TC_TABLE[(qp + 2 * (b as i32 - 1) + sl.tc_offset).clamp(0, 53) as usize]
+                as i32
+                * (1 << sh_l);
+            (
+                beta,
+                tc,
+                info.filter_exempt[p] & 1 != 0,
+                info.filter_exempt[q] & 1 != 0,
+            )
+        };
     // Chroma tc of one segment (bS == 2) for both components: they share the
     // averaged luma QP and differ only in the PPS offset.
     let chroma_tc = |sl: &SliceFilterParams, p: usize, q: usize| -> [i32; 2] {
         let qp_avg = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
         let mut out = [0i32; 2];
         for (c, o) in out.iter_mut().enumerate() {
-            let qpi = qp_avg + if c == 0 { sl.cb_qp_offset } else { sl.cr_qp_offset };
+            let qpi = qp_avg
+                + if c == 0 {
+                    sl.cb_qp_offset
+                } else {
+                    sl.cr_qp_offset
+                };
             let qpc = if qpi < 0 { qpi } else { chroma_qp(cat, qpi) };
             *o = TC_TABLE[(qpc + 2 + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_c);
         }
         out
     };
-    let mut slices = SliceCache { ctb: usize::MAX, idx: 0 };
+    let mut slices = SliceCache {
+        ctb: usize::MAX,
+        idx: 0,
+    };
 
     for pass in 0..2 {
         // Nothing to filter on this pass: no edge of these rows has a
@@ -240,7 +303,11 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
         if or[pass] == 0 {
             continue;
         }
-        let bs = if pass == 0 { &scratch.ver } else { &scratch.hor };
+        let bs = if pass == 0 {
+            &scratch.ver
+        } else {
+            &scratch.hor
+        };
         // Luma: pairs of segments along the edge (two rows for a vertical
         // edge, two columns for a horizontal one).
         {
@@ -277,7 +344,16 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
                             }
                         }
                         let pos = frame.y.offset(x as isize, y as isize);
-                        (dsp.deblock_luma_v)(&mut frame.y.data, pos, stride, beta, tc, np, nq, max_l);
+                        (dsp.deblock_luma_v)(
+                            &mut frame.y.data,
+                            pos,
+                            stride,
+                            beta,
+                            tc,
+                            np,
+                            nq,
+                            max_l,
+                        );
                         bx += 2;
                     }
                     by += 2;
@@ -314,7 +390,16 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
                             }
                         }
                         let pos = frame.y.offset(x as isize, y as isize);
-                        (dsp.deblock_luma_h)(&mut frame.y.data, pos, stride, beta, tc, np, nq, max_l);
+                        (dsp.deblock_luma_h)(
+                            &mut frame.y.data,
+                            pos,
+                            stride,
+                            beta,
+                            tc,
+                            np,
+                            nq,
+                            max_l,
+                        );
                         bx += 2;
                     }
                     by += 2;
@@ -362,7 +447,15 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
                         let (x, y) = (bx * 4, by * 4);
                         for (c, plane) in [(0usize, &mut frame.cb), (1, &mut frame.cr)] {
                             let pos = plane.offset((x / sw) as isize, (y / sh) as isize);
-                            (dsp.deblock_chroma_v)(&mut plane.data, pos, stride, tcs[c], np, nq, max_c);
+                            (dsp.deblock_chroma_v)(
+                                &mut plane.data,
+                                pos,
+                                stride,
+                                tcs[c],
+                                np,
+                                nq,
+                                max_c,
+                            );
                         }
                     }
                     by += luma_segs;
@@ -402,7 +495,15 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
                             let (x, y) = (bx * 4, by * 4);
                             for (c, plane) in [(0usize, &mut frame.cb), (1, &mut frame.cr)] {
                                 let pos = plane.offset((x / sw) as isize, (y / sh) as isize);
-                                (dsp.deblock_chroma_h)(&mut plane.data, pos, stride, tcs[c], np, nq, max_c);
+                                (dsp.deblock_chroma_h)(
+                                    &mut plane.data,
+                                    pos,
+                                    stride,
+                                    tcs[c],
+                                    np,
+                                    nq,
+                                    max_c,
+                                );
                             }
                         }
                         bx += luma_segs;

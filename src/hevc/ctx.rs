@@ -24,6 +24,9 @@ impl Contexts {
         for (i, v) in c.iter_mut().enumerate() {
             *v = init_ctx_hevc(CABAC_INIT[init_type][i], qp);
         }
-        Contexts { c, stat_coeff: [0; 4] }
+        Contexts {
+            c,
+            stat_coeff: [0; 4],
+        }
     }
 }

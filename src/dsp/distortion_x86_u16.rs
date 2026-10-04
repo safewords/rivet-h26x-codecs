@@ -83,7 +83,10 @@ macro_rules! kernels {
         #[target_feature(enable = $feat)]
         #[inline]
         unsafe fn fold(v: __m128i) -> __m128i {
-            _mm_madd_epi16(_mm_xor_si128(v, _mm_set1_epi16(i16::MIN)), _mm_set1_epi16(1))
+            _mm_madd_epi16(
+                _mm_xor_si128(v, _mm_set1_epi16(i16::MIN)),
+                _mm_set1_epi16(1),
+            )
         }
 
         /// The four i32 lanes of `v`, summed in i64.
@@ -102,7 +105,14 @@ macro_rules! kernels {
         // ------------------------------------------------------------------
 
         #[target_feature(enable = $feat)]
-        unsafe fn sad_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize, h: usize) -> u32 {
+        unsafe fn sad_impl(
+            a: *const u16,
+            sa: usize,
+            b: *const u16,
+            sb: usize,
+            w: usize,
+            h: usize,
+        ) -> u32 {
             unsafe {
                 let mut acc = _mm_setzero_si128();
                 // Lanes folded, each 32768 short.
@@ -128,11 +138,21 @@ macro_rules! kernels {
             }
         }
 
-        pub(crate) fn sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
+        pub(crate) fn sad(
+            a: &[u16],
+            a_stride: usize,
+            b: &[u16],
+            b_stride: usize,
+            w: usize,
+            h: usize,
+        ) -> u32 {
             if w % 4 != 0 || h == 0 {
                 return sad_scalar(a, a_stride, b, b_stride, w, h);
             }
-            assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+            assert!(
+                a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+                "block out of range"
+            );
             unsafe { sad_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
         }
 
@@ -141,7 +161,14 @@ macro_rules! kernels {
         // ------------------------------------------------------------------
 
         #[target_feature(enable = $feat)]
-        unsafe fn ssd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize, h: usize) -> u64 {
+        unsafe fn ssd_impl(
+            a: *const u16,
+            sa: usize,
+            b: *const u16,
+            sb: usize,
+            w: usize,
+            h: usize,
+        ) -> u64 {
             unsafe {
                 let (mut total_lo, mut total_hi) = (0i64, 0i64);
                 let mut lanes = 0i64;
@@ -173,11 +200,21 @@ macro_rules! kernels {
             }
         }
 
-        pub(crate) fn ssd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u64 {
+        pub(crate) fn ssd(
+            a: &[u16],
+            a_stride: usize,
+            b: &[u16],
+            b_stride: usize,
+            w: usize,
+            h: usize,
+        ) -> u64 {
             if w % 4 != 0 || h == 0 {
                 return ssd_scalar(a, a_stride, b, b_stride, w, h);
             }
-            assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+            assert!(
+                a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+                "block out of range"
+            );
             unsafe { ssd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
         }
 
@@ -193,7 +230,12 @@ macro_rules! kernels {
             let s1 = _mm_add_epi16(r1, r2);
             let s2 = _mm_sub_epi16(r1, r2);
             let s3 = _mm_sub_epi16(r0, r3);
-            [_mm_add_epi16(s0, s1), _mm_add_epi16(s3, s2), _mm_sub_epi16(s0, s1), _mm_sub_epi16(s3, s2)]
+            [
+                _mm_add_epi16(s0, s1),
+                _mm_add_epi16(s3, s2),
+                _mm_sub_epi16(s0, s1),
+                _mm_sub_epi16(s3, s2),
+            ]
         }
 
         /// The same across four i32 vectors.
@@ -204,7 +246,12 @@ macro_rules! kernels {
             let s1 = _mm_add_epi32(r1, r2);
             let s2 = _mm_sub_epi32(r1, r2);
             let s3 = _mm_sub_epi32(r0, r3);
-            [_mm_add_epi32(s0, s1), _mm_add_epi32(s3, s2), _mm_sub_epi32(s0, s1), _mm_sub_epi32(s3, s2)]
+            [
+                _mm_add_epi32(s0, s1),
+                _mm_add_epi32(s3, s2),
+                _mm_sub_epi32(s0, s1),
+                _mm_sub_epi32(s3, s2),
+            ]
         }
 
         /// SATD of the two tiles of differences in `r0..r3` (one row each,
@@ -231,7 +278,10 @@ macro_rules! kernels {
                 let c3 = _mm_unpackhi_epi64(v1, v3);
                 let [w0, w1, w2, w3] = butterfly16(c0, c1, c2, c3);
                 // Each column's four absolute values: at most 65504, a u16.
-                let s = _mm_add_epi16(_mm_add_epi16(abs16(w0), abs16(w1)), _mm_add_epi16(abs16(w2), abs16(w3)));
+                let s = _mm_add_epi16(
+                    _mm_add_epi16(abs16(w0), abs16(w1)),
+                    _mm_add_epi16(abs16(w2), abs16(w3)),
+                );
                 // [A01, A23, B01, B23] each 65536 short -> [A, A, B, B]
                 // 131072 short; the shortfall and the rounding go back at once.
                 let p = fold(s);
@@ -252,9 +302,16 @@ macro_rules! kernels {
                 let u1 = _mm_unpacklo_epi32(t2, t3);
                 let u2 = _mm_unpackhi_epi32(t0, t1);
                 let u3 = _mm_unpackhi_epi32(t2, t3);
-                let [w0, w1, w2, w3] =
-                    butterfly32(_mm_unpacklo_epi64(u0, u1), _mm_unpackhi_epi64(u0, u1), _mm_unpacklo_epi64(u2, u3), _mm_unpackhi_epi64(u2, u3));
-                let s = _mm_add_epi32(_mm_add_epi32(abs32(w0), abs32(w1)), _mm_add_epi32(abs32(w2), abs32(w3)));
+                let [w0, w1, w2, w3] = butterfly32(
+                    _mm_unpacklo_epi64(u0, u1),
+                    _mm_unpackhi_epi64(u0, u1),
+                    _mm_unpacklo_epi64(u2, u3),
+                    _mm_unpackhi_epi64(u2, u3),
+                );
+                let s = _mm_add_epi32(
+                    _mm_add_epi32(abs32(w0), abs32(w1)),
+                    _mm_add_epi32(abs32(w2), abs32(w3)),
+                );
                 let x = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
                 let t = _mm_add_epi32(x, _mm_shuffle_epi32(x, 0b10_11_00_01));
                 _mm_srli_epi32(_mm_add_epi32(t, _mm_set1_epi32(1)), 1)
@@ -278,20 +335,35 @@ macro_rules! kernels {
                 } else {
                     let lo = |k: usize| _mm_sub_epi32(zx16(ra[k]), zx16(rb[k]));
                     let hi = |k: usize| _mm_sub_epi32(zx16h(ra[k]), zx16h(rb[k]));
-                    _mm_unpacklo_epi64(tile32([lo(0), lo(1), lo(2), lo(3)]), tile32([hi(0), hi(1), hi(2), hi(3)]))
+                    _mm_unpacklo_epi64(
+                        tile32([lo(0), lo(1), lo(2), lo(3)]),
+                        tile32([hi(0), hi(1), hi(2), hi(3)]),
+                    )
                 }
             }
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn satd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize, h: usize) -> u32 {
+        unsafe fn satd_impl(
+            a: *const u16,
+            sa: usize,
+            b: *const u16,
+            sb: usize,
+            w: usize,
+            h: usize,
+        ) -> u32 {
             unsafe {
                 let mut acc = _mm_setzero_si128();
                 if w == 4 {
                     // Two tiles one above the other: rows y and y + 4 share a vector.
                     let mut y = 0;
                     while y + 8 <= h {
-                        let row = |p: *const u16, s: usize, r: usize| _mm_unpacklo_epi64(load4(p.add((y + r) * s)), load4(p.add((y + r + 4) * s)));
+                        let row = |p: *const u16, s: usize, r: usize| {
+                            _mm_unpacklo_epi64(
+                                load4(p.add((y + r) * s)),
+                                load4(p.add((y + r + 4) * s)),
+                            )
+                        };
                         let ra = [row(a, sa, 0), row(a, sa, 1), row(a, sa, 2), row(a, sa, 3)];
                         let rb = [row(b, sb, 0), row(b, sb, 1), row(b, sb, 2), row(b, sb, 3)];
                         acc = _mm_add_epi32(acc, pair(ra, rb));
@@ -300,7 +372,13 @@ macro_rules! kernels {
                     if y < h {
                         // One tile, in the low half; the zero tile above it costs nothing.
                         let row = |p: *const u16, s: usize, r: usize| load4(p.add((y + r) * s));
-                        acc = _mm_add_epi32(acc, pair([row(a, sa, 0), row(a, sa, 1), row(a, sa, 2), row(a, sa, 3)], [row(b, sb, 0), row(b, sb, 1), row(b, sb, 2), row(b, sb, 3)]));
+                        acc = _mm_add_epi32(
+                            acc,
+                            pair(
+                                [row(a, sa, 0), row(a, sa, 1), row(a, sa, 2), row(a, sa, 3)],
+                                [row(b, sb, 0), row(b, sb, 1), row(b, sb, 2), row(b, sb, 3)],
+                            ),
+                        );
                     }
                 } else {
                     let mut y = 0;
@@ -310,26 +388,69 @@ macro_rules! kernels {
                         let mut x = 0;
                         while x + 8 <= w {
                             let row = |p: *const u16, s: usize, r: usize| load8(p.add(r * s + x));
-                            acc = _mm_add_epi32(acc, pair([row(ra, sa, 0), row(ra, sa, 1), row(ra, sa, 2), row(ra, sa, 3)], [row(rb, sb, 0), row(rb, sb, 1), row(rb, sb, 2), row(rb, sb, 3)]));
+                            acc = _mm_add_epi32(
+                                acc,
+                                pair(
+                                    [
+                                        row(ra, sa, 0),
+                                        row(ra, sa, 1),
+                                        row(ra, sa, 2),
+                                        row(ra, sa, 3),
+                                    ],
+                                    [
+                                        row(rb, sb, 0),
+                                        row(rb, sb, 1),
+                                        row(rb, sb, 2),
+                                        row(rb, sb, 3),
+                                    ],
+                                ),
+                            );
                             x += 8;
                         }
                         if x < w {
                             let row = |p: *const u16, s: usize, r: usize| load4(p.add(r * s + x));
-                            acc = _mm_add_epi32(acc, pair([row(ra, sa, 0), row(ra, sa, 1), row(ra, sa, 2), row(ra, sa, 3)], [row(rb, sb, 0), row(rb, sb, 1), row(rb, sb, 2), row(rb, sb, 3)]));
+                            acc = _mm_add_epi32(
+                                acc,
+                                pair(
+                                    [
+                                        row(ra, sa, 0),
+                                        row(ra, sa, 1),
+                                        row(ra, sa, 2),
+                                        row(ra, sa, 3),
+                                    ],
+                                    [
+                                        row(rb, sb, 0),
+                                        row(rb, sb, 1),
+                                        row(rb, sb, 2),
+                                        row(rb, sb, 3),
+                                    ],
+                                ),
+                            );
                         }
                         y += 4;
                     }
                 }
                 // Lanes are [A, A, B, B] sums: one of each.
-                (_mm_cvtsi128_si32(acc) as u32).wrapping_add(_mm_cvtsi128_si32(_mm_srli_si128(acc, 8)) as u32)
+                (_mm_cvtsi128_si32(acc) as u32)
+                    .wrapping_add(_mm_cvtsi128_si32(_mm_srli_si128(acc, 8)) as u32)
             }
         }
 
-        pub(crate) fn satd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
+        pub(crate) fn satd(
+            a: &[u16],
+            a_stride: usize,
+            b: &[u16],
+            b_stride: usize,
+            w: usize,
+            h: usize,
+        ) -> u32 {
             if w % 4 != 0 || h % 4 != 0 || h == 0 {
                 return satd_scalar(a, a_stride, b, b_stride, w, h);
             }
-            assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+            assert!(
+                a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+                "block out of range"
+            );
             unsafe { satd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
         }
     };
@@ -388,7 +509,10 @@ pub(crate) mod avx2 {
     #[target_feature(enable = "avx2")]
     #[inline]
     unsafe fn fold(v: __m256i) -> __m256i {
-        _mm256_madd_epi16(_mm256_xor_si256(v, _mm256_set1_epi16(i16::MIN)), _mm256_set1_epi16(1))
+        _mm256_madd_epi16(
+            _mm256_xor_si256(v, _mm256_set1_epi16(i16::MIN)),
+            _mm256_set1_epi16(1),
+        )
     }
 
     /// The eight i32 lanes of `v`, summed in i64.
@@ -403,7 +527,14 @@ pub(crate) mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn sad_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize, h: usize) -> u32 {
+    unsafe fn sad_impl(
+        a: *const u16,
+        sa: usize,
+        b: *const u16,
+        sb: usize,
+        w: usize,
+        h: usize,
+    ) -> u32 {
         unsafe {
             let mut acc = _mm256_setzero_si256();
             let mut lanes = 0u32;
@@ -412,7 +543,8 @@ pub(crate) mod avx2 {
                 let rb = b.add(y * sb);
                 let mut x = 0;
                 while x < w {
-                    acc = _mm256_add_epi32(acc, fold(absdiff(load16(ra.add(x)), load16(rb.add(x)))));
+                    acc =
+                        _mm256_add_epi32(acc, fold(absdiff(load16(ra.add(x)), load16(rb.add(x)))));
                     x += 16;
                     lanes += 16;
                 }
@@ -425,12 +557,22 @@ pub(crate) mod avx2 {
         if w % 16 != 0 || h == 0 {
             return super::avx::sad(a, a_stride, b, b_stride, w, h);
         }
-        assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+        assert!(
+            a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+            "block out of range"
+        );
         unsafe { sad_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn ssd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize, h: usize) -> u64 {
+    unsafe fn ssd_impl(
+        a: *const u16,
+        sa: usize,
+        b: *const u16,
+        sb: usize,
+        w: usize,
+        h: usize,
+    ) -> u64 {
         unsafe {
             let (mut total_lo, mut total_hi) = (0i64, 0i64);
             let mut lanes = 0i64;
@@ -458,7 +600,10 @@ pub(crate) mod avx2 {
         if w % 16 != 0 || h == 0 {
             return super::avx::ssd(a, a_stride, b, b_stride, w, h);
         }
-        assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+        assert!(
+            a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+            "block out of range"
+        );
         unsafe { ssd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
     }
 
@@ -469,7 +614,12 @@ pub(crate) mod avx2 {
         let s1 = _mm256_add_epi16(r1, r2);
         let s2 = _mm256_sub_epi16(r1, r2);
         let s3 = _mm256_sub_epi16(r0, r3);
-        [_mm256_add_epi16(s0, s1), _mm256_add_epi16(s3, s2), _mm256_sub_epi16(s0, s1), _mm256_sub_epi16(s3, s2)]
+        [
+            _mm256_add_epi16(s0, s1),
+            _mm256_add_epi16(s3, s2),
+            _mm256_sub_epi16(s0, s1),
+            _mm256_sub_epi16(s3, s2),
+        ]
     }
 
     #[target_feature(enable = "avx2")]
@@ -479,7 +629,12 @@ pub(crate) mod avx2 {
         let s1 = _mm256_add_epi32(r1, r2);
         let s2 = _mm256_sub_epi32(r1, r2);
         let s3 = _mm256_sub_epi32(r0, r3);
-        [_mm256_add_epi32(s0, s1), _mm256_add_epi32(s3, s2), _mm256_sub_epi32(s0, s1), _mm256_sub_epi32(s3, s2)]
+        [
+            _mm256_add_epi32(s0, s1),
+            _mm256_add_epi32(s3, s2),
+            _mm256_sub_epi32(s0, s1),
+            _mm256_sub_epi32(s3, s2),
+        ]
     }
 
     /// Four tiles across in i16, two per 128-bit lane: the 128-bit `pair16`
@@ -498,9 +653,16 @@ pub(crate) mod avx2 {
             let v1 = _mm256_unpackhi_epi32(u0, u1);
             let v2 = _mm256_unpacklo_epi32(u2, u3);
             let v3 = _mm256_unpackhi_epi32(u2, u3);
-            let [w0, w1, w2, w3] =
-                butterfly16(_mm256_unpacklo_epi64(v0, v2), _mm256_unpackhi_epi64(v0, v2), _mm256_unpacklo_epi64(v1, v3), _mm256_unpackhi_epi64(v1, v3));
-            let s = _mm256_add_epi16(_mm256_add_epi16(_mm256_abs_epi16(w0), _mm256_abs_epi16(w1)), _mm256_add_epi16(_mm256_abs_epi16(w2), _mm256_abs_epi16(w3)));
+            let [w0, w1, w2, w3] = butterfly16(
+                _mm256_unpacklo_epi64(v0, v2),
+                _mm256_unpackhi_epi64(v0, v2),
+                _mm256_unpacklo_epi64(v1, v3),
+                _mm256_unpackhi_epi64(v1, v3),
+            );
+            let s = _mm256_add_epi16(
+                _mm256_add_epi16(_mm256_abs_epi16(w0), _mm256_abs_epi16(w1)),
+                _mm256_add_epi16(_mm256_abs_epi16(w2), _mm256_abs_epi16(w3)),
+            );
             let p = fold(s);
             let q = _mm256_add_epi32(p, _mm256_shuffle_epi32(p, 0b10_11_00_01));
             _mm256_srli_epi32(_mm256_add_epi32(q, _mm256_set1_epi32(131072 + 1)), 1)
@@ -518,9 +680,16 @@ pub(crate) mod avx2 {
             let u1 = _mm256_unpacklo_epi32(t2, t3);
             let u2 = _mm256_unpackhi_epi32(t0, t1);
             let u3 = _mm256_unpackhi_epi32(t2, t3);
-            let [w0, w1, w2, w3] =
-                butterfly32(_mm256_unpacklo_epi64(u0, u1), _mm256_unpackhi_epi64(u0, u1), _mm256_unpacklo_epi64(u2, u3), _mm256_unpackhi_epi64(u2, u3));
-            let s = _mm256_add_epi32(_mm256_add_epi32(_mm256_abs_epi32(w0), _mm256_abs_epi32(w1)), _mm256_add_epi32(_mm256_abs_epi32(w2), _mm256_abs_epi32(w3)));
+            let [w0, w1, w2, w3] = butterfly32(
+                _mm256_unpacklo_epi64(u0, u1),
+                _mm256_unpackhi_epi64(u0, u1),
+                _mm256_unpacklo_epi64(u2, u3),
+                _mm256_unpackhi_epi64(u2, u3),
+            );
+            let s = _mm256_add_epi32(
+                _mm256_add_epi32(_mm256_abs_epi32(w0), _mm256_abs_epi32(w1)),
+                _mm256_add_epi32(_mm256_abs_epi32(w2), _mm256_abs_epi32(w3)),
+            );
             let x = _mm256_add_epi32(s, _mm256_shuffle_epi32(s, 0b01_00_11_10));
             let t = _mm256_add_epi32(x, _mm256_shuffle_epi32(x, 0b10_11_00_01));
             _mm256_srli_epi32(_mm256_add_epi32(t, _mm256_set1_epi32(1)), 1)
@@ -544,15 +713,32 @@ pub(crate) mod avx2 {
                 quad16(std::array::from_fn(|k| _mm256_sub_epi16(ra[k], rb[k])))
             } else {
                 let zero = _mm256_setzero_si256();
-                let lo = std::array::from_fn(|k| _mm256_sub_epi32(_mm256_unpacklo_epi16(ra[k], zero), _mm256_unpacklo_epi16(rb[k], zero)));
-                let hi = std::array::from_fn(|k| _mm256_sub_epi32(_mm256_unpackhi_epi16(ra[k], zero), _mm256_unpackhi_epi16(rb[k], zero)));
+                let lo = std::array::from_fn(|k| {
+                    _mm256_sub_epi32(
+                        _mm256_unpacklo_epi16(ra[k], zero),
+                        _mm256_unpacklo_epi16(rb[k], zero),
+                    )
+                });
+                let hi = std::array::from_fn(|k| {
+                    _mm256_sub_epi32(
+                        _mm256_unpackhi_epi16(ra[k], zero),
+                        _mm256_unpackhi_epi16(rb[k], zero),
+                    )
+                });
                 _mm256_unpacklo_epi64(tiles32(lo), tiles32(hi))
             }
         }
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn satd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize, h: usize) -> u32 {
+    unsafe fn satd_impl(
+        a: *const u16,
+        sa: usize,
+        b: *const u16,
+        sb: usize,
+        w: usize,
+        h: usize,
+    ) -> u32 {
         unsafe {
             let mut acc = _mm256_setzero_si256();
             let mut y = 0;
@@ -576,25 +762,37 @@ pub(crate) mod avx2 {
                 let rb = b.add(y * sb);
                 let mut x = 0;
                 while x < w {
-                    let rows = |p: *const u16, s: usize| std::array::from_fn(|r| load16(p.add(r * s + x)));
+                    let rows =
+                        |p: *const u16, s: usize| std::array::from_fn(|r| load16(p.add(r * s + x)));
                     acc = _mm256_add_epi32(acc, quad(rows(ra, sa), rows(rb, sb)));
                     x += 16;
                 }
                 y += 4;
             }
             // [A, A, B, B | C, C, D, D]: fold the lanes, then one of each.
-            let s = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
-            (_mm_cvtsi128_si32(s) as u32).wrapping_add(_mm_cvtsi128_si32(_mm_srli_si128(s, 8)) as u32)
+            let s = _mm_add_epi32(
+                _mm256_castsi256_si128(acc),
+                _mm256_extracti128_si256(acc, 1),
+            );
+            (_mm_cvtsi128_si32(s) as u32)
+                .wrapping_add(_mm_cvtsi128_si32(_mm_srli_si128(s, 8)) as u32)
         }
     }
 
     fn satd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
         // Sixteen or more wide, or eight wide in whole 8x8 blocks.
-        let ours = if w == 8 { h.is_multiple_of(8) } else { w.is_multiple_of(16) && h.is_multiple_of(4) };
+        let ours = if w == 8 {
+            h.is_multiple_of(8)
+        } else {
+            w.is_multiple_of(16) && h.is_multiple_of(4)
+        };
         if !ours || h == 0 {
             return super::avx::satd(a, a_stride, b, b_stride, w, h);
         }
-        assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+        assert!(
+            a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+            "block out of range"
+        );
         unsafe { satd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
     }
 }
@@ -628,11 +826,53 @@ mod tests {
     fn rungs() -> Vec<(&'static str, DistortionDsp<u16>)> {
         let base = Cpu::SCALAR;
         [
-            ("sse2", Cpu { sse2: true, ..base }, std::is_x86_feature_detected!("sse2")),
-            ("ssse3", Cpu { sse2: true, ssse3: true, ..base }, std::is_x86_feature_detected!("ssse3")),
-            ("sse4.1", Cpu { sse2: true, ssse3: true, sse41: true, ..base }, std::is_x86_feature_detected!("sse4.1")),
-            ("avx", Cpu { sse2: true, ssse3: true, sse41: true, avx: true, ..base }, std::is_x86_feature_detected!("avx")),
-            ("avx2", Cpu { sse2: true, ssse3: true, sse41: true, avx: true, avx2: true, ..base }, std::is_x86_feature_detected!("avx2")),
+            (
+                "sse2",
+                Cpu { sse2: true, ..base },
+                std::is_x86_feature_detected!("sse2"),
+            ),
+            (
+                "ssse3",
+                Cpu {
+                    sse2: true,
+                    ssse3: true,
+                    ..base
+                },
+                std::is_x86_feature_detected!("ssse3"),
+            ),
+            (
+                "sse4.1",
+                Cpu {
+                    sse2: true,
+                    ssse3: true,
+                    sse41: true,
+                    ..base
+                },
+                std::is_x86_feature_detected!("sse4.1"),
+            ),
+            (
+                "avx",
+                Cpu {
+                    sse2: true,
+                    ssse3: true,
+                    sse41: true,
+                    avx: true,
+                    ..base
+                },
+                std::is_x86_feature_detected!("avx"),
+            ),
+            (
+                "avx2",
+                Cpu {
+                    sse2: true,
+                    ssse3: true,
+                    sse41: true,
+                    avx: true,
+                    avx2: true,
+                    ..base
+                },
+                std::is_x86_feature_detected!("avx2"),
+            ),
         ]
         .into_iter()
         .filter(|&(_, _, have)| have)
@@ -680,7 +920,9 @@ mod tests {
         use std::time::Instant;
         let mut seed = 0xbe9c_u64;
         let mut lcg = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         let s = DistortionDsp::<u16>::scalar();
@@ -691,7 +933,10 @@ mod tests {
             // prediction a small residual away from it.
             let m = (1u32 << bits) - 1;
             let a: Vec<u16> = (0..96 * 96).map(|_| (lcg() % (m + 1)) as u16).collect();
-            let b: Vec<u16> = a.iter().map(|&v| (v as i32 + (lcg() % 33) as i32 - 16).clamp(0, m as i32) as u16).collect();
+            let b: Vec<u16> = a
+                .iter()
+                .map(|&v| (v as i32 + (lcg() % 33) as i32 - 16).clamp(0, m as i32) as u16)
+                .collect();
             for &(w, h) in &[(4, 4), (8, 8), (16, 16), (32, 32), (64, 64)] {
                 // Every table back to back within a round, seven rounds, the
                 // ratio to scalar taken per round and its median reported.
@@ -721,7 +966,10 @@ mod tests {
                     for (t, (name, _)) in tables.iter().enumerate() {
                         let own = median(ns[t].to_vec());
                         let ratio = median((0..ROUNDS).map(|r| ns[0][r] / ns[t][r]).collect());
-                        println!("{bits}-bit {w}x{h} {metric:4} {name:13} {own:8.1} ns/call  {ratio:6.2}x scalar (median of {ROUNDS} paired rounds) [{}]", sink & 1);
+                        println!(
+                            "{bits}-bit {w}x{h} {metric:4} {name:13} {own:8.1} ns/call  {ratio:6.2}x scalar (median of {ROUNDS} paired rounds) [{}]",
+                            sink & 1
+                        );
                     }
                 }
             }

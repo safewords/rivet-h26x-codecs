@@ -45,11 +45,21 @@ unsafe fn sad_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize,
     }
 }
 
-pub(crate) fn sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
+pub(crate) fn sad(
+    a: &[u16],
+    a_stride: usize,
+    b: &[u16],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u32 {
     if w % 4 != 0 || h == 0 {
         return sad_scalar(a, a_stride, b, b_stride, w, h);
     }
-    assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+    assert!(
+        a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+        "block out of range"
+    );
     unsafe { sad_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
 }
 
@@ -76,35 +86,65 @@ unsafe fn ssd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize,
     }
 }
 
-pub(crate) fn ssd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u64 {
+pub(crate) fn ssd(
+    a: &[u16],
+    a_stride: usize,
+    b: &[u16],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u64 {
     if w % 4 != 0 || h == 0 {
         return ssd_scalar(a, a_stride, b, b_stride, w, h);
     }
-    assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+    assert!(
+        a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+        "block out of range"
+    );
     unsafe { ssd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
 }
 
 /// The 4-point Hadamard butterfly, lane-wise across four i16 vectors.
 #[inline(always)]
-unsafe fn butterfly16(r0: int16x8_t, r1: int16x8_t, r2: int16x8_t, r3: int16x8_t) -> [int16x8_t; 4] {
+unsafe fn butterfly16(
+    r0: int16x8_t,
+    r1: int16x8_t,
+    r2: int16x8_t,
+    r3: int16x8_t,
+) -> [int16x8_t; 4] {
     unsafe {
         let s0 = vaddq_s16(r0, r3);
         let s1 = vaddq_s16(r1, r2);
         let s2 = vsubq_s16(r1, r2);
         let s3 = vsubq_s16(r0, r3);
-        [vaddq_s16(s0, s1), vaddq_s16(s3, s2), vsubq_s16(s0, s1), vsubq_s16(s3, s2)]
+        [
+            vaddq_s16(s0, s1),
+            vaddq_s16(s3, s2),
+            vsubq_s16(s0, s1),
+            vsubq_s16(s3, s2),
+        ]
     }
 }
 
 /// The same across four i32 vectors.
 #[inline(always)]
-unsafe fn butterfly32(r0: int32x4_t, r1: int32x4_t, r2: int32x4_t, r3: int32x4_t) -> [int32x4_t; 4] {
+unsafe fn butterfly32(
+    r0: int32x4_t,
+    r1: int32x4_t,
+    r2: int32x4_t,
+    r3: int32x4_t,
+) -> [int32x4_t; 4] {
     unsafe {
         let s0 = vaddq_s32(r0, r3);
         let s1 = vaddq_s32(r1, r2);
         let s2 = vsubq_s32(r1, r2);
         let s3 = vsubq_s32(r0, r3);
-        [vaddq_s32(s0, s1), vaddq_s32(s3, s2), vsubq_s32(s0, s1), vsubq_s32(s3, s2)]
+        [
+            vaddq_s32(s0, s1),
+            vaddq_s32(s3, s2),
+            vsubq_s32(s0, s1),
+            vsubq_s32(s3, s2),
+        ]
     }
 }
 
@@ -119,10 +159,22 @@ unsafe fn pair16(r: [int16x8_t; 4]) -> u32 {
         let a1 = vtrn2q_s16(t0, t1);
         let a2 = vtrn1q_s16(t2, t3);
         let a3 = vtrn2q_s16(t2, t3);
-        let c0 = vreinterpretq_s16_s32(vtrn1q_s32(vreinterpretq_s32_s16(a0), vreinterpretq_s32_s16(a2)));
-        let c2 = vreinterpretq_s16_s32(vtrn2q_s32(vreinterpretq_s32_s16(a0), vreinterpretq_s32_s16(a2)));
-        let c1 = vreinterpretq_s16_s32(vtrn1q_s32(vreinterpretq_s32_s16(a1), vreinterpretq_s32_s16(a3)));
-        let c3 = vreinterpretq_s16_s32(vtrn2q_s32(vreinterpretq_s32_s16(a1), vreinterpretq_s32_s16(a3)));
+        let c0 = vreinterpretq_s16_s32(vtrn1q_s32(
+            vreinterpretq_s32_s16(a0),
+            vreinterpretq_s32_s16(a2),
+        ));
+        let c2 = vreinterpretq_s16_s32(vtrn2q_s32(
+            vreinterpretq_s32_s16(a0),
+            vreinterpretq_s32_s16(a2),
+        ));
+        let c1 = vreinterpretq_s16_s32(vtrn1q_s32(
+            vreinterpretq_s32_s16(a1),
+            vreinterpretq_s32_s16(a3),
+        ));
+        let c3 = vreinterpretq_s16_s32(vtrn2q_s32(
+            vreinterpretq_s32_s16(a1),
+            vreinterpretq_s32_s16(a3),
+        ));
         let [w0, w1, w2, w3] = butterfly16(c0, c1, c2, c3);
         let u = |x: int16x8_t| vreinterpretq_u16_s16(vabsq_s16(x));
         // Four absolute values a column: at most 65504, a u16.
@@ -157,7 +209,10 @@ unsafe fn tile32(r: [int32x4_t; 4]) -> u32 {
         let [t0, t1, t2, t3] = butterfly32(r[0], r[1], r[2], r[3]);
         let [c0, c1, c2, c3] = transpose4([t0, t1, t2, t3]);
         let [w0, w1, w2, w3] = butterfly32(c0, c1, c2, c3);
-        let s = vaddq_s32(vaddq_s32(vabsq_s32(w0), vabsq_s32(w1)), vaddq_s32(vabsq_s32(w2), vabsq_s32(w3)));
+        let s = vaddq_s32(
+            vaddq_s32(vabsq_s32(w0), vabsq_s32(w1)),
+            vaddq_s32(vabsq_s32(w2), vabsq_s32(w3)),
+        );
         (vaddvq_s32(s) as u32 + 1) >> 1
     }
 }
@@ -173,9 +228,13 @@ unsafe fn pair(ra: [uint16x8_t; 4], rb: [uint16x8_t; 4]) -> u32 {
             vorrq_u16(vorrq_u16(rb[0], rb[1]), vorrq_u16(rb[2], rb[3])),
         );
         if vmaxvq_u16(seen) < 2048 {
-            pair16(std::array::from_fn(|k| vreinterpretq_s16_u16(vsubq_u16(ra[k], rb[k]))))
+            pair16(std::array::from_fn(|k| {
+                vreinterpretq_s16_u16(vsubq_u16(ra[k], rb[k]))
+            }))
         } else {
-            let lo = std::array::from_fn(|k| vreinterpretq_s32_u32(vsubl_u16(vget_low_u16(ra[k]), vget_low_u16(rb[k]))));
+            let lo = std::array::from_fn(|k| {
+                vreinterpretq_s32_u32(vsubl_u16(vget_low_u16(ra[k]), vget_low_u16(rb[k])))
+            });
             let hi = std::array::from_fn(|k| vreinterpretq_s32_u32(vsubl_high_u16(ra[k], rb[k])));
             tile32(lo).wrapping_add(tile32(hi))
         }
@@ -191,12 +250,21 @@ unsafe fn satd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize
             let mut y = 0;
             while y + 8 <= h {
                 // Two tiles one above the other: rows y and y + 4 share a vector.
-                let rows = |p: *const u16, s: usize| std::array::from_fn(|r| vcombine_u16(vld1_u16(p.add((y + r) * s)), vld1_u16(p.add((y + r + 4) * s))));
+                let rows = |p: *const u16, s: usize| {
+                    std::array::from_fn(|r| {
+                        vcombine_u16(
+                            vld1_u16(p.add((y + r) * s)),
+                            vld1_u16(p.add((y + r + 4) * s)),
+                        )
+                    })
+                };
                 total = total.wrapping_add(pair(rows(a, sa), rows(b, sb)));
                 y += 8;
             }
             if y < h {
-                let rows = |p: *const u16, s: usize| std::array::from_fn(|r| vcombine_u16(vld1_u16(p.add((y + r) * s)), zero));
+                let rows = |p: *const u16, s: usize| {
+                    std::array::from_fn(|r| vcombine_u16(vld1_u16(p.add((y + r) * s)), zero))
+                };
                 total = total.wrapping_add(pair(rows(a, sa), rows(b, sb)));
             }
         } else {
@@ -206,12 +274,16 @@ unsafe fn satd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize
                 let rb = b.add(y * sb);
                 let mut x = 0;
                 while x + 8 <= w {
-                    let rows = |p: *const u16, s: usize| std::array::from_fn(|r| vld1q_u16(p.add(r * s + x)));
+                    let rows = |p: *const u16, s: usize| {
+                        std::array::from_fn(|r| vld1q_u16(p.add(r * s + x)))
+                    };
                     total = total.wrapping_add(pair(rows(ra, sa), rows(rb, sb)));
                     x += 8;
                 }
                 if x < w {
-                    let rows = |p: *const u16, s: usize| std::array::from_fn(|r| vcombine_u16(vld1_u16(p.add(r * s + x)), zero));
+                    let rows = |p: *const u16, s: usize| {
+                        std::array::from_fn(|r| vcombine_u16(vld1_u16(p.add(r * s + x)), zero))
+                    };
                     total = total.wrapping_add(pair(rows(ra, sa), rows(rb, sb)));
                 }
                 y += 4;
@@ -221,11 +293,21 @@ unsafe fn satd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize
     }
 }
 
-pub(crate) fn satd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
+pub(crate) fn satd(
+    a: &[u16],
+    a_stride: usize,
+    b: &[u16],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u32 {
     if w % 4 != 0 || h % 4 != 0 || h == 0 {
         return satd_scalar(a, a_stride, b, b_stride, w, h);
     }
-    assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+    assert!(
+        a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+        "block out of range"
+    );
     unsafe { satd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
 }
 
@@ -246,7 +328,13 @@ mod tests {
     #[test]
     fn neon_u16_distortion_matches_scalar_at_every_depth() {
         let mut d = DistortionDsp::<u16>::scalar();
-        install(&mut d, Cpu { neon: true, ..Cpu::SCALAR });
+        install(
+            &mut d,
+            Cpu {
+                neon: true,
+                ..Cpu::SCALAR
+            },
+        );
         match u16_sweep::distortion(&[("neon", d)]) {
             Ok(n) => assert!(n > 0, "the sweep compared nothing"),
             Err(e) => panic!("{e}"),

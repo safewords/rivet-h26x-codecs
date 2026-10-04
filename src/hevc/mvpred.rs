@@ -69,11 +69,24 @@ pub struct PuPos {
 
 /// Prediction block availability (6.4.2) of the neighbour at `(xn, yn)`,
 /// returning its motion when available and inter.
-fn neighbour_pb<S: Sample>(info: &PicInfo, cur: &Frame<S>, ac: &AvailCtx, pu: &PuPos, xn: i32, yn: i32) -> Option<MotionInfo> {
-    let same_cb = xn >= pu.x_cb && xn < pu.x_cb + pu.n_cb && yn >= pu.y_cb && yn < pu.y_cb + pu.n_cb;
+fn neighbour_pb<S: Sample>(
+    info: &PicInfo,
+    cur: &Frame<S>,
+    ac: &AvailCtx,
+    pu: &PuPos,
+    xn: i32,
+    yn: i32,
+) -> Option<MotionInfo> {
+    let same_cb =
+        xn >= pu.x_cb && xn < pu.x_cb + pu.n_cb && yn >= pu.y_cb && yn < pu.y_cb + pu.n_cb;
     let avail = if !same_cb {
         info.available_at(ac, xn, yn)
-    } else if (pu.w << 1) == pu.n_cb && (pu.h << 1) == pu.n_cb && pu.part_idx == 1 && pu.y_cb + pu.h <= yn && pu.x_cb + pu.w > xn {
+    } else if (pu.w << 1) == pu.n_cb
+        && (pu.h << 1) == pu.n_cb
+        && pu.part_idx == 1
+        && pu.y_cb + pu.h <= yn
+        && pu.x_cb + pu.w > xn
+    {
         false
     } else {
         // Same CB: an earlier partition (the candidate positions never fall
@@ -93,12 +106,22 @@ fn neighbour_pb<S: Sample>(info: &PicInfo, cur: &Frame<S>, ac: &AvailCtx, pu: &P
 /// `LongTermRefPic` for the current slice's list X index.
 #[inline]
 fn cur_is_long_term<S: Sample>(refs: &RefCtx<S>, list: usize, idx: i8) -> bool {
-    refs.long_term[list].get(idx as usize).copied().unwrap_or(false)
+    refs.long_term[list]
+        .get(idx as usize)
+        .copied()
+        .unwrap_or(false)
 }
 
 /// Collocated motion vector (8.5.3.2.9) for list `list` / `ref_idx`, at
 /// collocated position `(xc, yc)` (already 16-aligned) in `col`.
-fn collocated_mv<S: Sample>(refs: &RefCtx<S>, col: &Frame<S>, xc: i32, yc: i32, list: usize, ref_idx: i8) -> Option<Mv> {
+fn collocated_mv<S: Sample>(
+    refs: &RefCtx<S>,
+    col: &Frame<S>,
+    xc: i32,
+    yc: i32,
+    list: usize,
+    ref_idx: i8,
+) -> Option<Mv> {
     if xc < 0 || yc < 0 || xc >= col.width as i32 || yc >= col.height as i32 {
         return None;
     }
@@ -112,7 +135,11 @@ fn collocated_mv<S: Sample>(refs: &RefCtx<S>, col: &Frame<S>, xc: i32, yc: i32, 
     } else if !m.uses(1) {
         (m.mv[0], m.ref_delta[0] as i32, m.long_term(0))
     } else {
-        let n = if refs.no_backward_pred { list } else { refs.collocated_list_n() };
+        let n = if refs.no_backward_pred {
+            list
+        } else {
+            refs.collocated_list_n()
+        };
         (m.mv[n], m.ref_delta[n] as i32, m.long_term(n))
     };
     let cur_lt = cur_is_long_term(refs, list, ref_idx);
@@ -146,9 +173,14 @@ impl<S: Sample> RefCtx<'_, S> {
     }
 }
 
-
 /// Temporal candidate (8.5.3.2.8) for list `list` and `ref_idx`.
-pub fn temporal_mv<S: Sample>(refs: &RefCtx<S>, info: &PicInfo, pu: &PuPos, list: usize, ref_idx: i8) -> Option<Mv> {
+pub fn temporal_mv<S: Sample>(
+    refs: &RefCtx<S>,
+    info: &PicInfo,
+    pu: &PuPos,
+    list: usize,
+    ref_idx: i8,
+) -> Option<Mv> {
     if !refs.tmvp {
         return None;
     }
@@ -157,20 +189,36 @@ pub fn temporal_mv<S: Sample>(refs: &RefCtx<S>, info: &PicInfo, pu: &PuPos, list
     let x_br = pu.x_pb + pu.w;
     let y_br = pu.y_pb + pu.h;
     let mut result = None;
-    if (pu.y_pb >> log2_ctb) == (y_br >> log2_ctb) && y_br < col.height as i32 && x_br < col.width as i32 {
+    if (pu.y_pb >> log2_ctb) == (y_br >> log2_ctb)
+        && y_br < col.height as i32
+        && x_br < col.width as i32
+    {
         result = collocated_mv(refs, col, (x_br >> 4) << 4, (y_br >> 4) << 4, list, ref_idx);
     }
     if result.is_none() {
         let x_ctr = pu.x_pb + (pu.w >> 1);
         let y_ctr = pu.y_pb + (pu.h >> 1);
-        result = collocated_mv(refs, col, (x_ctr >> 4) << 4, (y_ctr >> 4) << 4, list, ref_idx);
+        result = collocated_mv(
+            refs,
+            col,
+            (x_ctr >> 4) << 4,
+            (y_ctr >> 4) << 4,
+            list,
+            ref_idx,
+        );
     }
     result
 }
 
 /// The merge candidate list (8.5.3.2.2 – 8.5.3.2.5) and the selected
 /// candidate `merge_idx`.
-pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu_in: &PuPos, merge_idx: usize) -> Cand {
+pub fn merge_candidate<S: Sample>(
+    info: &PicInfo,
+    cur: &Frame<S>,
+    refs: &RefCtx<S>,
+    pu_in: &PuPos,
+    merge_idx: usize,
+) -> Cand {
     // Parallel merge level: a CU of size 8 shares one candidate list.
     let mut pu = *pu_in;
     if refs.log2_par_mrg_level > 2 && pu.n_cb == 8 {
@@ -186,13 +234,20 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
     // The partition-mode exclusions need the original PU shape/index.
     let orig = pu_in;
     let part_mode_second_vertical = orig.part_idx == 1 && orig.w < orig.n_cb && orig.h == orig.n_cb; // Nx2N, nLx2N, nRx2N
-    let part_mode_second_horizontal = orig.part_idx == 1 && orig.h < orig.n_cb && orig.w == orig.n_cb; // 2NxN, 2NxnU, 2NxnD
+    let part_mode_second_horizontal =
+        orig.part_idx == 1 && orig.h < orig.n_cb && orig.w == orig.n_cb; // 2NxN, 2NxnU, 2NxnD
     let single = refs.log2_par_mrg_level > 2 && pu.n_cb == 8;
 
     // Every candidate position is a neighbour of the same prediction block.
     let ac = info.avail_ctx(x_pb, y_pb, cur.width as i32, cur.height as i32);
-    let mut list: Small<Cand, 5> = Small::new(Cand { mv: [Mv::ZERO; 2], ref_idx: [-1; 2] });
-    let to_cand = |m: MotionInfo| Cand { mv: m.mv, ref_idx: m.ref_idx };
+    let mut list: Small<Cand, 5> = Small::new(Cand {
+        mv: [Mv::ZERO; 2],
+        ref_idx: [-1; 2],
+    });
+    let to_cand = |m: MotionInfo| Cand {
+        mv: m.mv,
+        ref_idx: m.ref_idx,
+    };
 
     // A1
     let (xa1, ya1) = (x_pb - 1, y_pb + h - 1);
@@ -218,7 +273,11 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
     }
     // B0
     let (xb0, yb0) = (x_pb + w, y_pb - 1);
-    let b0 = if same_mer(xb0, yb0) { None } else { neighbour_pb(info, cur, &ac, &pu, xb0, yb0).map(to_cand) };
+    let b0 = if same_mer(xb0, yb0) {
+        None
+    } else {
+        neighbour_pb(info, cur, &ac, &pu, xb0, yb0).map(to_cand)
+    };
     if let Some(c) = b0 {
         if !b1.is_some_and(|b| b.same_motion(&c)) {
             list.push(c);
@@ -226,7 +285,11 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
     }
     // A0
     let (xa0, ya0) = (x_pb - 1, y_pb + h);
-    let a0 = if same_mer(xa0, ya0) { None } else { neighbour_pb(info, cur, &ac, &pu, xa0, ya0).map(to_cand) };
+    let a0 = if same_mer(xa0, ya0) {
+        None
+    } else {
+        neighbour_pb(info, cur, &ac, &pu, xa0, ya0).map(to_cand)
+    };
     if let Some(c) = a0 {
         if !a1.is_some_and(|a| a.same_motion(&c)) {
             list.push(c);
@@ -235,7 +298,11 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
     // B2 (only if fewer than four so far)
     if list.len() < 4 {
         let (xb2, yb2) = (x_pb - 1, y_pb - 1);
-        let b2 = if same_mer(xb2, yb2) { None } else { neighbour_pb(info, cur, &ac, &pu, xb2, yb2).map(to_cand) };
+        let b2 = if same_mer(xb2, yb2) {
+            None
+        } else {
+            neighbour_pb(info, cur, &ac, &pu, xb2, yb2).map(to_cand)
+        };
         if let Some(c) = b2 {
             if !a1.is_some_and(|a| a.same_motion(&c)) && !b1.is_some_and(|b| b.same_motion(&c)) {
                 list.push(c);
@@ -251,11 +318,18 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
     // Temporal.
     if refs.tmvp && list.len() < refs.max_merge_cand {
         let mv0 = temporal_mv(refs, info, &pu, 0, 0);
-        let mv1 = if refs.is_b { temporal_mv(refs, info, &pu, 1, 0) } else { None };
+        let mv1 = if refs.is_b {
+            temporal_mv(refs, info, &pu, 1, 0)
+        } else {
+            None
+        };
         if mv0.is_some() || mv1.is_some() {
             list.push(Cand {
                 mv: [mv0.unwrap_or(Mv::ZERO), mv1.unwrap_or(Mv::ZERO)],
-                ref_idx: [if mv0.is_some() { 0 } else { -1 }, if mv1.is_some() { 0 } else { -1 }],
+                ref_idx: [
+                    if mv0.is_some() { 0 } else { -1 },
+                    if mv1.is_some() { 0 } else { -1 },
+                ],
             });
         }
     }
@@ -264,7 +338,20 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
     }
     // Combined bi-predictive (B slices).
     if refs.is_b && list.len() > 1 && list.len() < refs.max_merge_cand {
-        const COMB: [(usize, usize); 12] = [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1), (0, 3), (3, 0), (1, 3), (3, 1), (2, 3), (3, 2)];
+        const COMB: [(usize, usize); 12] = [
+            (0, 1),
+            (1, 0),
+            (0, 2),
+            (2, 0),
+            (1, 2),
+            (2, 1),
+            (0, 3),
+            (3, 0),
+            (1, 3),
+            (3, 1),
+            (2, 3),
+            (3, 2),
+        ];
         let num_orig = list.len();
         let mut comb_idx = 0;
         while comb_idx < num_orig * (num_orig - 1) && list.len() < refs.max_merge_cand {
@@ -275,18 +362,32 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
                 let poc0 = refs.pocs[0][l0c.ref_idx[0] as usize];
                 let poc1 = refs.pocs[1][l1c.ref_idx[1] as usize];
                 if poc0 != poc1 || l0c.mv[0] != l1c.mv[1] {
-                    list.push(Cand { mv: [l0c.mv[0], l1c.mv[1]], ref_idx: [l0c.ref_idx[0], l1c.ref_idx[1]] });
+                    list.push(Cand {
+                        mv: [l0c.mv[0], l1c.mv[1]],
+                        ref_idx: [l0c.ref_idx[0], l1c.ref_idx[1]],
+                    });
                 }
             }
             comb_idx += 1;
         }
     }
     // Zero candidates.
-    let num_ref = if refs.is_b { refs.num_ref_idx[0].min(refs.num_ref_idx[1]) } else { refs.num_ref_idx[0] };
+    let num_ref = if refs.is_b {
+        refs.num_ref_idx[0].min(refs.num_ref_idx[1])
+    } else {
+        refs.num_ref_idx[0]
+    };
     let mut zero_idx = 0i8;
     while list.len() < refs.max_merge_cand {
-        let r = if (zero_idx as usize) < num_ref { zero_idx } else { 0 };
-        list.push(Cand { mv: [Mv::ZERO; 2], ref_idx: [r, if refs.is_b { r } else { -1 }] });
+        let r = if (zero_idx as usize) < num_ref {
+            zero_idx
+        } else {
+            0
+        };
+        list.push(Cand {
+            mv: [Mv::ZERO; 2],
+            ref_idx: [r, if refs.is_b { r } else { -1 }],
+        });
         zero_idx += 1;
     }
     finalize(list[merge_idx.min(list.len() - 1)], orig)
@@ -301,7 +402,10 @@ struct Small<T: Copy, const N: usize> {
 impl<T: Copy, const N: usize> Small<T, N> {
     #[inline(always)]
     fn new(fill: T) -> Self {
-        Small { items: [fill; N], len: 0 }
+        Small {
+            items: [fill; N],
+            len: 0,
+        }
     }
     #[inline(always)]
     fn push(&mut self, v: T) {
@@ -335,7 +439,15 @@ fn finalize(mut c: Cand, orig: &PuPos) -> Cand {
 
 /// AMVP: the motion vector predictor (8.5.3.2.6 / 8.5.3.2.7) for list
 /// `list`, reference `ref_idx`, selected by `mvp_flag`.
-pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &PuPos, list: usize, ref_idx: i8, mvp_flag: u32) -> Mv {
+pub fn amvp<S: Sample>(
+    info: &PicInfo,
+    cur: &Frame<S>,
+    refs: &RefCtx<S>,
+    pu: &PuPos,
+    list: usize,
+    ref_idx: i8,
+    mvp_flag: u32,
+) -> Mv {
     let target_poc = refs.pocs[list][ref_idx as usize];
     let target_lt = refs.long_term[list][ref_idx as usize];
     let (x_pb, y_pb, w, h) = (pu.x_pb, pu.y_pb, pu.w, pu.h);
@@ -351,7 +463,10 @@ pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &Pu
     // First pass on a candidate: same reference picture (any list).
     let direct = |m: &MotionInfo| -> Option<Mv> {
         // predFlagLX and same POC in list X first, then the other list Y.
-        if m.uses(list) && m.ref_poc(list, refs.cur_poc) == target_poc && m.long_term(list) == target_lt {
+        if m.uses(list)
+            && m.ref_poc(list, refs.cur_poc) == target_poc
+            && m.long_term(list) == target_lt
+        {
             return Some(m.mv[list]);
         }
         let y = 1 - list;
@@ -404,7 +519,10 @@ pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &Pu
     }
     // B.
     let mut mv_b: Option<Mv> = None;
-    for m in [b0.as_ref(), b1.as_ref(), b2.as_ref()].into_iter().flatten() {
+    for m in [b0.as_ref(), b1.as_ref(), b2.as_ref()]
+        .into_iter()
+        .flatten()
+    {
         if let Some(mv) = direct(m) {
             mv_b = Some(mv);
             break;
@@ -419,7 +537,10 @@ pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &Pu
     if !is_scaled {
         // Re-derive B with scaling (step 8).
         if mv_b.is_none() {
-            for m in [b0.as_ref(), b1.as_ref(), b2.as_ref()].into_iter().flatten() {
+            for m in [b0.as_ref(), b1.as_ref(), b2.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 if let Some(mv) = scaled(m) {
                     mv_b = Some(mv);
                     break;

@@ -43,7 +43,14 @@ impl<'a> BitReader<'a> {
         } else {
             (last as u64) * 8 - 1 - data[last - 1].trailing_zeros() as u64
         };
-        Self { data, pos: 0, cache: 0, bits: 0, stop_bit, bad: false }
+        Self {
+            data,
+            pos: 0,
+            cache: 0,
+            bits: 0,
+            stop_bit,
+            bad: false,
+        }
     }
 
     /// Total number of bits in the underlying data.
@@ -57,13 +64,11 @@ impl<'a> BitReader<'a> {
         (self.pos as u64) * 8 - self.bits as u64
     }
 
-
     /// Whether any read went past the end (or met a malformed code).
     #[inline]
     pub fn overrun(&self) -> bool {
         self.bad || self.position() > self.len_bits()
     }
-
 
     #[inline(always)]
     fn refill(&mut self) {
@@ -115,7 +120,6 @@ impl<'a> BitReader<'a> {
         self.bits -= n;
         v
     }
-
 
     /// Read one bit as a bool.
     #[inline(always)]
@@ -197,11 +201,7 @@ impl<'a> BitReader<'a> {
 
     /// Truncated Exp-Golomb `te(v)` with range `max`.
     pub fn te(&mut self, max: u32) -> u32 {
-        if max > 1 {
-            self.ue()
-        } else {
-            1 - self.bit()
-        }
+        if max > 1 { self.ue() } else { 1 - self.bit() }
     }
 
     /// Whether the reader is at a byte boundary.
@@ -223,7 +223,6 @@ impl<'a> BitReader<'a> {
         (self.position() / 8) as usize
     }
 
-
     /// `more_rbsp_data()`: true if there is more data before the
     /// `rbsp_trailing_bits`. The RBSP ends with a stop bit `1` followed by
     /// zero bits to the byte boundary (and possibly trailing zero bytes,
@@ -237,7 +236,9 @@ impl<'a> BitReader<'a> {
     /// Fail with a bitstream error if any read overran the data.
     pub fn finish(&self, what: &str) -> Result<()> {
         if self.overrun() {
-            Err(Error::bitstream(format!("{what}: truncated (read past the end of the NAL unit)")))
+            Err(Error::bitstream(format!(
+                "{what}: truncated (read past the end of the NAL unit)"
+            )))
         } else {
             Ok(())
         }

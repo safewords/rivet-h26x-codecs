@@ -14,11 +14,10 @@
 //!           [--mastering-display G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min)]
 //!           [--content-light MAXCLL,MAXFALL]
 
-
 use h26x::ChromaFormat;
 use h26x::encode::{
-    BWeighting, ColourDescription, Config, ContentLightLevel, Entropy, FieldCoding, FieldOrder, InterParts, MasteringDisplay,
-    RateControl,
+    BWeighting, ColourDescription, Config, ContentLightLevel, Entropy, FieldCoding, FieldOrder,
+    InterParts, MasteringDisplay, RateControl,
 };
 
 /// `G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min)` — x265's `master-display`
@@ -58,10 +57,19 @@ fn parse_rate(s: &str) -> Option<(u32, u32)> {
         return Some((n.trim().parse().ok()?, d.trim().parse().ok()?));
     }
     match s.split_once('.') {
-        Some((whole, frac)) if !frac.is_empty() && frac.len() <= 6 && frac.bytes().all(|b| b.is_ascii_digit()) => {
+        Some((whole, frac))
+            if !frac.is_empty() && frac.len() <= 6 && frac.bytes().all(|b| b.is_ascii_digit()) =>
+        {
             let den = 10u32.pow(frac.len() as u32);
-            let whole: u32 = if whole.is_empty() { 0 } else { whole.parse().ok()? };
-            Some((whole.checked_mul(den)?.checked_add(frac.parse().ok()?)?, den))
+            let whole: u32 = if whole.is_empty() {
+                0
+            } else {
+                whole.parse().ok()?
+            };
+            Some((
+                whole.checked_mul(den)?.checked_add(frac.parse().ok()?)?,
+                den,
+            ))
         }
         Some(_) => None,
         None => Some((s.parse().ok()?, 1)),
@@ -99,7 +107,9 @@ fn main() {
     let mut i = 1;
     let val = |i: &mut usize, args: &Vec<String>, what: &str| -> String {
         *i += 1;
-        args.get(*i).cloned().unwrap_or_else(|| die(&format!("{what} needs a value")))
+        args.get(*i)
+            .cloned()
+            .unwrap_or_else(|| die(&format!("{what} needs a value")))
     };
     while i < args.len() {
         match args[i].as_str() {
@@ -115,12 +125,16 @@ fn main() {
                 cfg.height = h.parse().unwrap_or_else(|_| die("--size height"));
             }
             "--qp" => {
-                let q: u8 = val(&mut i, &args, "--qp").parse().unwrap_or_else(|_| die("--qp"));
+                let q: u8 = val(&mut i, &args, "--qp")
+                    .parse()
+                    .unwrap_or_else(|_| die("--qp"));
                 cfg.rate = RateControl::ConstantQp(q);
             }
             "--lossless" => cfg.rate = RateControl::Lossless,
             "--bitrate" => {
-                let b: u32 = val(&mut i, &args, "--bitrate").parse().unwrap_or_else(|_| die("--bitrate"));
+                let b: u32 = val(&mut i, &args, "--bitrate")
+                    .parse()
+                    .unwrap_or_else(|_| die("--bitrate"));
                 cfg.rate = RateControl::Bitrate { bps: b };
             }
             // Frames per second: a whole number, N/D (30000/1001 for
@@ -128,19 +142,34 @@ fn main() {
             // 2997/100 — the NTSC rate is 30000/1001).
             "--fps" => {
                 let s = val(&mut i, &args, "--fps");
-                (cfg.fps, cfg.fps_den) = parse_rate(&s).unwrap_or_else(|| die("--fps wants N, N/D or a decimal"));
+                (cfg.fps, cfg.fps_den) =
+                    parse_rate(&s).unwrap_or_else(|| die("--fps wants N, N/D or a decimal"));
             }
-            "--cpb-ms" => cfg.cpb_ms = val(&mut i, &args, "--cpb-ms").parse().unwrap_or_else(|_| die("--cpb-ms")),
+            "--cpb-ms" => {
+                cfg.cpb_ms = val(&mut i, &args, "--cpb-ms")
+                    .parse()
+                    .unwrap_or_else(|_| die("--cpb-ms"))
+            }
             "--cbr" => cfg.cbr = true,
-            "--gop" => cfg.gop = val(&mut i, &args, "--gop").parse().unwrap_or_else(|_| die("--gop")),
+            "--gop" => {
+                cfg.gop = val(&mut i, &args, "--gop")
+                    .parse()
+                    .unwrap_or_else(|_| die("--gop"))
+            }
             "--bframes" => {
-                cfg.bframes = val(&mut i, &args, "--bframes").parse().unwrap_or_else(|_| die("--bframes"))
+                cfg.bframes = val(&mut i, &args, "--bframes")
+                    .parse()
+                    .unwrap_or_else(|_| die("--bframes"))
             }
             "--depth" => {
-                cfg.bit_depth = val(&mut i, &args, "--depth").parse().unwrap_or_else(|_| die("--depth"))
+                cfg.bit_depth = val(&mut i, &args, "--depth")
+                    .parse()
+                    .unwrap_or_else(|_| die("--depth"))
             }
             "--threads" => {
-                cfg.threads = val(&mut i, &args, "--threads").parse().unwrap_or_else(|_| die("--threads"))
+                cfg.threads = val(&mut i, &args, "--threads")
+                    .parse()
+                    .unwrap_or_else(|_| die("--threads"))
             }
             "--cavlc" => cfg.entropy = Entropy::Cavlc,
             // H.264 only: offer the 8x8 transform in the PPS and let the
@@ -152,10 +181,18 @@ fn main() {
             // H.264 only: offer inter partitions below 16x16.
             "--subparts" => cfg.subparts = true,
             // Both codecs: adaptive quantisation at this strength (0 off).
-            "--aq" => cfg.aq_strength = val(&mut i, &args, "--aq").parse().unwrap_or_else(|_| die("--aq")),
+            "--aq" => {
+                cfg.aq_strength = val(&mut i, &args, "--aq")
+                    .parse()
+                    .unwrap_or_else(|_| die("--aq"))
+            }
             // H.265 only, with --bitrate: hold this many pictures back and
             // let the rate controller see them. H.264 refuses it by name.
-            "--lookahead" => cfg.lookahead = val(&mut i, &args, "--lookahead").parse().unwrap_or_else(|_| die("--lookahead")),
+            "--lookahead" => {
+                cfg.lookahead = val(&mut i, &args, "--lookahead")
+                    .parse()
+                    .unwrap_or_else(|_| die("--lookahead"))
+            }
             // Both codecs: weighted prediction, a fitted gain and offset per
             // reference in every P and B slice.
             "--wpred" => cfg.weighted_pred = true,
@@ -173,11 +210,21 @@ fn main() {
             // How many past pictures a P slice may choose between. 1 is
             // the default and every stream written with it is
             // byte-identical to before multiple references existed.
-            "--refs" => cfg.max_refs = val(&mut i, &args, "--refs").parse().unwrap_or_else(|_| die("--refs")),
+            "--refs" => {
+                cfg.max_refs = val(&mut i, &args, "--refs")
+                    .parse()
+                    .unwrap_or_else(|_| die("--refs"))
+            }
             // H.265 only: how many levels the coding quadtree may split a
             // CTB. Absent, the encoder's default (2); 0 codes one unit per
             // CTB as every stream before the quadtree did.
-            "--cu-depth" => cfg.max_cu_depth = Some(val(&mut i, &args, "--cu-depth").parse().unwrap_or_else(|_| die("--cu-depth"))),
+            "--cu-depth" => {
+                cfg.max_cu_depth = Some(
+                    val(&mut i, &args, "--cu-depth")
+                        .parse()
+                        .unwrap_or_else(|_| die("--cu-depth")),
+                )
+            }
             // H.265 only: the inter prediction-unit shapes a coding unit
             // may take besides 2Nx2N. Absent, none: every stream is
             // byte-identical to one from an encoder without partitions.
@@ -213,11 +260,17 @@ fn main() {
             "--color" => {
                 let s = val(&mut i, &args, "--color");
                 let mut it = s.split(':').map(|x| x.parse::<u8>());
-                let (Some(Ok(p)), Some(Ok(t)), Some(Ok(m)), None) = (it.next(), it.next(), it.next(), it.next())
+                let (Some(Ok(p)), Some(Ok(t)), Some(Ok(m)), None) =
+                    (it.next(), it.next(), it.next(), it.next())
                 else {
                     die("--color wants PRIMARIES:TRANSFER:MATRIX, three H.273 codes 0..=255")
                 };
-                cfg.colour = Some(ColourDescription { primaries: p, transfer: t, matrix: m, full_range: false });
+                cfg.colour = Some(ColourDescription {
+                    primaries: p,
+                    transfer: t,
+                    matrix: m,
+                    full_range: false,
+                });
             }
             // `video_full_range_flag`, beside a --color.
             "--full-range" => full_range = true,
@@ -227,7 +280,9 @@ fn main() {
                 let s = val(&mut i, &args, "--chroma-loc");
                 cfg.chroma_loc = Some(match s.parse::<u8>() {
                     Ok(t) if t <= 5 => t,
-                    _ => die("--chroma-loc wants a chroma_sample_loc_type 0..=5 (0 left, 1 centre, 2 top-left)"),
+                    _ => die(
+                        "--chroma-loc wants a chroma_sample_loc_type 0..=5 (0 left, 1 centre, 2 top-left)",
+                    ),
                 });
             }
             // HDR10 static metadata: an SEI each, in every IDR access unit.
@@ -239,7 +294,9 @@ fn main() {
             }
             "--content-light" => {
                 let s = val(&mut i, &args, "--content-light");
-                let Some((Ok(max_cll), Ok(max_fall))) = s.split_once(',').map(|(a, b)| (a.parse::<u16>(), b.parse::<u16>()))
+                let Some((Ok(max_cll), Ok(max_fall))) = s
+                    .split_once(',')
+                    .map(|(a, b)| (a.parse::<u16>(), b.parse::<u16>()))
                 else {
                     die("--content-light wants MAXCLL,MAXFALL in cd/m2, each 0..=65535")
                 };
@@ -284,7 +341,10 @@ fn main() {
         };
         let fb = enc.frame_bytes();
         if fb == 0 || raw.len() < fb {
-            die(&format!("input is {} bytes, less than one {fb}-byte picture", raw.len()));
+            die(&format!(
+                "input is {} bytes, less than one {fb}-byte picture",
+                raw.len()
+            ));
         }
         let mut stream: Vec<u8> = Vec::new();
         let mut pocs: Vec<(bool, i32)> = Vec::new();
@@ -320,13 +380,22 @@ fn main() {
         if let Some((achieved, target)) = enc.rate_report() {
             // The gate parses this line. Ratio included so a human reading
             // a log sees the shape of the error without dividing.
-            eprintln!("rate: achieved {achieved:.0} bps, target {target:.0} bps, ratio {:.3}", achieved / target);
+            eprintln!(
+                "rate: achieved {achieved:.0} bps, target {target:.0} bps, ratio {:.3}",
+                achieved / target
+            );
         }
         if enc.recodes() != 0 {
-            eprintln!("rate: {} extra codings to fit the declared buffer", enc.recodes());
+            eprintln!(
+                "rate: {} extra codings to fit the declared buffer",
+                enc.recodes()
+            );
         }
         if enc.seed_recodes() != 0 {
-            eprintln!("rate: {} extra codings of pictures planned from a seed alone", enc.seed_recodes());
+            eprintln!(
+                "rate: {} extra codings of pictures planned from a seed alone",
+                enc.seed_recodes()
+            );
         }
         // The controller's model check: how far, in quantiser steps of
         // its law, the pictures landed from where they were planned.
@@ -336,7 +405,10 @@ fn main() {
         // What the insensitivity rule did. The gate parses this line: the
         // rows built to reach a verdict must show one, and a probe.
         if let Some(i) = enc.rate_insensitivity() {
-            eprintln!("rate: insensitivity verdicts {}, probes {}, releases {}", i.verdicts, i.probes, i.releases);
+            eprintln!(
+                "rate: insensitivity verdicts {}, probes {}, releases {}",
+                i.verdicts, i.probes, i.releases
+            );
         }
         // The coding-unit census, the H.265 twin of the H.264 shape line
         // below: a row turns a feature on, this says whether the clip
@@ -414,17 +486,29 @@ fn main() {
     eprintln!("{} pictures, {} bytes", pocs.len(), stream.len());
     if let Some((achieved, target)) = enc.rate_report() {
         // Parsed by the gate. Same line, same shape, as the H.265 path.
-        eprintln!("rate: achieved {achieved:.0} bps, target {target:.0} bps, ratio {:.3}", achieved / target);
+        eprintln!(
+            "rate: achieved {achieved:.0} bps, target {target:.0} bps, ratio {:.3}",
+            achieved / target
+        );
     }
     if enc.recodes() != 0 {
-        eprintln!("rate: {} extra codings to fit the declared buffer", enc.recodes());
+        eprintln!(
+            "rate: {} extra codings to fit the declared buffer",
+            enc.recodes()
+        );
     }
     if enc.buffer_skips() != 0 {
-        eprintln!("rate: {} P pictures coded all-skip to fit the declared buffer", enc.buffer_skips());
+        eprintln!(
+            "rate: {} P pictures coded all-skip to fit the declared buffer",
+            enc.buffer_skips()
+        );
     }
     // Parsed by the gate, as on the H.265 path.
     if let Some(i) = enc.rate_insensitivity() {
-        eprintln!("rate: insensitivity verdicts {}, probes {}, releases {}", i.verdicts, i.probes, i.releases);
+        eprintln!(
+            "rate: insensitivity verdicts {}, probes {}, releases {}",
+            i.verdicts, i.probes, i.releases
+        );
     }
     // The shape census: which macroblock kinds each picture type took.
     // A row turns a shape on; only this line says whether the clip took
@@ -466,7 +550,12 @@ fn main() {
             }
             eprintln!(
                 "wp {name}: {} of {} pictures weighted, {} macroblocks won, {} lost; {} priced against the defaults, {} kept them",
-                c.wp_on[pic], c.pictures[pic], c.wp_won[pic], c.wp_lost[pic], c.wp_priced[pic], c.wp_rd_default[pic]
+                c.wp_on[pic],
+                c.pictures[pic],
+                c.wp_won[pic],
+                c.wp_lost[pic],
+                c.wp_priced[pic],
+                c.wp_rd_default[pic]
             );
         }
     }
@@ -490,7 +579,11 @@ fn main() {
 /// per-frame diffs were exactly the reorder distance.
 fn write_recon_display_order(path: &str, recons: &[Vec<u8>], pocs: &[(bool, i32)]) {
     use std::io::Write;
-    assert_eq!(recons.len(), pocs.len(), "one reconstruction per coded picture");
+    assert_eq!(
+        recons.len(),
+        pocs.len(),
+        "one reconstruction per coded picture"
+    );
     // POC restarts at every IDR, so display order is per coded video
     // sequence: sort by (sequence, poc), the sequence counted up at each
     // keyframe. A global poc sort interleaves GOPs — the first two-GOP
@@ -507,9 +600,9 @@ fn write_recon_display_order(path: &str, recons: &[Vec<u8>], pocs: &[(bool, i32)
         .collect();
     let mut order: Vec<usize> = (0..recons.len()).collect();
     order.sort_by_key(|&i| keys[i]);
-    let mut f = std::fs::File::create(path)
-        .unwrap_or_else(|e| die(&format!("create {path}: {e}")));
+    let mut f = std::fs::File::create(path).unwrap_or_else(|e| die(&format!("create {path}: {e}")));
     for &i in &order {
-        f.write_all(&recons[i]).unwrap_or_else(|e| die(&format!("write {path}: {e}")));
+        f.write_all(&recons[i])
+            .unwrap_or_else(|e| die(&format!("write {path}: {e}")));
     }
 }

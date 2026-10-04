@@ -122,13 +122,24 @@ unsafe fn emit_span<const MODE: u8>(out: &Out, row: usize, x: usize, v: __m512i,
             MODE_I16 => store_i16(out.i16.add(row * out.w + x), v, n),
             MODE_UNI => {
                 let r = _mm512_srai_epi16::<6>(_mm512_adds_epi16(v, _mm512_set1_epi16(32)));
-                _mm256_mask_storeu_epi8(out.u8.add(row * out.stride + x) as *mut i8, mask32(n), pack32(r));
+                _mm256_mask_storeu_epi8(
+                    out.u8.add(row * out.stride + x) as *mut i8,
+                    mask32(n),
+                    pack32(r),
+                );
             }
             _ => {
                 // Saturating sums, exact after the clip (see the AVX2 kernel).
                 let o = load_i16(out.other.add(row * out.w + x), n);
-                let r = _mm512_srai_epi16::<7>(_mm512_adds_epi16(_mm512_adds_epi16(v, o), _mm512_set1_epi16(64)));
-                _mm256_mask_storeu_epi8(out.u8.add(row * out.stride + x) as *mut i8, mask32(n), pack32(r));
+                let r = _mm512_srai_epi16::<7>(_mm512_adds_epi16(
+                    _mm512_adds_epi16(v, o),
+                    _mm512_set1_epi16(64),
+                ));
+                _mm256_mask_storeu_epi8(
+                    out.u8.add(row * out.stride + x) as *mut i8,
+                    mask32(n),
+                    pack32(r),
+                );
             }
         }
     }
@@ -149,7 +160,10 @@ unsafe fn emit_block<const MODE: u8>(out: &Out, y0: usize, rows: usize, w: usize
             }
             _ => {
                 let o = load_i16(out.other.add(y0 * w), n);
-                let r = _mm512_srai_epi16::<7>(_mm512_adds_epi16(_mm512_adds_epi16(v, o), _mm512_set1_epi16(64)));
+                let r = _mm512_srai_epi16::<7>(_mm512_adds_epi16(
+                    _mm512_adds_epi16(v, o),
+                    _mm512_set1_epi16(64),
+                ));
                 scatter_rows(out.u8.add(y0 * out.stride), out.stride, w, pack32(r), rows);
             }
         }
@@ -166,7 +180,10 @@ unsafe fn scatter_rows(dst: *mut u8, stride: usize, w: usize, p: __m256i, rows: 
             16 => {
                 _mm_storeu_si128(dst as *mut __m128i, _mm256_castsi256_si128(p));
                 if rows > 1 {
-                    _mm_storeu_si128(dst.add(stride) as *mut __m128i, _mm256_extracti128_si256::<1>(p));
+                    _mm_storeu_si128(
+                        dst.add(stride) as *mut __m128i,
+                        _mm256_extracti128_si256::<1>(p),
+                    );
                 }
             }
             8 => {
@@ -183,7 +200,10 @@ unsafe fn scatter_rows(dst: *mut u8, stride: usize, w: usize, p: __m256i, rows: 
                     _mm_storel_epi64(dst.add(2 * stride) as *mut __m128i, hi);
                 }
                 if rows > 3 {
-                    _mm_storel_epi64(dst.add(3 * stride) as *mut __m128i, _mm_unpackhi_epi64(hi, hi));
+                    _mm_storel_epi64(
+                        dst.add(3 * stride) as *mut __m128i,
+                        _mm_unpackhi_epi64(hi, hi),
+                    );
                 }
             }
             _ => {
@@ -229,7 +249,15 @@ pub(super) fn fits_i16(len: usize, w: usize, rows: usize) -> bool {
 /// for `w >= 32`: below that the loads to fill the vector cost more than the
 /// multiplies they save.
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
-unsafe fn fir_h<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, src_stride: usize, w: usize, h: usize, taps: &[i8], shift: i32) {
+unsafe fn fir_h<const TAPS: usize, const MODE: u8>(
+    out: &Out,
+    src: *const u8,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+    shift: i32,
+) {
     unsafe {
         let mut c = [_mm512_setzero_si512(); 4];
         for k in 0..TAPS / 2 {
@@ -245,10 +273,23 @@ unsafe fn fir_h<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, sr
                 for k in 0..TAPS / 2 {
                     let a = _mm512_loadu_si512(s.add(x + 2 * k) as *const __m512i);
                     let b = _mm512_loadu_si512(s.add(x + 2 * k + 1) as *const __m512i);
-                    lo = _mm512_add_epi16(lo, _mm512_maddubs_epi16(_mm512_unpacklo_epi8(a, b), c[k]));
-                    hi = _mm512_add_epi16(hi, _mm512_maddubs_epi16(_mm512_unpackhi_epi8(a, b), c[k]));
+                    lo = _mm512_add_epi16(
+                        lo,
+                        _mm512_maddubs_epi16(_mm512_unpacklo_epi8(a, b), c[k]),
+                    );
+                    hi = _mm512_add_epi16(
+                        hi,
+                        _mm512_maddubs_epi16(_mm512_unpackhi_epi8(a, b), c[k]),
+                    );
                 }
-                emit64::<MODE>(out, y, x, _mm512_sra_epi16(lo, sh), _mm512_sra_epi16(hi, sh), w - x);
+                emit64::<MODE>(
+                    out,
+                    y,
+                    x,
+                    _mm512_sra_epi16(lo, sh),
+                    _mm512_sra_epi16(hi, sh),
+                    w - x,
+                );
                 x += 64;
             }
         }
@@ -257,7 +298,15 @@ unsafe fn fir_h<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, sr
 
 /// Vertical `TAPS`-tap FIR over byte rows, 64 output samples at a time.
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
-unsafe fn fir_v<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, src_stride: usize, w: usize, h: usize, taps: &[i8], shift: i32) {
+unsafe fn fir_v<const TAPS: usize, const MODE: u8>(
+    out: &Out,
+    src: *const u8,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+    shift: i32,
+) {
     unsafe {
         let mut c = [_mm512_setzero_si512(); 4];
         for k in 0..TAPS / 2 {
@@ -270,12 +319,28 @@ unsafe fn fir_v<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, sr
                 let mut lo = _mm512_setzero_si512();
                 let mut hi = _mm512_setzero_si512();
                 for k in 0..TAPS / 2 {
-                    let a = _mm512_loadu_si512(src.add((y + 2 * k) * src_stride + x) as *const __m512i);
-                    let b = _mm512_loadu_si512(src.add((y + 2 * k + 1) * src_stride + x) as *const __m512i);
-                    lo = _mm512_add_epi16(lo, _mm512_maddubs_epi16(_mm512_unpacklo_epi8(a, b), c[k]));
-                    hi = _mm512_add_epi16(hi, _mm512_maddubs_epi16(_mm512_unpackhi_epi8(a, b), c[k]));
+                    let a =
+                        _mm512_loadu_si512(src.add((y + 2 * k) * src_stride + x) as *const __m512i);
+                    let b = _mm512_loadu_si512(
+                        src.add((y + 2 * k + 1) * src_stride + x) as *const __m512i
+                    );
+                    lo = _mm512_add_epi16(
+                        lo,
+                        _mm512_maddubs_epi16(_mm512_unpacklo_epi8(a, b), c[k]),
+                    );
+                    hi = _mm512_add_epi16(
+                        hi,
+                        _mm512_maddubs_epi16(_mm512_unpackhi_epi8(a, b), c[k]),
+                    );
                 }
-                emit64::<MODE>(out, y, x, _mm512_sra_epi16(lo, sh), _mm512_sra_epi16(hi, sh), w - x);
+                emit64::<MODE>(
+                    out,
+                    y,
+                    x,
+                    _mm512_sra_epi16(lo, sh),
+                    _mm512_sra_epi16(hi, sh),
+                    w - x,
+                );
                 x += 64;
             }
         }
@@ -288,13 +353,32 @@ unsafe fn fir_v<const TAPS: usize, const MODE: u8>(out: &Out, src: *const u8, sr
 /// two-source permute per half puts them back in order.
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
 #[inline]
-unsafe fn emit64<const MODE: u8>(out: &Out, y: usize, x: usize, lo: __m512i, hi: __m512i, n: usize) {
+unsafe fn emit64<const MODE: u8>(
+    out: &Out,
+    y: usize,
+    x: usize,
+    lo: __m512i,
+    hi: __m512i,
+    n: usize,
+) {
     unsafe {
         let idx0 = _mm512_setr_epi64(0, 1, 8, 9, 2, 3, 10, 11);
-        emit_span::<MODE>(out, y, x, _mm512_permutex2var_epi64(lo, idx0, hi), n.min(32));
+        emit_span::<MODE>(
+            out,
+            y,
+            x,
+            _mm512_permutex2var_epi64(lo, idx0, hi),
+            n.min(32),
+        );
         if n > 32 {
             let idx1 = _mm512_setr_epi64(4, 5, 12, 13, 6, 7, 14, 15);
-            emit_span::<MODE>(out, y, x + 32, _mm512_permutex2var_epi64(lo, idx1, hi), (n - 32).min(32));
+            emit_span::<MODE>(
+                out,
+                y,
+                x + 32,
+                _mm512_permutex2var_epi64(lo, idx1, hi),
+                (n - 32).min(32),
+            );
         }
     }
 }
@@ -309,7 +393,13 @@ unsafe fn emit64<const MODE: u8>(out: &Out, y: usize, x: usize, lo: __m512i, hi:
 /// next `32 / w - 1` rows as well. The AVX2 kernel runs one row per vector,
 /// eight lanes of sixteen used at `w = 8`.
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
-unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(out: &Out, src: *const i16, w: usize, h: usize, taps: &[i8]) {
+unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(
+    out: &Out,
+    src: *const i16,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+) {
     unsafe {
         let mut c = [_mm512_setzero_si512(); 4];
         for k in 0..TAPS / 2 {
@@ -322,7 +412,9 @@ unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(out: &Out, src: *const i16, 
             *lo = _mm512_add_epi32(*lo, _mm512_madd_epi16(_mm512_unpacklo_epi16(a, b), c[k]));
             *hi = _mm512_add_epi32(*hi, _mm512_madd_epi16(_mm512_unpackhi_epi16(a, b), c[k]));
         };
-        let pack = |lo: __m512i, hi: __m512i| _mm512_packs_epi32(_mm512_srai_epi32::<6>(lo), _mm512_srai_epi32::<6>(hi));
+        let pack = |lo: __m512i, hi: __m512i| {
+            _mm512_packs_epi32(_mm512_srai_epi32::<6>(lo), _mm512_srai_epi32::<6>(hi))
+        };
         if w >= 32 {
             for y in 0..h {
                 let mut x = 0;
@@ -330,7 +422,8 @@ unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(out: &Out, src: *const i16, 
                     let (mut lo, mut hi) = (_mm512_setzero_si512(), _mm512_setzero_si512());
                     for k in 0..TAPS / 2 {
                         let a = _mm512_loadu_si512(src.add((y + 2 * k) * w + x) as *const __m512i);
-                        let b = _mm512_loadu_si512(src.add((y + 2 * k + 1) * w + x) as *const __m512i);
+                        let b =
+                            _mm512_loadu_si512(src.add((y + 2 * k + 1) * w + x) as *const __m512i);
                         step(a, b, &mut lo, &mut hi, k);
                     }
                     emit_span::<MODE>(out, y, x, pack(lo, hi), (w - x).min(32));
@@ -360,26 +453,75 @@ unsafe fn fir_v2<const TAPS: usize, const MODE: u8>(out: &Out, src: *const i16, 
 
 /// The 14-bit output of a standalone stage.
 fn out_i16(dst: &mut [i16], w: usize) -> Out {
-    Out { i16: dst.as_mut_ptr(), u8: std::ptr::null_mut(), stride: 0, other: std::ptr::null(), w }
+    Out {
+        i16: dst.as_mut_ptr(),
+        u8: std::ptr::null_mut(),
+        stride: 0,
+        other: std::ptr::null(),
+        w,
+    }
 }
 
-fn qpel_h_avx512(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn qpel_h_avx512(
+    dst: &mut [i16],
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if w < 32 || dst.len() < w * h || !fits_bytes(src.len(), src_stride, h, w, 7) {
         return w2::qpel_h_avx2(dst, src, src_stride, w, h, frac, shift);
     }
     let out = out_i16(dst, w);
-    unsafe { fir_h::<8, MODE_I16>(&out, src.as_ptr(), src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
+    unsafe {
+        fir_h::<8, MODE_I16>(
+            &out,
+            src.as_ptr(),
+            src_stride,
+            w,
+            h,
+            &QPEL_FILTERS[frac][..8],
+            shift,
+        )
+    }
 }
 
-fn qpel_v_avx512(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn qpel_v_avx512(
+    dst: &mut [i16],
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if w < 32 || dst.len() < w * h || !fits_bytes(src.len(), src_stride, h + 7, w, 0) {
         return w2::qpel_v_avx2(dst, src, src_stride, w, h, frac, shift);
     }
     let out = out_i16(dst, w);
-    unsafe { fir_v::<8, MODE_I16>(&out, src.as_ptr(), src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
+    unsafe {
+        fir_v::<8, MODE_I16>(
+            &out,
+            src.as_ptr(),
+            src_stride,
+            w,
+            h,
+            &QPEL_FILTERS[frac][..8],
+            shift,
+        )
+    }
 }
 
-pub(super) fn qpel_v2_avx512(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+pub(super) fn qpel_v2_avx512(
+    dst: &mut [i16],
+    src: &[i16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+) {
     if src_stride != w || w < 2 || dst.len() < w * h || !fits_i16(src.len(), w, h + 7) {
         return super::hevc_avx2::qpel_v2_avx2(dst, src, src_stride, w, h, frac);
     }
@@ -387,7 +529,14 @@ pub(super) fn qpel_v2_avx512(dst: &mut [i16], src: &[i16], src_stride: usize, w:
     unsafe { fir_v2::<8, MODE_I16>(&out, src.as_ptr(), w, h, &QPEL_FILTERS[frac][..8]) }
 }
 
-pub(super) fn epel_v2_avx512(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+pub(super) fn epel_v2_avx512(
+    dst: &mut [i16],
+    src: &[i16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+) {
     if src_stride != w || w < 2 || dst.len() < w * h || !fits_i16(src.len(), w, h + 3) {
         return super::hevc_avx2::epel_v2_avx2(dst, src, src_stride, w, h, frac);
     }
@@ -407,7 +556,18 @@ pub(super) fn epel_v2_avx512(dst: &mut [i16], src: &[i16], src_stride: usize, w:
 /// Generic over the tap count, but only the 8-tap (luma) instantiation is
 /// installed: see the module docs for what the 4-tap one measured at.
 #[allow(clippy::too_many_arguments)]
-fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16]) -> bool {
+fn fused<const TAPS: usize, const MODE: u8>(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+) -> bool {
     let reach = TAPS / 2 - 1;
     let hh = h + TAPS - 1;
     let wide = w >= 32;
@@ -416,13 +576,22 @@ fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, s
     let ok = h >= 1
         && match (fx, fy) {
             (0, 0) => false,
-            (_, 0) => wide && src.len() > reach * src_stride && fits_bytes(src.len() - reach * src_stride, src_stride, h, w, TAPS - 1),
-            (0, _) => wide && src.len() > reach && fits_bytes(src.len() - reach, src_stride, hh, w, 0),
+            (_, 0) => {
+                wide && src.len() > reach * src_stride
+                    && fits_bytes(src.len() - reach * src_stride, src_stride, h, w, TAPS - 1)
+            }
+            (0, _) => {
+                wide && src.len() > reach && fits_bytes(src.len() - reach, src_stride, hh, w, 0)
+            }
             // The second stage always qualifies; the first needs whichever
             // of the two kernels will run it to be in bounds.
             _ => {
                 fits_i16(super::hevc::MC_TMP_LEN, w, hh)
-                    && if wide { fits_bytes(src.len(), src_stride, hh, w, TAPS - 1) } else { w2::fits(src.len(), src_stride, hh, w, TAPS - 1) }
+                    && if wide {
+                        fits_bytes(src.len(), src_stride, hh, w, TAPS - 1)
+                    } else {
+                        w2::fits(src.len(), src_stride, hh, w, TAPS - 1)
+                    }
             }
         }
         && w >= 2
@@ -432,14 +601,38 @@ fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, s
     if !ok {
         return false;
     }
-    let (tx, ty): (&[i8], &[i8]) = if TAPS == 8 { (&QPEL_FILTERS[fx][..8], &QPEL_FILTERS[fy][..8]) } else { (&EPEL_FILTERS[fx], &EPEL_FILTERS[fy]) };
-    let out = Out { i16: std::ptr::null_mut(), u8: dst.as_mut_ptr(), stride: dst_stride, other: other.as_ptr(), w };
+    let (tx, ty): (&[i8], &[i8]) = if TAPS == 8 {
+        (&QPEL_FILTERS[fx][..8], &QPEL_FILTERS[fy][..8])
+    } else {
+        (&EPEL_FILTERS[fx], &EPEL_FILTERS[fy])
+    };
+    let out = Out {
+        i16: std::ptr::null_mut(),
+        u8: dst.as_mut_ptr(),
+        stride: dst_stride,
+        other: other.as_ptr(),
+        w,
+    };
     unsafe {
         match (fx, fy) {
-            (_, 0) => fir_h::<TAPS, MODE>(&out, src.as_ptr().add(reach * src_stride), src_stride, w, h, tx, 0),
+            (_, 0) => fir_h::<TAPS, MODE>(
+                &out,
+                src.as_ptr().add(reach * src_stride),
+                src_stride,
+                w,
+                h,
+                tx,
+                0,
+            ),
             (0, _) => fir_v::<TAPS, MODE>(&out, src.as_ptr().add(reach), src_stride, w, h, ty, 0),
             _ => {
-                let mid = Out { i16: tmp.as_mut_ptr(), u8: std::ptr::null_mut(), stride: 0, other: std::ptr::null(), w };
+                let mid = Out {
+                    i16: tmp.as_mut_ptr(),
+                    u8: std::ptr::null_mut(),
+                    stride: 0,
+                    other: std::ptr::null(),
+                    w,
+                };
                 if wide {
                     fir_h::<TAPS, MODE_I16>(&mid, src.as_ptr(), src_stride, w, hh, tx, 0);
                 } else {
@@ -452,16 +645,43 @@ fn fused<const TAPS: usize, const MODE: u8>(dst: &mut [u8], dst_stride: usize, s
     true
 }
 
-fn qpel_uni_avx512(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
+fn qpel_uni_avx512(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    bit_depth: u32,
+) {
     if !fused::<8, MODE_UNI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, &[]) {
-        w2::qpel_uni_avx2(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, bit_depth);
+        w2::qpel_uni_avx2(
+            dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, bit_depth,
+        );
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn qpel_bi_avx512(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
+fn qpel_bi_avx512(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+) {
     if !fused::<8, MODE_BI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other) {
-        w2::qpel_bi_avx2(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, bit_depth);
+        w2::qpel_bi_avx2(
+            dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, bit_depth,
+        );
     }
 }
 
@@ -471,7 +691,9 @@ pub(super) mod tests {
     use crate::dsp::hevc::MC_TMP_LEN;
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -481,8 +703,12 @@ pub(super) mod tests {
     /// `H26X_REQUIRE_AVX512=1` to turn it into a failure.
     pub(in crate::dsp) fn avx512() -> Option<HevcDsp<u8>> {
         if !crate::dsp::Cpu::detect().avx512 {
-            let required = std::env::var_os("H26X_REQUIRE_AVX512").is_some_and(|v| v == "1" || v == "true");
-            assert!(!required, "H26X_REQUIRE_AVX512 is set but this CPU has no AVX-512 F + BW + VL");
+            let required =
+                std::env::var_os("H26X_REQUIRE_AVX512").is_some_and(|v| v == "1" || v == "true");
+            assert!(
+                !required,
+                "H26X_REQUIRE_AVX512 is set but this CPU has no AVX-512 F + BW + VL"
+            );
             eprintln!("skipping: no AVX-512 on this CPU, the 512-bit kernels are not covered");
             return None;
         }
@@ -492,8 +718,14 @@ pub(super) mod tests {
         install(&mut d);
         // A tier that installed nothing would let every comparison below pass
         // without running a single 512-bit instruction.
-        assert!(d.qpel_v2 as usize != before.qpel_v2 as usize, "install left the AVX2 kernels in place");
-        assert!(d.epel_h as usize == before.epel_h as usize, "chroma interpolation stays on AVX2");
+        assert!(
+            d.qpel_v2 as usize != before.qpel_v2 as usize,
+            "install left the AVX2 kernels in place"
+        );
+        assert!(
+            d.epel_h as usize == before.epel_h as usize,
+            "chroma interpolation stays on AVX2"
+        );
         Some(d)
     }
 
@@ -527,7 +759,9 @@ pub(super) mod tests {
         let mut seed = 0x5150_u64;
         let stride = 96;
         let plane: Vec<u8> = (0..stride * 96).map(|_| lcg(&mut seed) as u8).collect();
-        let mid: Vec<i16> = (0..MC_TMP_LEN).map(|_| (lcg(&mut seed) % 32768) as i16 - 16384).collect();
+        let mid: Vec<i16> = (0..MC_TMP_LEN)
+            .map(|_| (lcg(&mut seed) % 32768) as i16 - 16384)
+            .collect();
         for &(w, h) in SHAPES {
             if h > 72 {
                 continue;
@@ -562,7 +796,9 @@ pub(super) mod tests {
         let mut seed = 0xf00d_u64;
         let stride = 160;
         let plane: Vec<u8> = (0..stride * 160).map(|_| lcg(&mut seed) as u8).collect();
-        let other: Vec<i16> = (0..64 * 64).map(|_| (lcg(&mut seed) % 30000) as i16 - 15000).collect();
+        let other: Vec<i16> = (0..64 * 64)
+            .map(|_| (lcg(&mut seed) % 30000) as i16 - 15000)
+            .collect();
         let mut t1 = vec![0i16; MC_TMP_LEN];
         let mut t2 = vec![0i16; MC_TMP_LEN];
         let ds = 96;

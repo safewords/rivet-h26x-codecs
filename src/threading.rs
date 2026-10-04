@@ -37,7 +37,14 @@ impl Progress {
 
     /// Nothing done yet.
     pub fn new() -> Self {
-        Progress { derived: AtomicI32::new(0), decoded: AtomicI32::new(0), done: AtomicI32::new(0), lock: Mutex::new(()), cv: Condvar::new(), error: AtomicBool::new(false) }
+        Progress {
+            derived: AtomicI32::new(0),
+            decoded: AtomicI32::new(0),
+            done: AtomicI32::new(0),
+            lock: Mutex::new(()),
+            cv: Condvar::new(),
+            error: AtomicBool::new(false),
+        }
     }
 
     /// Already complete (a generated or synchronously decoded picture).
@@ -89,7 +96,6 @@ impl Progress {
         self.done.store(Self::COMPLETE, Ordering::Release);
         self.cv.notify_all();
     }
-
 
     /// Whether the picture is finished.
     pub fn is_complete(&self) -> bool {
@@ -185,7 +191,15 @@ impl Pool {
     /// `threads` workers; `capacity` jobs may be outstanding (`usize::MAX`
     /// for unbounded).
     pub fn new(threads: usize, capacity: usize) -> Arc<Self> {
-        let state = Arc::new((Mutex::new(PoolState { queue: VecDeque::new(), active: 0, shutdown: false }), Condvar::new(), Condvar::new()));
+        let state = Arc::new((
+            Mutex::new(PoolState {
+                queue: VecDeque::new(),
+                active: 0,
+                shutdown: false,
+            }),
+            Condvar::new(),
+            Condvar::new(),
+        ));
         let mut workers = Vec::with_capacity(threads);
         for i in 0..threads.max(1) {
             let st = state.clone();
@@ -217,7 +231,14 @@ impl Pool {
                 .expect("spawn h26x worker");
             workers.push(h);
         }
-        Arc::new(Pool { state, workers, capacity: capacity.max(1), threads: threads.max(1), waits: Mutex::new(Vec::new()), wait_seq: AtomicU64::new(0) })
+        Arc::new(Pool {
+            state,
+            workers,
+            capacity: capacity.max(1),
+            threads: threads.max(1),
+            waits: Mutex::new(Vec::new()),
+            wait_seq: AtomicU64::new(0),
+        })
     }
 
     /// A task blocked inside a job says what would let it continue, so a
@@ -302,7 +323,10 @@ impl Drop for Pool {
 /// spend part of their time blocked on dependencies, so the decoders run
 /// more of them than there are hardware threads.
 pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 32)
 }
 
 /// Coarse per-process profiling counters (nanoseconds), printed on request
@@ -333,7 +357,11 @@ pub mod prof {
     /// [`At`] for right now, or `None` when profiling is off.
     #[inline]
     pub fn at() -> At {
-        if enabled() { Some(std::time::Instant::now()) } else { None }
+        if enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        }
     }
 
     /// Whether profiling is on (read once).

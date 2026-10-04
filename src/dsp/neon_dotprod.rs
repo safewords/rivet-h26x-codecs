@@ -105,7 +105,13 @@ impl Taps {
             lo[j * 4..j * 4 + 4].copy_from_slice(&t[..4]);
             hi[j * 4..j * 4 + 4].copy_from_slice(&t[4..]);
         }
-        unsafe { Taps { lo: vld1q_s8(lo.as_ptr()), hi: vld1q_s8(hi.as_ptr()), bias: vdupq_n_s32(128 * sum) } }
+        unsafe {
+            Taps {
+                lo: vld1q_s8(lo.as_ptr()),
+                hi: vld1q_s8(hi.as_ptr()),
+                bias: vdupq_n_s32(128 * sum),
+            }
+        }
     }
 }
 

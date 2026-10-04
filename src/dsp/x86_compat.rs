@@ -77,7 +77,6 @@ macro_rules! compat_core {
             _mm_srai_epi32(_mm_unpackhi_epi16(v, v), 16)
         }
 
-
         /// Zero-extend the low four bytes of `v` to four i32.
         #[target_feature(enable = $feat)]
         #[inline]
@@ -201,7 +200,6 @@ macro_rules! compat_core {
             _mm_srai_epi32(_mm_unpackhi_epi16(v, v), 16)
         }
 
-
         #[target_feature(enable = $feat)]
         #[inline]
         unsafe fn zx8d(v: __m128i) -> __m128i {
@@ -286,7 +284,6 @@ macro_rules! compat_core {
         unsafe fn sx16h(v: __m128i) -> __m128i {
             _mm_cvtepi16_epi32(_mm_srli_si128(v, 8))
         }
-
 
         /// Zero-extend the low four bytes of `v` to four i32.
         #[target_feature(enable = $feat)]

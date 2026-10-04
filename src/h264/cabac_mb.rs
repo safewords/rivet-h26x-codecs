@@ -18,8 +18,9 @@ use super::cavlc::{
     sub_partition_rect,
 };
 use super::frame::Mv;
-use super::mb::{MbDequant, 
-    MbKind, MbLayer, MbNeighbours, PRED_BI, PRED_L0, PRED_L1, PicInfo, SliceCtx, SubMbShape,
+use super::mb::{
+    MbDequant, MbKind, MbLayer, MbNeighbours, PRED_BI, PRED_L0, PRED_L1, PicInfo, SliceCtx,
+    SubMbShape,
 };
 use super::slice::SliceType;
 use super::tables::*;
@@ -203,7 +204,12 @@ pub fn decode_mb_field(c: &mut Cabac, st: &mut CabacState, nb: &MbNeighbours) ->
 /// pairs that are available field pairs, read off the same `MbNeighbours`
 /// the reader reads (which pair-level facts do not depend on the flag the
 /// neighbours were derived under).
-pub(crate) fn write_mb_field_cabac(e: &mut CabacEncoder, st: &mut CabacState, nb: &MbNeighbours, field: bool) {
+pub(crate) fn write_mb_field_cabac(
+    e: &mut CabacEncoder,
+    st: &mut CabacState,
+    nb: &MbNeighbours,
+    field: bool,
+) {
     let inc = (nb.pair[0].is_some() && nb.pair_field[0]) as usize
         + (nb.pair[1].is_some() && nb.pair_field[1]) as usize;
     e.encode_decision(&mut st.ctx[CTX_MB_FIELD + inc], field as u32);
@@ -282,12 +288,7 @@ pub(crate) const MB_TYPE_I_PCM: u32 = 25;
 /// codeword: the caller writes the raw samples byte-aligned and opens a new
 /// engine after them, as `write_pcm_slice_data_cabac` (the one caller
 /// today, in `encode::h264_syntax`) does.
-pub(crate) fn write_mb_type_i_cabac(
-    e: &mut CabacEncoder,
-    st: &mut CabacState,
-    inc: usize,
-    t: u32,
-) {
+pub(crate) fn write_mb_type_i_cabac(e: &mut CabacEncoder, st: &mut CabacState, inc: usize, t: u32) {
     write_intra_mb_type_cabac(e, st, CTX_MB_TYPE_I, true, inc, t);
 }
 
@@ -353,9 +354,7 @@ pub(crate) fn intra_mb_type_code(d: &MbDecision) -> u32 {
                 "I_16x16 codes luma all-or-nothing"
             );
             debug_assert!(d.cbp_chroma <= 2 && d.intra16_mode <= 3);
-            1 + d.intra16_mode as u32
-                + 4 * d.cbp_chroma as u32
-                + 12 * (d.cbp_luma != 0) as u32
+            1 + d.intra16_mode as u32 + 4 * d.cbp_chroma as u32 + 12 * (d.cbp_luma != 0) as u32
         }
     }
 }
@@ -890,7 +889,10 @@ pub(crate) fn write_mvd_cabac(
                 if m.skip || m.intra {
                     (0, 0)
                 } else {
-                    (m.mvd[list][blk].x.abs() as i32, m.mvd[list][blk].y.abs() as i32)
+                    (
+                        m.mvd[list][blk].x.abs() as i32,
+                        m.mvd[list][blk].y.abs() as i32,
+                    )
                 }
             }
         }
@@ -899,8 +901,16 @@ pub(crate) fn write_mvd_cabac(
         let m = cur.mvd[list][blk];
         (m.x.abs() as i32, m.y.abs() as i32)
     };
-    let a = if bx > 0 { inside(by * 4 + bx - 1) } else { outside(left, by * 4 + 3) };
-    let b = if by > 0 { inside((by - 1) * 4 + bx) } else { outside(above, 12 + bx) };
+    let a = if bx > 0 {
+        inside(by * 4 + bx - 1)
+    } else {
+        outside(left, by * 4 + 3)
+    };
+    let b = if by > 0 {
+        inside((by - 1) * 4 + bx)
+    } else {
+        outside(above, 12 + bx)
+    };
     write_mvd_component_cabac(e, st, a.0 + b.0, 0, mvd.x as i32);
     write_mvd_component_cabac(e, st, a.1 + b.1, 1, mvd.y as i32);
 }
@@ -1148,11 +1158,20 @@ pub(crate) fn write_intra_pred_modes_cabac(
         debug_assert!(mode <= 3, "intra_chroma_pred_mode out of range");
         let inc = left as usize + above as usize;
         // Truncated unary, cMax 3: the bins after the first share a context.
-        e.encode_decision(&mut st.ctx[CTX_INTRA_CHROMA_PRED_MODE + inc], (mode != 0) as u32);
+        e.encode_decision(
+            &mut st.ctx[CTX_INTRA_CHROMA_PRED_MODE + inc],
+            (mode != 0) as u32,
+        );
         if mode != 0 {
-            e.encode_decision(&mut st.ctx[CTX_INTRA_CHROMA_PRED_MODE + 3], (mode != 1) as u32);
+            e.encode_decision(
+                &mut st.ctx[CTX_INTRA_CHROMA_PRED_MODE + 3],
+                (mode != 1) as u32,
+            );
             if mode != 1 {
-                e.encode_decision(&mut st.ctx[CTX_INTRA_CHROMA_PRED_MODE + 3], (mode == 3) as u32);
+                e.encode_decision(
+                    &mut st.ctx[CTX_INTRA_CHROMA_PRED_MODE + 3],
+                    (mode == 3) as u32,
+                );
             }
         }
     }
@@ -1327,8 +1346,12 @@ fn spread8(transform_8x8: bool, nz: &[u8; 16]) -> [u8; 16] {
     let mut out = [0u8; 16];
     for blk8 in 0..4 {
         let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
-        let idx =
-            [by8 * 4 + bx8, by8 * 4 + bx8 + 1, (by8 + 1) * 4 + bx8, (by8 + 1) * 4 + bx8 + 1];
+        let idx = [
+            by8 * 4 + bx8,
+            by8 * 4 + bx8 + 1,
+            (by8 + 1) * 4 + bx8,
+            (by8 + 1) * 4 + bx8 + 1,
+        ];
         let total: u32 = idx.iter().map(|&i| nz[i] as u32).sum();
         let total = total.min(64) as u8;
         for i in idx {
@@ -1446,39 +1469,42 @@ impl WrittenMb {
                     direct: false,
                 }
             }
-            InterMbKind::P16x16
-            | InterMbKind::P16x8
-            | InterMbKind::P8x16
-            | InterMbKind::P8x8 => WrittenMb {
-                pcm: false,
-                i16x16: false,
-                transform_8x8: d.transform_8x8,
-                cbp: (d.cbp_luma & 15) | (d.cbp_chroma << 4),
-                // 4:4:4 inter planes have no DC block (each 4x4 keeps its
-                // own DC), so the plane DC flags stay clear.
-                dc_cbf: if c444 { 0 } else { chroma_dc_cbf(d.cbp_chroma, &d.chroma_dc) },
-                nz_luma: gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_luma)),
-                nz_chroma: if c444 {
-                    [
-                        gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[0])),
-                        gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[1])),
-                    ]
-                } else if d.cbp_chroma == 2 {
-                    d.nz_chroma
-                } else {
-                    [[0; 16]; 2]
-                },
-                skip: false,
-                intra: false,
-                ref_idx: [d.ref_idx; 16],
-                // Each partition's mvd over its own 4x4 blocks, which is
-                // what the decoder's CABAC parser stores and what the
-                // *next* macroblock's mvd contexts read across the edge
-                // (`mvd_neighbour_abs`). One vector for all sixteen was
-                // faithful only while there was one partition.
-                mvd: [d.mvd, [Mv::ZERO; 16]],
-                direct: false,
-            },
+            InterMbKind::P16x16 | InterMbKind::P16x8 | InterMbKind::P8x16 | InterMbKind::P8x8 => {
+                WrittenMb {
+                    pcm: false,
+                    i16x16: false,
+                    transform_8x8: d.transform_8x8,
+                    cbp: (d.cbp_luma & 15) | (d.cbp_chroma << 4),
+                    // 4:4:4 inter planes have no DC block (each 4x4 keeps its
+                    // own DC), so the plane DC flags stay clear.
+                    dc_cbf: if c444 {
+                        0
+                    } else {
+                        chroma_dc_cbf(d.cbp_chroma, &d.chroma_dc)
+                    },
+                    nz_luma: gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_luma)),
+                    nz_chroma: if c444 {
+                        [
+                            gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[0])),
+                            gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[1])),
+                        ]
+                    } else if d.cbp_chroma == 2 {
+                        d.nz_chroma
+                    } else {
+                        [[0; 16]; 2]
+                    },
+                    skip: false,
+                    intra: false,
+                    ref_idx: [d.ref_idx; 16],
+                    // Each partition's mvd over its own 4x4 blocks, which is
+                    // what the decoder's CABAC parser stores and what the
+                    // *next* macroblock's mvd contexts read across the edge
+                    // (`mvd_neighbour_abs`). One vector for all sixteen was
+                    // faithful only while there was one partition.
+                    mvd: [d.mvd, [Mv::ZERO; 16]],
+                    direct: false,
+                }
+            }
         }
     }
 
@@ -1541,36 +1567,38 @@ impl WrittenMb {
                     direct: true,
                 }
             }
-            BMbKind::BDirect16
-            | BMbKind::B16
-            | BMbKind::B16x8
-            | BMbKind::B8x16
-            | BMbKind::B8x8 => WrittenMb {
-                pcm: false,
-                i16x16: false,
-                transform_8x8: d.transform_8x8,
-                cbp: (d.cbp_luma & 15) | (d.cbp_chroma << 4),
-                dc_cbf: if c444 { 0 } else { chroma_dc_cbf(d.cbp_chroma, &d.chroma_dc) },
-                nz_luma: gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_luma)),
-                nz_chroma: if c444 {
-                    [
-                        gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[0])),
-                        gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[1])),
-                    ]
-                } else if d.cbp_chroma == 2 {
-                    d.nz_chroma
-                } else {
-                    [[0; 16]; 2]
-                },
-                skip: false,
-                intra: false,
-                ref_idx,
-                // Each partition's mvd over its own 4x4 blocks per list,
-                // as the decoder's CABAC parser stores them; zero over
-                // direct-predicted blocks, which carry none.
-                mvd: d.mvd,
-                direct: d.kind == BMbKind::BDirect16,
-            },
+            BMbKind::BDirect16 | BMbKind::B16 | BMbKind::B16x8 | BMbKind::B8x16 | BMbKind::B8x8 => {
+                WrittenMb {
+                    pcm: false,
+                    i16x16: false,
+                    transform_8x8: d.transform_8x8,
+                    cbp: (d.cbp_luma & 15) | (d.cbp_chroma << 4),
+                    dc_cbf: if c444 {
+                        0
+                    } else {
+                        chroma_dc_cbf(d.cbp_chroma, &d.chroma_dc)
+                    },
+                    nz_luma: gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_luma)),
+                    nz_chroma: if c444 {
+                        [
+                            gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[0])),
+                            gate_nz_luma(d.cbp_luma, &spread8(d.transform_8x8, &d.nz_chroma[1])),
+                        ]
+                    } else if d.cbp_chroma == 2 {
+                        d.nz_chroma
+                    } else {
+                        [[0; 16]; 2]
+                    },
+                    skip: false,
+                    intra: false,
+                    ref_idx,
+                    // Each partition's mvd over its own 4x4 blocks per list,
+                    // as the decoder's CABAC parser stores them; zero over
+                    // direct-predicted blocks, which carry none.
+                    mvd: d.mvd,
+                    direct: d.kind == BMbKind::BDirect16,
+                }
+            }
         }
     }
 }
@@ -1612,7 +1640,11 @@ pub(crate) fn write_cbp_cabac(
             // The neighbouring macroblock's 8x8 adjacent to this one
             // (6.4.11.2): the left MB's right column, the above MB's
             // bottom row.
-            let (m, other_b8) = if nx < 0 { (left, by8 * 2 + 1) } else { (above, 2 + bx8) };
+            let (m, other_b8) = if nx < 0 {
+                (left, by8 * 2 + 1)
+            } else {
+                (above, 2 + bx8)
+            };
             let Some(m) = m else { return 0 };
             if m.pcm {
                 return 0;
@@ -1636,7 +1668,11 @@ pub(crate) fn write_cbp_cabac(
                         return 0;
                     }
                     let ch = m.cbp >> 4;
-                    if want_two { (ch == 2) as usize } else { (ch != 0) as usize }
+                    if want_two {
+                        (ch == 2) as usize
+                    } else {
+                        (ch != 0) as usize
+                    }
                 }
                 None => 0,
             }
@@ -1696,7 +1732,12 @@ fn decode_qp_delta(c: &mut Cabac, st: &mut CabacState, bit_depth: u32) -> Result
 /// ([`super::mb::qp_delta_range`]), and an adaptively quantised deep
 /// picture may use the width.
 #[allow(dead_code)] // the picture loop being built is the caller
-pub(crate) fn write_mb_qp_delta_cabac(e: &mut CabacEncoder, st: &mut CabacState, qp_delta: i32, bit_depth: u32) {
+pub(crate) fn write_mb_qp_delta_cabac(
+    e: &mut CabacEncoder,
+    st: &mut CabacState,
+    qp_delta: i32,
+    bit_depth: u32,
+) {
     debug_assert!(
         super::mb::qp_delta_range(bit_depth).contains(&qp_delta),
         "mb_qp_delta {qp_delta} outside 7.4.5's range at {bit_depth} bits"
@@ -1707,7 +1748,11 @@ pub(crate) fn write_mb_qp_delta_cabac(e: &mut CabacEncoder, st: &mut CabacState,
         return;
     }
     e.encode_decision(&mut st.ctx[CTX_MB_QP_DELTA + inc], 1);
-    let k = if qp_delta > 0 { 2 * qp_delta - 1 } else { -2 * qp_delta } as u32;
+    let k = if qp_delta > 0 {
+        2 * qp_delta - 1
+    } else {
+        -2 * qp_delta
+    } as u32;
     for i in 1..k {
         e.encode_decision(&mut st.ctx[CTX_MB_QP_DELTA + if i == 1 { 2 } else { 3 }], 1);
     }
@@ -1811,7 +1856,11 @@ fn cbf_ctx_inc(
             if !nb.nz_avail[side] {
                 return cur_intra as usize;
             }
-            let v = if nx < 0 { nb.nz_left[p][ny as usize] } else { nb.nz_top[p][nx as usize] };
+            let v = if nx < 0 {
+                nb.nz_left[p][ny as usize]
+            } else {
+                nb.nz_top[p][nx as usize]
+            };
             return (v != 0) as usize;
         }
         let Some((addr, nblk)) = nb.block(nx, ny) else {
@@ -1866,7 +1915,11 @@ fn cbf_ctx_inc(
         if !nb.nz_avail[side] {
             return cur_intra as usize;
         }
-        let v = if cx < 0 { nb.nzc_left[comp][cy as usize] } else { nb.nzc_top[comp][cx as usize] };
+        let v = if cx < 0 {
+            nb.nzc_left[comp][cy as usize]
+        } else {
+            nb.nzc_top[comp][cx as usize]
+        };
         (v != 0) as usize
     };
     match cat {
@@ -1915,7 +1968,11 @@ struct CurMbResidual {
 impl CurMbResidual {
     /// Plane `p`'s nonzero counts, luma-style (4:4:4's plane view).
     fn nz_plane(&self, p: usize) -> &[u8; 16] {
-        if p == 0 { &self.nz_luma } else { &self.nz_chroma[p - 1] }
+        if p == 0 {
+            &self.nz_luma
+        } else {
+            &self.nz_chroma[p - 1]
+        }
     }
 }
 
@@ -1979,7 +2036,11 @@ fn enc_cbf_ctx_inc(
                         return 0;
                     }
                 }
-                let nz = if p == 0 { &m.nz_luma } else { &m.nz_chroma[p - 1] };
+                let nz = if p == 0 {
+                    &m.nz_luma
+                } else {
+                    &m.nz_chroma[p - 1]
+                };
                 // The counts are already gated by the neighbour's coded
                 // block pattern (`gate_nz_luma`), which is the reader's
                 // `m.cbp & (1 << b8) == 0` test.
@@ -2077,7 +2138,11 @@ fn residual_block_cabac(
     let (sig_off, last_off): (&[u8], &[u8]) = if max_coeff == 64 {
         (&SIG_COEFF_8X8_CTX[f][..], &LAST_COEFF_8X8_CTX[..])
     } else if cat == CAT_CHROMA_DC {
-        if max_coeff == 8 { (&CHROMA_DC_422_SIG_OFF[..], &CHROMA_DC_422_SIG_OFF[..]) } else { (&IDENTITY_OFF[..], &IDENTITY_OFF[..]) }
+        if max_coeff == 8 {
+            (&CHROMA_DC_422_SIG_OFF[..], &CHROMA_DC_422_SIG_OFF[..])
+        } else {
+            (&IDENTITY_OFF[..], &IDENTITY_OFF[..])
+        }
     } else {
         (&IDENTITY_OFF[..], &IDENTITY_OFF[..])
     };
@@ -2106,7 +2171,11 @@ fn residual_block_cabac(
     let inc1_cap = if cat == CAT_CHROMA_DC { 3 } else { 4 };
     for k in (0..n_sig).rev() {
         let pos = sig_pos[k] as usize;
-        let inc0 = if num_gt1 != 0 { 0 } else { (1 + num_eq1).min(4) };
+        let inc0 = if num_gt1 != 0 {
+            0
+        } else {
+            (1 + num_eq1).min(4)
+        };
         let mut abs_m1: i32;
         if bin(c, st, abs_base + inc0) == 0 {
             abs_m1 = 0;
@@ -2157,7 +2226,6 @@ fn residual_block_cabac(
     Ok(n_sig)
 }
 
-
 /// Write one residual block's coefficients: the inverse of
 /// [`residual_block_cabac`]. `levels` is the block in raster order, the
 /// layout that function decodes *into*, and `scan` maps scan position to it
@@ -2201,15 +2269,21 @@ pub(crate) fn write_residual_block_cabac(
         // No coded_block_flag means it is inferred to be one (8x8 luma
         // outside 4:4:4), so an all-zero block cannot be spelled here at all
         // — the caller has to not code the block.
-        debug_assert!(n_sig != 0, "block with an inferred coded_block_flag has no coefficient");
+        debug_assert!(
+            n_sig != 0,
+            "block with an inferred coded_block_flag has no coefficient"
+        );
         if n_sig == 0 {
             return 0;
         }
     }
 
     let f = field as usize;
-    let (sig_base, last_base, abs_base) =
-        (SIG_CTX_BASE[f][cat], LAST_CTX_BASE[f][cat], ABS_CTX_BASE[cat]);
+    let (sig_base, last_base, abs_base) = (
+        SIG_CTX_BASE[f][cat],
+        LAST_CTX_BASE[f][cat],
+        ABS_CTX_BASE[cat],
+    );
     let (sig_off, last_off): (&[u8], &[u8]) = if max_coeff == 64 {
         (&SIG_COEFF_8X8_CTX[f][..], &LAST_COEFF_8X8_CTX[..])
     } else if cat == CAT_CHROMA_DC {
@@ -2234,7 +2308,10 @@ pub(crate) fn write_residual_block_cabac(
         e.encode_decision(&mut st.ctx[sig_base + sig_off[i] as usize], is_sig as u32);
         if is_sig {
             let is_last = i == final_pos;
-            e.encode_decision(&mut st.ctx[last_base + last_off[i] as usize], is_last as u32);
+            e.encode_decision(
+                &mut st.ctx[last_base + last_off[i] as usize],
+                is_last as u32,
+            );
             if is_last {
                 break;
             }
@@ -2252,7 +2329,11 @@ pub(crate) fn write_residual_block_cabac(
         let level = levels[scan[start + pos] as usize];
         let abs = level.unsigned_abs();
         let abs_m1 = abs - 1;
-        let inc0 = if num_gt1 != 0 { 0 } else { (1 + num_eq1).min(4) };
+        let inc0 = if num_gt1 != 0 {
+            0
+        } else {
+            (1 + num_eq1).min(4)
+        };
         if abs_m1 == 0 {
             e.encode_decision(&mut st.ctx[abs_base + inc0], 0);
         } else {
@@ -2325,7 +2406,18 @@ fn parse_residual_luma_like_cabac(
     let field = ctx.field_pic || layer.field;
     if layer.kind == MbKind::I16x16 {
         let inc = cbf_ctx_inc(info, layer, nb, ctx.x264_old_444, cat_dc, 0, 0, 0, 0);
-        let n = residual_block_cabac(c, st, field, cat_dc, Some(inc), &mut layer.dc[p], scan4, 0, 16, None)?;
+        let n = residual_block_cabac(
+            c,
+            st,
+            field,
+            cat_dc,
+            Some(inc),
+            &mut layer.dc[p],
+            scan4,
+            0,
+            16,
+            None,
+        )?;
         if n > 0 {
             layer.dc_cbf |= 1 << p;
         }
@@ -2339,12 +2431,33 @@ fn parse_residual_luma_like_cabac(
             // The 8x8 block's coded_block_flag is only coded in 4:4:4;
             // otherwise it is inferred 1.
             let inc = if ctx.chroma_format_idc == 3 {
-                Some(cbf_ctx_inc(info, layer, nb, ctx.x264_old_444, cat_8x8, bx8, by8, 0, 0))
+                Some(cbf_ctx_inc(
+                    info,
+                    layer,
+                    nb,
+                    ctx.x264_old_444,
+                    cat_8x8,
+                    bx8,
+                    by8,
+                    0,
+                    0,
+                ))
             } else {
                 None
             };
             let base = blk8 * 64;
-            let n = residual_block_cabac(c, st, field, cat_8x8, inc, &mut layer.coef[p][base..base + 64], scan8, 0, 64, dq8)?;
+            let n = residual_block_cabac(
+                c,
+                st,
+                field,
+                cat_8x8,
+                inc,
+                &mut layer.coef[p][base..base + 64],
+                scan8,
+                0,
+                64,
+                dq8,
+            )?;
             for sub in 0..4 {
                 let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
                 layer.nz[p][by * 4 + bx] = n as u8;
@@ -2357,10 +2470,32 @@ fn parse_residual_luma_like_cabac(
                 let n = if layer.kind == MbKind::I16x16 {
                     let inc = cbf_ctx_inc(info, layer, nb, ctx.x264_old_444, cat_ac, bx, by, 0, 0);
                     // AC: 15 coefficients at scan positions 1..15.
-                    residual_block_cabac(c, st, field, cat_ac, Some(inc), &mut layer.coef[p][base..base + 16], scan4, 1, 15, dq4)?
+                    residual_block_cabac(
+                        c,
+                        st,
+                        field,
+                        cat_ac,
+                        Some(inc),
+                        &mut layer.coef[p][base..base + 16],
+                        scan4,
+                        1,
+                        15,
+                        dq4,
+                    )?
                 } else {
                     let inc = cbf_ctx_inc(info, layer, nb, ctx.x264_old_444, cat_4x4, bx, by, 0, 0);
-                    residual_block_cabac(c, st, field, cat_4x4, Some(inc), &mut layer.coef[p][base..base + 16], scan4, 0, 16, dq4)?
+                    residual_block_cabac(
+                        c,
+                        st,
+                        field,
+                        cat_4x4,
+                        Some(inc),
+                        &mut layer.coef[p][base..base + 16],
+                        scan4,
+                        0,
+                        16,
+                        dq4,
+                    )?
                 };
                 layer.nz[p][raster] = n as u8;
             }
@@ -2393,10 +2528,25 @@ fn parse_residual_cabac(
     if (ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2) && layer.cbp & 0x30 != 0 {
         let c422 = ctx.chroma_format_idc == 2;
         let (n_dc, rows) = if c422 { (8usize, 4usize) } else { (4, 2) };
-        let dc_scan: &[u8] = if c422 { &SCAN_CHROMA_DC_422[..] } else { &IDENTITY_OFF[..4] };
+        let dc_scan: &[u8] = if c422 {
+            &SCAN_CHROMA_DC_422[..]
+        } else {
+            &IDENTITY_OFF[..4]
+        };
         for comp in 0..2 {
             let inc = cbf_ctx_inc(info, layer, nb, false, CAT_CHROMA_DC, 0, 0, comp, 0);
-            let n = residual_block_cabac(c, st, field, CAT_CHROMA_DC, Some(inc), &mut layer.chroma_dc[comp], dc_scan, 0, n_dc, None)?;
+            let n = residual_block_cabac(
+                c,
+                st,
+                field,
+                CAT_CHROMA_DC,
+                Some(inc),
+                &mut layer.chroma_dc[comp],
+                dc_scan,
+                0,
+                n_dc,
+                None,
+            )?;
             if n > 0 {
                 layer.dc_cbf |= 2 << comp;
             }
@@ -2405,7 +2555,18 @@ fn parse_residual_cabac(
             for comp in 0..2 {
                 for blk in 0..2 * rows {
                     let inc = cbf_ctx_inc(info, layer, nb, false, CAT_CHROMA_AC, 0, 0, comp, blk);
-                    let n = residual_block_cabac(c, st, field, CAT_CHROMA_AC, Some(inc), &mut layer.chroma_ac[comp][blk], scan4, 1, 15, dq.map(|d| (&d.q4[1 + comp].0[..], d.q4[1 + comp].1)))?;
+                    let n = residual_block_cabac(
+                        c,
+                        st,
+                        field,
+                        CAT_CHROMA_AC,
+                        Some(inc),
+                        &mut layer.chroma_ac[comp][blk],
+                        scan4,
+                        1,
+                        15,
+                        dq.map(|d| (&d.q4[1 + comp].0[..], d.q4[1 + comp].1)),
+                    )?;
                     layer.chroma_nz[comp][blk] = n as u8;
                 }
             }
@@ -2435,12 +2596,28 @@ pub(crate) fn write_intra_residual_cabac(
     left: Option<&WrittenMb>,
     above: Option<&WrittenMb>,
 ) {
-    let cur =
-        cur_residual(true, d.transform_8x8, chroma_format_idc, d.cbp_luma, &d.nz_luma, &d.nz_chroma);
+    let cur = cur_residual(
+        true,
+        d.transform_8x8,
+        chroma_format_idc,
+        d.cbp_luma,
+        &d.nz_luma,
+        &d.nz_chroma,
+    );
     let dc = (d.kind == IntraKind::I16x16).then_some(&d.luma_dc);
     write_residual_walk_cabac(
-        e, st, field, chroma_format_idc, &cur, dc, &d.luma, d.cbp_chroma, &d.chroma_dc,
-        &d.chroma_ac, left, above,
+        e,
+        st,
+        field,
+        chroma_format_idc,
+        &cur,
+        dc,
+        &d.luma,
+        d.cbp_chroma,
+        &d.chroma_dc,
+        &d.chroma_ac,
+        left,
+        above,
     );
 }
 
@@ -2465,8 +2642,20 @@ pub(crate) fn write_inter_residual_cabac(
         "only a coded inter macroblock carries residual syntax (a skip carries none)"
     );
     write_inter_residual_fields_cabac(
-        e, st, field, chroma_format_idc, d.transform_8x8, d.cbp_luma, &d.nz_luma, &d.luma,
-        d.cbp_chroma, &d.chroma_dc, &d.chroma_ac, &d.nz_chroma, left, above,
+        e,
+        st,
+        field,
+        chroma_format_idc,
+        d.transform_8x8,
+        d.cbp_luma,
+        &d.nz_luma,
+        &d.luma,
+        d.cbp_chroma,
+        &d.chroma_dc,
+        &d.chroma_ac,
+        &d.nz_chroma,
+        left,
+        above,
     );
 }
 
@@ -2495,11 +2684,27 @@ pub(crate) fn write_inter_residual_fields_cabac(
         !transform_8x8 || cbp_luma != 0,
         "an inter macroblock with no coded luma block carries no transform_size_8x8_flag, so a decoder infers it zero"
     );
-    let cur =
-        cur_residual(false, transform_8x8, chroma_format_idc, cbp_luma, nz_luma, nz_chroma);
+    let cur = cur_residual(
+        false,
+        transform_8x8,
+        chroma_format_idc,
+        cbp_luma,
+        nz_luma,
+        nz_chroma,
+    );
     write_residual_walk_cabac(
-        e, st, field, chroma_format_idc, &cur, None, luma, cbp_chroma, chroma_dc, chroma_ac,
-        left, above,
+        e,
+        st,
+        field,
+        chroma_format_idc,
+        &cur,
+        None,
+        luma,
+        cbp_chroma,
+        chroma_dc,
+        chroma_ac,
+        left,
+        above,
     );
 }
 
@@ -2567,7 +2772,10 @@ fn write_plane_residual_cabac(
     let scan8: &[u8; 64] = if field { &FIELD_SCAN8X8 } else { &ZIGZAG8X8 };
     let mut buf = [0i32; 16];
     if let Some(dc) = dc {
-        debug_assert!(!cur.transform_8x8, "Intra_16x16 carries no transform_size_8x8_flag");
+        debug_assert!(
+            !cur.transform_8x8,
+            "Intra_16x16 carries no transform_size_8x8_flag"
+        );
         for (o, &v) in buf.iter_mut().zip(dc) {
             *o = v as i32;
         }
@@ -2584,7 +2792,9 @@ fn write_plane_residual_cabac(
             // to follow the layout the levels are actually in.
             debug_assert!(
                 if cur.transform_8x8 {
-                    levels.as_flattened()[blk8 * 64..blk8 * 64 + 64].iter().all(|&v| v == 0)
+                    levels.as_flattened()[blk8 * 64..blk8 * 64 + 64]
+                        .iter()
+                        .all(|&v| v == 0)
                 } else {
                     (0..4).all(|sub| {
                         let raster = (by8 + (sub >> 1)) * 4 + bx8 + (sub & 1);
@@ -2606,13 +2816,14 @@ fn write_plane_residual_cabac(
             // the bit instead, and `write_residual_block_cabac` asserts
             // so rather than emitting a block the reader cannot parse.
             let mut buf8 = [0i32; 64];
-            for (o, &v) in
-                buf8.iter_mut().zip(&levels.as_flattened()[blk8 * 64..blk8 * 64 + 64])
+            for (o, &v) in buf8
+                .iter_mut()
+                .zip(&levels.as_flattened()[blk8 * 64..blk8 * 64 + 64])
             {
                 *o = v as i32;
             }
-            let cbf = c444
-                .then(|| enc_cbf_ctx_inc(cur, left, above, rows, cat_8x8, bx8, by8, 0, 0));
+            let cbf =
+                c444.then(|| enc_cbf_ctx_inc(cur, left, above, rows, cat_8x8, bx8, by8, 0, 0));
             let n = write_residual_block_cabac(e, st, field, cat_8x8, cbf, &buf8, scan8, 0, 64);
             debug_assert_eq!(
                 n,
@@ -2629,11 +2840,26 @@ fn write_plane_residual_cabac(
             }
             // Intra_16x16 codes the 15 AC coefficients (position 0 lives
             // in the DC block); everything else codes all 16.
-            let (cat, start, max_coeff) = if dc.is_some() { (cat_ac, 1, 15) } else { (cat_4x4, 0, 16) };
-            debug_assert!(dc.is_none() || buf[0] == 0, "I_16x16 AC keeps position 0 free");
+            let (cat, start, max_coeff) = if dc.is_some() {
+                (cat_ac, 1, 15)
+            } else {
+                (cat_4x4, 0, 16)
+            };
+            debug_assert!(
+                dc.is_none() || buf[0] == 0,
+                "I_16x16 AC keeps position 0 free"
+            );
             let inc = enc_cbf_ctx_inc(cur, left, above, rows, cat, bx, by, 0, 0);
             let n = write_residual_block_cabac(
-                e, st, field, cat, Some(inc), &buf, scan4, start, max_coeff,
+                e,
+                st,
+                field,
+                cat,
+                Some(inc),
+                &buf,
+                scan4,
+                start,
+                max_coeff,
             );
             debug_assert_eq!(
                 n,
@@ -2680,7 +2906,15 @@ fn write_residual_walk_cabac(
     if c444 {
         for p in 1..3usize {
             write_plane_residual_cabac(
-                e, st, field, cur, left, above, rows, c444, p,
+                e,
+                st,
+                field,
+                cur,
+                left,
+                above,
+                rows,
+                c444,
+                p,
                 luma_dc.is_some().then_some(&chroma_dc[p - 1]),
                 &chroma_ac[p - 1],
             );
@@ -2690,13 +2924,20 @@ fn write_residual_walk_cabac(
     }
 
     if chroma_format_idc == 0 || cbp_chroma == 0 {
-        debug_assert!(chroma_format_idc != 0 || cbp_chroma == 0, "monochrome has no chroma cbp");
+        debug_assert!(
+            chroma_format_idc != 0 || cbp_chroma == 0,
+            "monochrome has no chroma cbp"
+        );
         return;
     }
     let scan4: &[u8; 16] = if field { &FIELD_SCAN4X4 } else { &ZIGZAG4X4 };
     let mut buf = [0i32; 16];
     let n_dc = if c422 { 8 } else { 4 };
-    let dc_scan: &[u8] = if c422 { &SCAN_CHROMA_DC_422[..] } else { &IDENTITY_OFF[..4] };
+    let dc_scan: &[u8] = if c422 {
+        &SCAN_CHROMA_DC_422[..]
+    } else {
+        &IDENTITY_OFF[..4]
+    };
     for comp in 0..2 {
         debug_assert!(
             c422 || chroma_dc[comp][4..].iter().all(|&v| v == 0),
@@ -2707,7 +2948,17 @@ fn write_residual_walk_cabac(
             *o = v as i32;
         }
         let inc = enc_cbf_ctx_inc(cur, left, above, rows, CAT_CHROMA_DC, 0, 0, comp, 0);
-        write_residual_block_cabac(e, st, field, CAT_CHROMA_DC, Some(inc), &buf, dc_scan, 0, n_dc);
+        write_residual_block_cabac(
+            e,
+            st,
+            field,
+            CAT_CHROMA_DC,
+            Some(inc),
+            &buf,
+            dc_scan,
+            0,
+            n_dc,
+        );
     }
     if cbp_chroma == 2 {
         for comp in 0..2 {
@@ -2718,7 +2969,15 @@ fn write_residual_walk_cabac(
                 debug_assert!(buf[0] == 0, "chroma AC keeps position 0 free");
                 let inc = enc_cbf_ctx_inc(cur, left, above, rows, CAT_CHROMA_AC, 0, 0, comp, blk);
                 let n = write_residual_block_cabac(
-                    e, st, field, CAT_CHROMA_AC, Some(inc), &buf, scan4, 1, 15,
+                    e,
+                    st,
+                    field,
+                    CAT_CHROMA_AC,
+                    Some(inc),
+                    &buf,
+                    scan4,
+                    1,
+                    15,
                 );
                 debug_assert_eq!(
                     n, cur.nz_chroma[comp][blk] as usize,
@@ -2728,7 +2987,9 @@ fn write_residual_walk_cabac(
         }
     } else {
         debug_assert!(
-            chroma_ac.iter().all(|c| c.iter().all(|b| b.iter().all(|&v| v == 0))),
+            chroma_ac
+                .iter()
+                .all(|c| c.iter().all(|b| b.iter().all(|&v| v == 0))),
             "chroma AC coefficients below chroma cbp 2 would be lost"
         );
     }
@@ -2991,7 +3252,6 @@ pub fn parse_mb_cabac(
 /// callers have one import).
 pub const _PRED_CHECK: (u8, u8, u8) = (PRED_L0, PRED_L1, PRED_BI);
 
-
 #[cfg(test)]
 mod residual_round_trip {
     use super::*;
@@ -3031,7 +3291,11 @@ mod residual_round_trip {
         let mut c = Cabac::new(&data);
         let mut dec_st = CabacState::new(SliceType::P, 0, 26);
         for (i, &(l, a, f)) in cases.iter().enumerate() {
-            assert_eq!(decode_mb_field(&mut c, &mut dec_st, &nb_of(l, a)), f, "case {i}: left {l:?} above {a:?}");
+            assert_eq!(
+                decode_mb_field(&mut c, &mut dec_st, &nb_of(l, a)),
+                f,
+                "case {i}: left {l:?} above {a:?}"
+            );
         }
         assert!(decode_end_of_slice(&mut c));
         assert_eq!(enc_st.ctx, dec_st.ctx, "context states diverged");
@@ -3044,14 +3308,28 @@ mod residual_round_trip {
     /// binarisations can spell the same coefficients while leaving the
     /// probability model in different places, and nothing goes wrong until a
     /// later block reads a bin against a state the writer never had.
-    fn round_trip(cat: usize, max_coeff: usize, cbf_inc: Option<usize>, field: bool, levels: &[i32]) {
+    fn round_trip(
+        cat: usize,
+        max_coeff: usize,
+        cbf_inc: Option<usize>,
+        field: bool,
+        levels: &[i32],
+    ) {
         let scan: Vec<u8> = (0..64).map(|i| i as u8).collect();
         let mut enc_st = CabacState::new(SliceType::I, 0, 26);
         let mut w = BitWriter::new();
         let n_enc = {
             let mut e = CabacEncoder::new(&mut w);
             let n = write_residual_block_cabac(
-                &mut e, &mut enc_st, field, cat, cbf_inc, levels, &scan, 0, max_coeff,
+                &mut e,
+                &mut enc_st,
+                field,
+                cat,
+                cbf_inc,
+                levels,
+                &scan,
+                0,
+                max_coeff,
             );
             e.encode_terminate(1);
             n
@@ -3063,13 +3341,29 @@ mod residual_round_trip {
         let mut c = Cabac::new(&data);
         let mut out = vec![0i32; max_coeff];
         let n_dec = residual_block_cabac(
-            &mut c, &mut dec_st, field, cat, cbf_inc, &mut out, &scan, 0, max_coeff, None,
+            &mut c,
+            &mut dec_st,
+            field,
+            cat,
+            cbf_inc,
+            &mut out,
+            &scan,
+            0,
+            max_coeff,
+            None,
         )
         .expect("the reader rejected what the writer produced");
 
         let want = &levels[..max_coeff];
-        assert_eq!(&out[..], want, "cat={cat} field={field} coefficients differ");
-        assert_eq!(n_dec, n_enc, "cat={cat} field={field} significant count differs");
+        assert_eq!(
+            &out[..],
+            want,
+            "cat={cat} field={field} coefficients differ"
+        );
+        assert_eq!(
+            n_dec, n_enc,
+            "cat={cat} field={field} significant count differs"
+        );
         assert_eq!(
             enc_st.ctx, dec_st.ctx,
             "cat={cat} field={field} context states diverged"
@@ -3082,6 +3376,7 @@ mod residual_round_trip {
     fn round_trips_every_category() {
         // (cat, max_coeff, cbf_inc): 8x8 luma outside 4:4:4 has no
         // coded_block_flag, so it is the one that cannot spell an empty block.
+        #[rustfmt::skip]
         let shapes: [(usize, usize, Option<usize>); 5] = [
             (0, 16, Some(0)),  // Intra16x16 luma DC
             (2, 16, Some(1)),  // luma 4x4
@@ -3118,7 +3413,11 @@ mod residual_round_trip {
                 // drives the greater-than-one counters to their caps.
                 let mut dense = z.clone();
                 for (i, v) in dense.iter_mut().enumerate().take(max_coeff) {
-                    *v = if i % 2 == 0 { (i as i32) + 1 } else { -(i as i32) - 1 };
+                    *v = if i % 2 == 0 {
+                        (i as i32) + 1
+                    } else {
+                        -(i as i32) - 1
+                    };
                 }
                 cases.push(dense);
                 // Runs of magnitude one, which is what quantised high
@@ -3306,10 +3605,17 @@ mod mb_round_trip {
     /// A pseudo-random intra decision that is internally consistent the way
     /// the real mode decision's output is: cbp bits match the levels, `nz`
     /// counts match them too, AC blocks keep position 0 free.
-    fn synth_intra(rng: &mut impl FnMut() -> u32, cfi: u32, force: Option<IntraKind>) -> MbDecision {
+    fn synth_intra(
+        rng: &mut impl FnMut() -> u32,
+        cfi: u32,
+        force: Option<IntraKind>,
+    ) -> MbDecision {
         let mut d = MbDecision::default();
-        d.kind = force
-            .unwrap_or(if rng() % 2 == 0 { IntraKind::I4x4 } else { IntraKind::I16x16 });
+        d.kind = force.unwrap_or(if rng() % 2 == 0 {
+            IntraKind::I4x4
+        } else {
+            IntraKind::I16x16
+        });
         d.transform_8x8 = d.kind == IntraKind::I8x8;
         match d.kind {
             // `I_NxN` with the 8x8 transform: four modes, and four blocks
@@ -3320,9 +3626,15 @@ mod mb_round_trip {
             IntraKind::I8x8 => {
                 for &raster in &[0usize, 2, 8, 10] {
                     let m = if rng() % 2 == 0 {
-                        PredMode { use_predicted: true, rem: 0 }
+                        PredMode {
+                            use_predicted: true,
+                            rem: 0,
+                        }
                     } else {
-                        PredMode { use_predicted: false, rem: (rng() % 8) as u8 }
+                        PredMode {
+                            use_predicted: false,
+                            rem: (rng() % 8) as u8,
+                        }
                     };
                     for r in quad_rasters(raster_quad(raster)) {
                         d.luma_pred[r] = m;
@@ -3355,9 +3667,15 @@ mod mb_round_trip {
             IntraKind::I4x4 => {
                 for r in 0..16 {
                     d.luma_pred[r] = if rng() % 2 == 0 {
-                        PredMode { use_predicted: true, rem: 0 }
+                        PredMode {
+                            use_predicted: true,
+                            rem: 0,
+                        }
                     } else {
-                        PredMode { use_predicted: false, rem: (rng() % 8) as u8 }
+                        PredMode {
+                            use_predicted: false,
+                            rem: (rng() % 8) as u8,
+                        }
                     };
                 }
                 d.cbp_luma = (rng() % 16) as u8;
@@ -3391,7 +3709,11 @@ mod mb_round_trip {
                 }
             }
         }
-        d.chroma_mode = if cfi == 0 || cfi == 3 { 0 } else { (rng() % 4) as u8 };
+        d.chroma_mode = if cfi == 0 || cfi == 3 {
+            0
+        } else {
+            (rng() % 4) as u8
+        };
         if cfi == 3 {
             // ChromaArrayType 3: Cb and Cr are luma-style planes, coded
             // with the *same* coded block pattern, transform size and
@@ -3589,7 +3911,11 @@ mod mb_round_trip {
                 };
             }
         }
-        d.ref_idx = if num_ref > 1 { (rng() % num_ref) as i8 } else { 0 };
+        d.ref_idx = if num_ref > 1 {
+            (rng() % num_ref) as i8
+        } else {
+            0
+        };
         // One mvd per prediction rectangle, replicated over it — the
         // layout the decoder's CABAC parser stores and the contexts read.
         let mut rects = [(0usize, 0usize, 0usize, 0usize); 16];
@@ -3688,7 +4014,14 @@ mod mb_round_trip {
         }
         write_intra_pred_modes_cabac(e, st, d, chroma_nb);
         if d.kind.is_nxn() {
-            write_cbp_cabac(e, st, lnb, anb, d.cbp_luma | (d.cbp_chroma << 4), cfi == 1 || cfi == 2);
+            write_cbp_cabac(
+                e,
+                st,
+                lnb,
+                anb,
+                d.cbp_luma | (d.cbp_chroma << 4),
+                cfi == 1 || cfi == 2,
+            );
         }
         let has_residual = d.kind == IntraKind::I16x16 || d.cbp_luma != 0 || d.cbp_chroma != 0;
         if has_residual {
@@ -3745,7 +4078,14 @@ mod mb_round_trip {
             write_mvd_cabac(e, st, &cur, lnb, anb, 0, x / 4, y / 4, m);
             cur.set(0, x, y, w, h, m);
         }
-        write_cbp_cabac(e, st, lnb, anb, d.cbp_luma | (d.cbp_chroma << 4), cfi == 1 || cfi == 2);
+        write_cbp_cabac(
+            e,
+            st,
+            lnb,
+            anb,
+            d.cbp_luma | (d.cbp_chroma << 4),
+            cfi == 1 || cfi == 2,
+        );
         // After the coded block pattern, only when some luma block is
         // coded, and only when every sub-macroblock partition is at least
         // 8x8 (7.3.5) — a split `P_8x8` suppresses the flag, and writing
@@ -3806,7 +4146,14 @@ mod mb_round_trip {
                         for sub in 0..shape.count() {
                             let (x, y, w, h) = sub_partition_rect(part, shape, sub);
                             let (mx, my) = decode_mvd(
-                                c, st, info, layer, nb, 0, (x / 4) as i32, (y / 4) as i32,
+                                c,
+                                st,
+                                info,
+                                layer,
+                                nb,
+                                0,
+                                (x / 4) as i32,
+                                (y / 4) as i32,
                             )
                             .expect("mvd rejected");
                             for by in y / 4..(y + h) / 4 {
@@ -3818,14 +4165,26 @@ mod mb_round_trip {
                     }
                     return_early = true;
                 }
-                let parts = if return_early { &[][..] } else { mb_partitions(layer.kind) };
+                let parts = if return_early {
+                    &[][..]
+                } else {
+                    mb_partitions(layer.kind)
+                };
                 for &(x, y, w, h) in parts {
                     let n = ctx.num_ref_idx[0];
                     let ri = if n <= 1 {
                         0
                     } else {
                         decode_ref_idx(
-                            c, st, info, layer, nb, frame_motion, 0, (x / 4) as i32, (y / 4) as i32,
+                            c,
+                            st,
+                            info,
+                            layer,
+                            nb,
+                            frame_motion,
+                            0,
+                            (x / 4) as i32,
+                            (y / 4) as i32,
                         )
                         .expect("ref_idx rejected")
                     };
@@ -3864,10 +4223,7 @@ mod mb_round_trip {
             }
         }
         match layer.kind {
-            MbKind::Inter16x16
-            | MbKind::Inter16x8
-            | MbKind::Inter8x16
-            | MbKind::Inter8x8 => {}
+            MbKind::Inter16x16 | MbKind::Inter16x8 | MbKind::Inter8x16 | MbKind::Inter8x8 => {}
             MbKind::IPcm => {
                 let n = 256
                     + match ctx.chroma_format_idc {
@@ -3942,8 +4298,8 @@ mod mb_round_trip {
             // An inter macroblock's flag, after the coded block pattern
             // — and only when every sub-macroblock partition is at least
             // 8x8 (7.3.5's `noSubMbPartSizeLessThan8x8Flag`).
-            let no_sub_lt_8x8 = layer.kind != MbKind::Inter8x8
-                || layer.sub_shape.iter().all(|s| s.count() == 1);
+            let no_sub_lt_8x8 =
+                layer.kind != MbKind::Inter8x8 || layer.sub_shape.iter().all(|s| s.count() == 1);
             if layer.cbp & 15 != 0
                 && ctx.transform_8x8_mode
                 && !layer.kind.is_intra()
@@ -4008,7 +4364,13 @@ mod mb_round_trip {
     /// Every field of one parsed macroblock against the decision that was
     /// written — and the writer's own [`WrittenMb`] against what the
     /// decoder stores, which is the proof of `from_decision`.
-    fn check_mb(addr: usize, d: &MbDecision, layer: &MbLayer, syntax: &[(bool, u8); 16], ctx: &SliceCtx) {
+    fn check_mb(
+        addr: usize,
+        d: &MbDecision,
+        layer: &MbLayer,
+        syntax: &[(bool, u8); 16],
+        ctx: &SliceCtx,
+    ) {
         match d.kind {
             IntraKind::I8x8 => {
                 assert_eq!(layer.kind, MbKind::I8x8, "mb {addr} kind");
@@ -4033,8 +4395,15 @@ mod mb_round_trip {
                 assert_eq!(layer.intra16_mode, d.intra16_mode, "mb {addr} intra16 mode");
             }
         }
-        assert_eq!(layer.transform_8x8, d.transform_8x8, "mb {addr} transform_size_8x8_flag");
-        assert_eq!(layer.cbp, (d.cbp_luma & 15) | (d.cbp_chroma << 4), "mb {addr} cbp");
+        assert_eq!(
+            layer.transform_8x8, d.transform_8x8,
+            "mb {addr} transform_size_8x8_flag"
+        );
+        assert_eq!(
+            layer.cbp,
+            (d.cbp_luma & 15) | (d.cbp_chroma << 4),
+            "mb {addr} cbp"
+        );
         let chroma = ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2;
         let c444 = ctx.chroma_format_idc == 3;
         if chroma {
@@ -4048,7 +4417,10 @@ mod mb_round_trip {
         );
         if d.kind == IntraKind::I16x16 {
             for i in 0..16 {
-                assert_eq!(layer.dc[0][i], d.luma_dc[i] as i32, "mb {addr} luma DC coeff {i}");
+                assert_eq!(
+                    layer.dc[0][i], d.luma_dc[i] as i32,
+                    "mb {addr} luma DC coeff {i}"
+                );
             }
         }
         // The coefficient storage means two different things by transform
@@ -4101,21 +4473,23 @@ mod mb_round_trip {
             for comp in 0..2 {
                 for i in 0..n_dc {
                     assert_eq!(
-                        layer.chroma_dc[comp][i],
-                        d.chroma_dc[comp][i] as i32,
+                        layer.chroma_dc[comp][i], d.chroma_dc[comp][i] as i32,
                         "mb {addr} chroma {comp} DC coeff {i}"
                     );
                 }
                 for blk in 0..2 * rows {
                     for k in 0..16 {
                         assert_eq!(
-                            layer.chroma_ac[comp][blk][k],
-                            d.chroma_ac[comp][blk][k] as i32,
+                            layer.chroma_ac[comp][blk][k], d.chroma_ac[comp][blk][k] as i32,
                             "mb {addr} chroma {comp} AC block {blk} coeff {k}"
                         );
                     }
                 }
-                assert_eq!(layer.chroma_nz[comp][..], d.nz_chroma[comp][..8], "mb {addr} chroma {comp} nz");
+                assert_eq!(
+                    layer.chroma_nz[comp][..],
+                    d.nz_chroma[comp][..8],
+                    "mb {addr} chroma {comp} nz"
+                );
             }
         }
         // The writer's own neighbour record against what the decoder
@@ -4124,21 +4498,44 @@ mod mb_round_trip {
         let wm = WrittenMb::from_decision(d, c444);
         assert_eq!(wm.cbp, layer.cbp, "mb {addr} WrittenMb cbp");
         assert_eq!(wm.dc_cbf, layer.dc_cbf, "mb {addr} WrittenMb dc_cbf");
-        assert_eq!(wm.transform_8x8, layer.transform_8x8, "mb {addr} WrittenMb transform_8x8");
+        assert_eq!(
+            wm.transform_8x8, layer.transform_8x8,
+            "mb {addr} WrittenMb transform_8x8"
+        );
         assert_eq!(wm.nz_luma, layer.nz[0], "mb {addr} WrittenMb nz_luma");
         if c444 {
-            assert_eq!(wm.nz_chroma[0], layer.nz[1], "mb {addr} WrittenMb plane Cb nz");
-            assert_eq!(wm.nz_chroma[1], layer.nz[2], "mb {addr} WrittenMb plane Cr nz");
+            assert_eq!(
+                wm.nz_chroma[0], layer.nz[1],
+                "mb {addr} WrittenMb plane Cb nz"
+            );
+            assert_eq!(
+                wm.nz_chroma[1], layer.nz[2],
+                "mb {addr} WrittenMb plane Cr nz"
+            );
         } else {
-            assert_eq!(wm.nz_chroma[0][..8], layer.chroma_nz[0][..], "mb {addr} WrittenMb nz_chroma Cb");
-            assert_eq!(wm.nz_chroma[1][..8], layer.chroma_nz[1][..], "mb {addr} WrittenMb nz_chroma Cr");
+            assert_eq!(
+                wm.nz_chroma[0][..8],
+                layer.chroma_nz[0][..],
+                "mb {addr} WrittenMb nz_chroma Cb"
+            );
+            assert_eq!(
+                wm.nz_chroma[1][..8],
+                layer.chroma_nz[1][..],
+                "mb {addr} WrittenMb nz_chroma Cr"
+            );
         }
     }
 
     /// Every field of one parsed P macroblock against the decision that
     /// was written, and [`WrittenMb::from_inter_decision`] against what
     /// the decoder's bookkeeping stores.
-    fn check_inter_mb(addr: usize, d: &InterDecision, layer: &MbLayer, ctx: &SliceCtx, num_ref: u32) {
+    fn check_inter_mb(
+        addr: usize,
+        d: &InterDecision,
+        layer: &MbLayer,
+        ctx: &SliceCtx,
+        num_ref: u32,
+    ) {
         let c444 = ctx.chroma_format_idc == 3;
         assert_eq!(layer.kind, d.kind.dec_kind(), "mb {addr} kind");
         let want_ri = if num_ref > 1 { d.ref_idx } else { 0 };
@@ -4163,8 +4560,15 @@ mod mb_round_trip {
         if d.kind == InterMbKind::P8x8 {
             assert_eq!(&layer.sub_shape, &d.sub_shape, "mb {addr} sub_mb_type");
         }
-        assert_eq!(layer.transform_8x8, d.transform_8x8, "mb {addr} transform_size_8x8_flag");
-        assert_eq!(layer.cbp, (d.cbp_luma & 15) | (d.cbp_chroma << 4), "mb {addr} cbp");
+        assert_eq!(
+            layer.transform_8x8, d.transform_8x8,
+            "mb {addr} transform_size_8x8_flag"
+        );
+        assert_eq!(
+            layer.cbp,
+            (d.cbp_luma & 15) | (d.cbp_chroma << 4),
+            "mb {addr} cbp"
+        );
         let has_residual = d.cbp_luma != 0 || d.cbp_chroma != 0;
         assert_eq!(
             layer.qp_delta,
@@ -4204,38 +4608,63 @@ mod mb_round_trip {
             for comp in 0..2 {
                 for i in 0..n_dc {
                     assert_eq!(
-                        layer.chroma_dc[comp][i],
-                        d.chroma_dc[comp][i] as i32,
+                        layer.chroma_dc[comp][i], d.chroma_dc[comp][i] as i32,
                         "mb {addr} chroma {comp} DC coeff {i}"
                     );
                 }
                 for blk in 0..2 * rows {
                     for k in 0..16 {
                         assert_eq!(
-                            layer.chroma_ac[comp][blk][k],
-                            d.chroma_ac[comp][blk][k] as i32,
+                            layer.chroma_ac[comp][blk][k], d.chroma_ac[comp][blk][k] as i32,
                             "mb {addr} chroma {comp} AC block {blk} coeff {k}"
                         );
                     }
                 }
-                assert_eq!(layer.chroma_nz[comp][..], d.nz_chroma[comp][..8], "mb {addr} chroma {comp} nz");
+                assert_eq!(
+                    layer.chroma_nz[comp][..],
+                    d.nz_chroma[comp][..8],
+                    "mb {addr} chroma {comp} nz"
+                );
             }
         }
         let wm = WrittenMb::from_inter_decision(d, c444);
         assert_eq!(wm.cbp, layer.cbp, "mb {addr} WrittenMb cbp");
         assert_eq!(wm.dc_cbf, layer.dc_cbf, "mb {addr} WrittenMb dc_cbf");
-        assert_eq!(wm.transform_8x8, layer.transform_8x8, "mb {addr} WrittenMb transform_8x8");
+        assert_eq!(
+            wm.transform_8x8, layer.transform_8x8,
+            "mb {addr} WrittenMb transform_8x8"
+        );
         assert_eq!(wm.nz_luma, layer.nz[0], "mb {addr} WrittenMb nz_luma");
         if c444 {
-            assert_eq!(wm.nz_chroma[0], layer.nz[1], "mb {addr} WrittenMb plane Cb nz");
-            assert_eq!(wm.nz_chroma[1], layer.nz[2], "mb {addr} WrittenMb plane Cr nz");
+            assert_eq!(
+                wm.nz_chroma[0], layer.nz[1],
+                "mb {addr} WrittenMb plane Cb nz"
+            );
+            assert_eq!(
+                wm.nz_chroma[1], layer.nz[2],
+                "mb {addr} WrittenMb plane Cr nz"
+            );
         } else {
-            assert_eq!(wm.nz_chroma[0][..8], layer.chroma_nz[0][..], "mb {addr} WrittenMb nz_chroma Cb");
-            assert_eq!(wm.nz_chroma[1][..8], layer.chroma_nz[1][..], "mb {addr} WrittenMb nz_chroma Cr");
+            assert_eq!(
+                wm.nz_chroma[0][..8],
+                layer.chroma_nz[0][..],
+                "mb {addr} WrittenMb nz_chroma Cb"
+            );
+            assert_eq!(
+                wm.nz_chroma[1][..8],
+                layer.chroma_nz[1][..],
+                "mb {addr} WrittenMb nz_chroma Cr"
+            );
         }
         for blk in 0..16 {
-            assert_eq!(wm.mvd[0][blk], layer.mvd[blk].mvd[0], "mb {addr} WrittenMb mvd {blk}");
-            assert_eq!(wm.ref_idx[blk], want_ri, "mb {addr} WrittenMb ref_idx {blk}");
+            assert_eq!(
+                wm.mvd[0][blk], layer.mvd[blk].mvd[0],
+                "mb {addr} WrittenMb mvd {blk}"
+            );
+            assert_eq!(
+                wm.ref_idx[blk], want_ri,
+                "mb {addr} WrittenMb ref_idx {blk}"
+            );
         }
     }
 
@@ -4295,7 +4724,14 @@ mod mb_round_trip {
                         if p_slice {
                             write_mb_type_p_cabac(&mut e, &mut enc_st, 5 + intra_mb_type_code(d));
                             write_intra_mb_body(
-                                &mut e, &mut enc_st, d, left, above, cfi, field, t8x8,
+                                &mut e,
+                                &mut enc_st,
+                                d,
+                                left,
+                                above,
+                                cfi,
+                                field,
+                                t8x8,
                             );
                         } else {
                             write_mb(&mut e, &mut enc_st, d, left, above, cfi, field, t8x8);
@@ -4320,12 +4756,17 @@ mod mb_round_trip {
                             InterMbKind::P16x16
                             | InterMbKind::P16x8
                             | InterMbKind::P8x16
-                            | InterMbKind::P8x8 => {
-                                write_p16x16_mb(
-                                    &mut e, &mut enc_st, d, left, above, cfi, field, num_ref,
-                                    t8x8,
-                                )
-                            }
+                            | InterMbKind::P8x8 => write_p16x16_mb(
+                                &mut e,
+                                &mut enc_st,
+                                d,
+                                left,
+                                above,
+                                cfi,
+                                field,
+                                num_ref,
+                                t8x8,
+                            ),
                             InterMbKind::UseIntra => {
                                 unreachable!("tests spell intra via TestMb::Intra")
                             }
@@ -4416,8 +4857,15 @@ mod mb_round_trip {
                 assert!(!want_skip, "an I-slice test cannot hold a skip");
             }
             if !skipped {
-                let syntax =
-                    parse_mb(&mut c, &mut dec_st, &ctx, &info, &nb, &frame_motion, &mut layer);
+                let syntax = parse_mb(
+                    &mut c,
+                    &mut dec_st,
+                    &ctx,
+                    &info,
+                    &nb,
+                    &frame_motion,
+                    &mut layer,
+                );
                 match mb {
                     TestMb::Pcm(samples) => {
                         assert_eq!(layer.kind, MbKind::IPcm, "mb {addr} kind");
@@ -4429,10 +4877,14 @@ mod mb_round_trip {
             }
             commit(&mut info, addr, &layer, c444);
             let bm = match layer.kind {
-                MbKind::Inter16x16 => {
-                    BlockMotion { ref_idx: layer.ref_idx[0][0], ..BlockMotion::default() }
-                }
-                MbKind::PSkip => BlockMotion { ref_idx: 0, ..BlockMotion::default() },
+                MbKind::Inter16x16 => BlockMotion {
+                    ref_idx: layer.ref_idx[0][0],
+                    ..BlockMotion::default()
+                },
+                MbKind::PSkip => BlockMotion {
+                    ref_idx: 0,
+                    ..BlockMotion::default()
+                },
                 _ => BlockMotion::default(),
             };
             frame_motion[0][addr * 16..addr * 16 + 16].fill(bm);
@@ -4530,7 +4982,10 @@ mod mb_round_trip {
                 // Left and above neighbours: big mvds in list 0, tiny in
                 // list 1 — so the two lists select different contexts.
                 let mut nbmb = WrittenMb::from_inter_decision(
-                    &InterDecision { kind: InterMbKind::P16x16, ..InterDecision::default() },
+                    &InterDecision {
+                        kind: InterMbKind::P16x16,
+                        ..InterDecision::default()
+                    },
                     false,
                 );
                 nbmb.mvd = [[Mv::new(30, 30); 16], [Mv::new(1, 0); 16]];
@@ -4560,11 +5015,15 @@ mod mb_round_trip {
                 layer.reset(MbKind::Inter16x16, true);
                 let mut dec_st = CabacState::new(SliceType::B, 0, 28);
                 let mut c = Cabac::new(&data);
-                let (x, y) = decode_mvd(&mut c, &mut dec_st, &info, &layer, &nb, list, 0, 0).unwrap();
+                let (x, y) =
+                    decode_mvd(&mut c, &mut dec_st, &info, &layer, &nb, list, 0, 0).unwrap();
                 assert_eq!((x, y), (mvd.x, mvd.y), "list {list}");
                 assert_eq!(c.terminate(), 1);
                 assert!(!c.overrun());
-                assert_eq!(enc_st.ctx, dec_st.ctx, "list {list} mvd {mvd:?}: contexts diverged");
+                assert_eq!(
+                    enc_st.ctx, dec_st.ctx,
+                    "list {list} mvd {mvd:?}: contexts diverged"
+                );
             }
         }
     }
@@ -4835,13 +5294,23 @@ mod mb_round_trip {
     /// increment and an intra one contributes its own flag.
     #[test]
     fn a_p_slice_with_the_8x8_transform_round_trips() {
-        for (cfi, seed, num_ref) in [(1u32, 21u32, 1u32), (1, 22, 3), (2, 23, 1), (3, 24, 1), (0, 25, 2)] {
+        for (cfi, seed, num_ref) in [
+            (1u32, 21u32, 1u32),
+            (1, 22, 3),
+            (2, 23, 1),
+            (3, 24, 1),
+            (0, 25, 2),
+        ] {
             let (w_mb, h_mb) = (4usize, 3usize);
             let mut rng = lcg(0x5151 ^ seed);
             let mut mbs = Vec::new();
             for _ in 0..w_mb * h_mb {
                 if rng() % 4 == 0 {
-                    let force = if rng() % 2 == 0 { IntraKind::I8x8 } else { IntraKind::I4x4 };
+                    let force = if rng() % 2 == 0 {
+                        IntraKind::I8x8
+                    } else {
+                        IntraKind::I4x4
+                    };
                     let mut d = synth_intra(&mut rng, cfi, Some(force));
                     if d.cbp_luma != 0 || d.cbp_chroma != 0 {
                         d.qp_delta = [0i8, 2, -3][(rng() % 3) as usize];
@@ -4981,7 +5450,10 @@ mod mb_round_trip {
                 for (a, on) in [(2usize, l_on), (1usize, a_on)] {
                     info.mbs[a].kind = MbKind::Inter16x16;
                     info.mbs[a].decoded = true;
-                    let bm = BlockMotion { ref_idx: on as i8, ..BlockMotion::default() };
+                    let bm = BlockMotion {
+                        ref_idx: on as i8,
+                        ..BlockMotion::default()
+                    };
                     fm[0][a * 16..a * 16 + 16].fill(bm);
                 }
                 let mut nb = MbNeighbours::default();
@@ -4994,7 +5466,10 @@ mod mb_round_trip {
                 assert_eq!(got, v, "l={l_on} a={a_on}");
                 assert_eq!(c.terminate(), 1);
                 assert!(!c.overrun());
-                assert_eq!(enc_st.ctx, dec_st.ctx, "l={l_on} a={a_on} v={v}: contexts diverged");
+                assert_eq!(
+                    enc_st.ctx, dec_st.ctx,
+                    "l={l_on} a={a_on} v={v}: contexts diverged"
+                );
             }
         }
     }
@@ -5075,16 +5550,14 @@ mod mb_round_trip {
                     // One I_PCM, through the P-slice mb_type spelling.
                     8 => {
                         let n = 256 + if cfi == 2 { 256 } else { 128 };
-                        let samples: Vec<u16> =
-                            (0..n).map(|_| (rng() % 256) as u16).collect();
+                        let samples: Vec<u16> = (0..n).map(|_| (rng() % 256) as u16).collect();
                         mbs.push(TestMb::Pcm(samples));
                     }
                     // Intra-in-P.
                     _ if i % 5 == 3 => {
                         let mut d = synth_intra(&mut rng, cfi, None);
-                        let has_residual = d.kind == IntraKind::I16x16
-                            || d.cbp_luma != 0
-                            || d.cbp_chroma != 0;
+                        let has_residual =
+                            d.kind == IntraKind::I16x16 || d.cbp_luma != 0 || d.cbp_chroma != 0;
                         if has_residual {
                             d.qp_delta = [0i8, 2, -2][(rng() % 3) as usize];
                         }
@@ -5092,9 +5565,7 @@ mod mb_round_trip {
                     }
                     _ => {
                         let mut d = synth_inter(&mut rng, cfi, num_ref);
-                        if d.kind == InterMbKind::P16x16
-                            && (d.cbp_luma != 0 || d.cbp_chroma != 0)
-                        {
+                        if d.kind == InterMbKind::P16x16 && (d.cbp_luma != 0 || d.cbp_chroma != 0) {
                             d.qp_delta = [0i8, 0, 3, -2, 25, -26][(rng() % 6) as usize];
                         }
                         mbs.push(TestMb::Inter(d));

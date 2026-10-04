@@ -135,12 +135,14 @@ impl Geometry {
             }
             let mut ts = 0usize;
             for i in 0..tile_x {
-                ts += (pps.row_bd[tile_y + 1] - pps.row_bd[tile_y]) as usize * (pps.col_bd[i + 1] - pps.col_bd[i]) as usize;
+                ts += (pps.row_bd[tile_y + 1] - pps.row_bd[tile_y]) as usize
+                    * (pps.col_bd[i + 1] - pps.col_bd[i]) as usize;
             }
             for j in 0..tile_y {
                 ts += wc * (pps.row_bd[j + 1] - pps.row_bd[j]) as usize;
             }
-            ts += (tby - pps.row_bd[tile_y] as usize) * (pps.col_bd[tile_x + 1] - pps.col_bd[tile_x]) as usize
+            ts += (tby - pps.row_bd[tile_y] as usize)
+                * (pps.col_bd[tile_x + 1] - pps.col_bd[tile_x]) as usize
                 + tbx
                 - pps.col_bd[tile_x] as usize;
             rs_to_ts[ctb_rs] = ts as u32;
@@ -176,7 +178,18 @@ impl Geometry {
         for rs in 0..nc {
             ctb_tile[rs] = tile_id_ts[rs_to_ts[rs] as usize];
         }
-        Geometry { w4, h4, wc, hc, log2_ctb, ctb_tile, min_tb_addr_zs, ctb_rs_to_ts: rs_to_ts, ctb_ts_to_rs: ts_to_rs, tile_id_ts }
+        Geometry {
+            w4,
+            h4,
+            wc,
+            hc,
+            log2_ctb,
+            ctb_tile,
+            min_tb_addr_zs,
+            ctb_rs_to_ts: rs_to_ts,
+            ctb_ts_to_rs: ts_to_rs,
+            tile_id_ts,
+        }
     }
 }
 
@@ -213,7 +226,6 @@ impl PicInfoPool {
         }
     }
 }
-
 
 /// The current block's side of a z-scan availability test, as
 /// `PicInfo::avail_ctx` derives it.
@@ -352,7 +364,6 @@ impl PicInfo {
         // the same CTB): pred_mode 2 means unwritten.
         self.pred_mode[in_] != 2
     }
-
 
     /// Fill a rectangle of 4x4 entries in a per-4x4 array. Byte-sized
     /// entries (all the per-4x4 tables) are written as whole words for the

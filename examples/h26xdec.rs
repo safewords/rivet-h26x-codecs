@@ -67,16 +67,24 @@ fn main() {
         return;
     }
     if args.len() < 2 {
-        eprintln!("usage: h26xdec <input.264|.265> [out.yuv]
-       h26xdec --rung");
+        eprintln!(
+            "usage: h26xdec <input.264|.265> [out.yuv]
+       h26xdec --rung"
+        );
         std::process::exit(2);
     }
     let path = &args[1];
     let data = std::fs::read(path).expect("read input");
-    let mut out = args.get(2).map(|p| std::fs::File::create(p).expect("create output"));
+    let mut out = args
+        .get(2)
+        .map(|p| std::fs::File::create(p).expect("create output"));
     let lower = path.to_ascii_lowercase();
     let hevc = lower.ends_with(".265") || lower.ends_with(".hevc") || lower.ends_with(".h265");
-    let mut dec = if hevc { Dec::Hevc(h26x::hevc::HevcDecoder::new()) } else { Dec::H264(h26x::h264::H264Decoder::new()) };
+    let mut dec = if hevc {
+        Dec::Hevc(h26x::hevc::HevcDecoder::new())
+    } else {
+        Dec::H264(h26x::h264::H264Decoder::new())
+    };
     let mut n = 0usize;
     // H26XDEC_NOMD5=1 skips hashing (and packing) to time the decoder alone.
     let no_md5 = std::env::var_os("H26XDEC_NOMD5").is_some();
@@ -87,9 +95,13 @@ fn main() {
     let no_chroma_pad = std::env::var_os("H26XDEC_NO_CHROMA_PAD").is_some();
     let mut emit = |pic: h26x::Picture, out: &mut Option<std::fs::File>| {
         if no_md5 && out.is_none() {
-            println!("{},{},{},{}x{}", n, pic.poc, pic.decode_index, pic.width, pic.height);
+            println!(
+                "{},{},{},{}x{}",
+                n, pic.poc, pic.decode_index, pic.width, pic.height
+            );
         } else {
-            let (chroma, width, height, bit_depth) = (pic.chroma, pic.width, pic.height, pic.bit_depth);
+            let (chroma, width, height, bit_depth) =
+                (pic.chroma, pic.width, pic.height, pic.bit_depth);
             let (poc, decode_index) = (pic.poc, pic.decode_index);
             let mut packed = pic.into_packed();
             if chroma == h26x::ChromaFormat::Monochrome && !hevc && !no_chroma_pad {
@@ -107,7 +119,15 @@ fn main() {
                     }
                 }
             }
-            println!("{},{},{},{}x{},{}", n, poc, decode_index, width, height, md5_hex(&packed));
+            println!(
+                "{},{},{},{}x{},{}",
+                n,
+                poc,
+                decode_index,
+                width,
+                height,
+                md5_hex(&packed)
+            );
             if let Some(f) = out {
                 f.write_all(&packed).unwrap();
             }

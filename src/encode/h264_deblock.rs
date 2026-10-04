@@ -57,11 +57,18 @@ use crate::sample::Sample;
 /// `MbInfo` QPs the walks committed are the *unprimed* `QP_Y` / `QP_C`,
 /// exactly what the decoder's `derive()` stores, so the filter reads
 /// them the way it reads its own.
-pub fn deblock_recon<S: Sample>(dsp: &H264Dsp<S>, g: &Geometry, pm: &mut PicMotion, rec: &mut [Recon<S>]) {
+pub fn deblock_recon<S: Sample>(
+    dsp: &H264Dsp<S>,
+    g: &Geometry,
+    pm: &mut PicMotion,
+    rec: &mut [Recon<S>],
+) {
     let (mbw, mbh) = (g.mbs_wide as usize, g.mbs_high as usize);
     debug_assert_eq!(pm.info.mbs.len(), mbw * mbh, "one MbInfo per macroblock");
 
-    let PicMotion { info, frame: src, .. } = pm;
+    let PicMotion {
+        info, frame: src, ..
+    } = pm;
     let mut frame = Frame::<S>::empty();
     frame.mb_width = mbw;
     frame.mb_height = mbh;
@@ -130,7 +137,12 @@ mod tests {
         let mut pm = PicMotion::new(mbw, n / mbw);
         let mut mot = [[BlockMotion::default(); 16]; 2];
         if let Some(mv) = l0 {
-            mot[0] = [BlockMotion { mv, ref_idx: 0, ref_parity: PARITY_FRAME, ref_id: 1 }; 16];
+            mot[0] = [BlockMotion {
+                mv,
+                ref_idx: 0,
+                ref_parity: PARITY_FRAME,
+                ref_id: 1,
+            }; 16];
         }
         let qpc = crate::h264::mb::chroma_qp(26, 0, 0) as i8;
         for addr in 0..n {
@@ -209,7 +221,9 @@ mod tests {
         let mut seed = 11u64;
         for p in rec.iter_mut() {
             for v in p.data.iter_mut() {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 *v = (seed >> 33) as u8;
             }
         }

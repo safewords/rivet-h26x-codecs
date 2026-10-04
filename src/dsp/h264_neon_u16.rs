@@ -140,7 +140,13 @@ unsafe fn j_narrow(r: &[int16x8_t; 6], maxv: int16x8_t) -> uint16x8_t {
             lo = vmlal_n_s16(lo, vget_low_s16(r[k]), taps[k]);
             hi = vmlal_high_n_s16(hi, r[k], taps[k]);
         }
-        vreinterpretq_u16_s16(clip(vcombine_s16(vqmovn_s32(vshrq_n_s32::<10>(lo)), vqmovn_s32(vshrq_n_s32::<10>(hi))), maxv))
+        vreinterpretq_u16_s16(clip(
+            vcombine_s16(
+                vqmovn_s32(vshrq_n_s32::<10>(lo)),
+                vqmovn_s32(vshrq_n_s32::<10>(hi)),
+            ),
+            maxv,
+        ))
     }
 }
 
@@ -158,7 +164,10 @@ unsafe fn tap6_wide(p: *const u16, step: usize) -> Wide {
         let u = vaddq_u16(b, e);
         let v = vaddq_u16(a, f);
         // Modulo 2^32 the partial differences do not matter; the sum is an i32.
-        let lo = vaddw_u16(vmlsl_n_u16(vmull_n_u16(vget_low_u16(t), 20), vget_low_u16(u), 5), vget_low_u16(v));
+        let lo = vaddw_u16(
+            vmlsl_n_u16(vmull_n_u16(vget_low_u16(t), 20), vget_low_u16(u), 5),
+            vget_low_u16(v),
+        );
         let hi = vaddw_high_u16(vmlsl_high_n_u16(vmull_high_n_u16(t, 20), u, 5), v);
         [vreinterpretq_s32_u32(lo), vreinterpretq_s32_u32(hi)]
     }
@@ -166,11 +175,26 @@ unsafe fn tap6_wide(p: *const u16, step: usize) -> Wide {
 
 #[inline(always)]
 unsafe fn half_wide(v: Wide, maxv: int16x8_t) -> uint16x8_t {
-    unsafe { vreinterpretq_u16_s16(clip(vcombine_s16(vqmovn_s32(vrshrq_n_s32::<5>(v[0])), vqmovn_s32(vrshrq_n_s32::<5>(v[1]))), maxv)) }
+    unsafe {
+        vreinterpretq_u16_s16(clip(
+            vcombine_s16(
+                vqmovn_s32(vrshrq_n_s32::<5>(v[0])),
+                vqmovn_s32(vrshrq_n_s32::<5>(v[1])),
+            ),
+            maxv,
+        ))
+    }
 }
 
 #[inline(always)]
-unsafe fn tap6_i32(r0: int32x4_t, r1: int32x4_t, r2: int32x4_t, r3: int32x4_t, r4: int32x4_t, r5: int32x4_t) -> int32x4_t {
+unsafe fn tap6_i32(
+    r0: int32x4_t,
+    r1: int32x4_t,
+    r2: int32x4_t,
+    r3: int32x4_t,
+    r4: int32x4_t,
+    r5: int32x4_t,
+) -> int32x4_t {
     unsafe {
         let t = vaddq_s32(r2, r3);
         let u = vaddq_s32(r1, r4);
@@ -184,12 +208,23 @@ unsafe fn tap6_i32(r0: int32x4_t, r1: int32x4_t, r2: int32x4_t, r3: int32x4_t, r
 #[inline(always)]
 unsafe fn j_wide(w: &[Wide; 6], maxv: int16x8_t) -> uint16x8_t {
     unsafe {
-        let half = |k: usize| vqmovn_s32(vrshrq_n_s32::<10>(tap6_i32(w[0][k], w[1][k], w[2][k], w[3][k], w[4][k], w[5][k])));
+        let half = |k: usize| {
+            vqmovn_s32(vrshrq_n_s32::<10>(tap6_i32(
+                w[0][k], w[1][k], w[2][k], w[3][k], w[4][k], w[5][k],
+            )))
+        };
         vreinterpretq_u16_s16(clip(vcombine_s16(half(0), half(1)), maxv))
     }
 }
 
-fn qpel<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+fn qpel<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     // An eight-lane load from column x ≤ 8 reads x + 7, +5 for the taps.
     let need = (h + 5 - 1) * stride + 21;
     if src.len() < need || dst.len() < h * PRED_STRIDE || w > 16 || !(1..=DEEPEST).contains(&max) {
@@ -204,7 +239,14 @@ fn qpel<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: 
     }
 }
 
-unsafe fn qpel_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_narrow<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     if matches!((XF, YF), (2, 2) | (2, 1) | (2, 3) | (1, 2) | (3, 2)) {
         return unsafe { qpel_centre_narrow::<XF, YF>(dst, src, stride, w, h, max) };
     }
@@ -240,17 +282,33 @@ unsafe fn qpel_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[
     }
 }
 
-unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     unsafe {
         let s = src.as_ptr();
         let maxv = vdupq_n_s16(max as i16);
         let row = |r: usize, x: usize| tap6_narrow(s.add(r * stride + x), 1);
         let mut x = 0;
         while x < w {
-            let mut win = [row(0, x), row(1, x), row(2, x), row(3, x), row(4, x), row(5, x)];
+            let mut win = [
+                row(0, x),
+                row(1, x),
+                row(2, x),
+                row(3, x),
+                row(4, x),
+                row(5, x),
+            ];
             for y in 0..h {
                 let j = j_narrow(&win, maxv);
-                let hh = |col: usize| half_narrow(tap6_narrow(s.add(y * stride + col + x), stride), maxv);
+                let hh = |col: usize| {
+                    half_narrow(tap6_narrow(s.add(y * stride + col + x), stride), maxv)
+                };
                 let v = match (XF, YF) {
                     (2, 2) => j,
                     (2, 1) => vrhaddq_u16(half_narrow(win[2], maxv), j),
@@ -269,7 +327,14 @@ unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], 
     }
 }
 
-unsafe fn qpel_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_wide<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     if matches!((XF, YF), (2, 2) | (2, 1) | (2, 3) | (1, 2) | (3, 2)) {
         return unsafe { qpel_centre_wide::<XF, YF>(dst, src, stride, w, h, max) };
     }
@@ -305,17 +370,32 @@ unsafe fn qpel_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u1
     }
 }
 
-unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     unsafe {
         let s = src.as_ptr();
         let maxv = vdupq_n_s16(max as i16);
         let row = |r: usize, x: usize| tap6_wide(s.add(r * stride + x), 1);
         let mut x = 0;
         while x < w {
-            let mut win = [row(0, x), row(1, x), row(2, x), row(3, x), row(4, x), row(5, x)];
+            let mut win = [
+                row(0, x),
+                row(1, x),
+                row(2, x),
+                row(3, x),
+                row(4, x),
+                row(5, x),
+            ];
             for y in 0..h {
                 let j = j_wide(&win, maxv);
-                let hh = |col: usize| half_wide(tap6_wide(s.add(y * stride + col + x), stride), maxv);
+                let hh =
+                    |col: usize| half_wide(tap6_wide(s.add(y * stride + col + x), stride), maxv);
                 let v = match (XF, YF) {
                     (2, 2) => j,
                     (2, 1) => vrhaddq_u16(half_wide(win[2], maxv), j),
@@ -339,24 +419,55 @@ unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(dst: &mut [u16], sr
 // ----------------------------------------------------------------------
 
 fn chroma(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
-    if src.len() < h * stride + 9 || dst.len() < h * PRED_STRIDE || w > 8 || !(0..8).contains(&xf) || !(0..8).contains(&yf) {
+    if src.len() < h * stride + 9
+        || dst.len() < h * PRED_STRIDE
+        || w > 8
+        || !(0..8).contains(&xf)
+        || !(0..8).contains(&yf)
+    {
         return (H264Dsp::<u16>::SCALAR.chroma)(dst, src, stride, w, h, xf, yf);
     }
     unsafe {
-        let (wa, wb, wc, wd) = (((8 - xf) * (8 - yf)) as u16, (xf * (8 - yf)) as u16, ((8 - xf) * yf) as u16, (xf * yf) as u16);
+        let (wa, wb, wc, wd) = (
+            ((8 - xf) * (8 - yf)) as u16,
+            (xf * (8 - yf)) as u16,
+            ((8 - xf) * yf) as u16,
+            (xf * yf) as u16,
+        );
         let s = src.as_ptr();
         for y in 0..h {
             let r0 = s.add(y * stride);
             let r1 = s.add((y + 1) * stride);
-            let (a, b, c, d) = (vld1q_u16(r0), vld1q_u16(r0.add(1)), vld1q_u16(r1), vld1q_u16(r1.add(1)));
+            let (a, b, c, d) = (
+                vld1q_u16(r0),
+                vld1q_u16(r0.add(1)),
+                vld1q_u16(r1),
+                vld1q_u16(r1.add(1)),
+            );
             // The or of samples of at most ten bits has at most ten bits.
             let v = if vmaxvq_u16(vorrq_u16(vorrq_u16(a, b), vorrq_u16(c, d))) <= 1023 {
                 // The weighted sum ≤ 64 · 1023: u16.
-                vrshrq_n_u16::<6>(vmlaq_n_u16(vmlaq_n_u16(vmlaq_n_u16(vmulq_n_u16(a, wa), b, wb), c, wc), d, wd))
+                vrshrq_n_u16::<6>(vmlaq_n_u16(
+                    vmlaq_n_u16(vmlaq_n_u16(vmulq_n_u16(a, wa), b, wb), c, wc),
+                    d,
+                    wd,
+                ))
             } else {
                 // Any u16: ≤ 64 · 65535 in u32 lanes.
-                let lo = vmlal_n_u16(vmlal_n_u16(vmlal_n_u16(vmull_n_u16(vget_low_u16(a), wa), vget_low_u16(b), wb), vget_low_u16(c), wc), vget_low_u16(d), wd);
-                let hi = vmlal_high_n_u16(vmlal_high_n_u16(vmlal_high_n_u16(vmull_high_n_u16(a, wa), b, wb), c, wc), d, wd);
+                let lo = vmlal_n_u16(
+                    vmlal_n_u16(
+                        vmlal_n_u16(vmull_n_u16(vget_low_u16(a), wa), vget_low_u16(b), wb),
+                        vget_low_u16(c),
+                        wc,
+                    ),
+                    vget_low_u16(d),
+                    wd,
+                );
+                let hi = vmlal_high_n_u16(
+                    vmlal_high_n_u16(vmlal_high_n_u16(vmull_high_n_u16(a, wa), b, wb), c, wc),
+                    d,
+                    wd,
+                );
                 vcombine_u16(vrshrn_n_u32::<6>(lo), vrshrn_n_u32::<6>(hi))
             };
             vst1q_u16(dst.as_mut_ptr().add(y * PRED_STRIDE), v);
@@ -365,12 +476,20 @@ fn chroma(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, xf: i
 }
 
 fn avg(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h: usize) {
-    assert!(h == 0 || ((h - 1) * stride + w <= dst.len() && h * PRED_STRIDE <= a.len().min(b.len()) && w <= 16));
+    assert!(
+        h == 0
+            || ((h - 1) * stride + w <= dst.len()
+                && h * PRED_STRIDE <= a.len().min(b.len())
+                && w <= 16)
+    );
     unsafe {
         for y in 0..h {
             let mut x = 0;
             while x < w {
-                let v = vrhaddq_u16(vld1q_u16(a.as_ptr().add(y * PRED_STRIDE + x)), vld1q_u16(b.as_ptr().add(y * PRED_STRIDE + x)));
+                let v = vrhaddq_u16(
+                    vld1q_u16(a.as_ptr().add(y * PRED_STRIDE + x)),
+                    vld1q_u16(b.as_ptr().add(y * PRED_STRIDE + x)),
+                );
                 store_n(dst.as_mut_ptr().add(y * stride + x), v, (w - x).min(8));
                 x += 8;
             }
@@ -385,7 +504,17 @@ fn combine_fits(dst: &[u16], stride: usize, src: &[u16], w: usize, h: usize) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_uni(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, max: i32) {
+fn weighted_uni(
+    dst: &mut [u16],
+    stride: usize,
+    src: &[u16],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+) {
     if !weights_in_range(log_wd, [wt, 0], [o, 0], max) || !combine_fits(dst, stride, src, w, h) {
         return (H264Dsp::<u16>::SCALAR.weighted_uni)(dst, stride, src, w, h, log_wd, wt, o, max);
     }
@@ -399,7 +528,13 @@ fn weighted_uni(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize,
             let mut x = 0;
             while x < w {
                 let s = load_s(src.as_ptr().add(y * PRED_STRIDE + x));
-                let v = vminq_u16(vcombine_u16(q(vmull_n_s16(vget_low_s16(s), wt as i16)), q(vmull_high_n_s16(s, wt as i16))), maxv);
+                let v = vminq_u16(
+                    vcombine_u16(
+                        q(vmull_n_s16(vget_low_s16(s), wt as i16)),
+                        q(vmull_high_n_s16(s, wt as i16)),
+                    ),
+                    maxv,
+                );
                 store_n(dst.as_mut_ptr().add(y * stride + x), v, (w - x).min(8));
                 x += 8;
             }
@@ -408,9 +543,27 @@ fn weighted_uni(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32) {
-    if !weights_in_range(log_wd, [w0, w1], [o0, o1], max) || !combine_fits(dst, stride, a, w, h) || !combine_fits(dst, stride, b, w, h) {
-        return (H264Dsp::<u16>::SCALAR.weighted_bi)(dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1, max);
+fn weighted_bi(
+    dst: &mut [u16],
+    stride: usize,
+    a: &[u16],
+    b: &[u16],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+) {
+    if !weights_in_range(log_wd, [w0, w1], [o0, o1], max)
+        || !combine_fits(dst, stride, a, w, h)
+        || !combine_fits(dst, stride, b, w, h)
+    {
+        return (H264Dsp::<u16>::SCALAR.weighted_bi)(
+            dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1, max,
+        );
     }
     unsafe {
         let round = vdupq_n_s32(1 << log_wd);
@@ -423,7 +576,11 @@ fn weighted_bi(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h
             while x < w {
                 let va = load_s(a.as_ptr().add(y * PRED_STRIDE + x));
                 let vb = load_s(b.as_ptr().add(y * PRED_STRIDE + x));
-                let lo = vmlal_n_s16(vmull_n_s16(vget_low_s16(va), w0 as i16), vget_low_s16(vb), w1 as i16);
+                let lo = vmlal_n_s16(
+                    vmull_n_s16(vget_low_s16(va), w0 as i16),
+                    vget_low_s16(vb),
+                    w1 as i16,
+                );
                 let hi = vmlal_high_n_s16(vmull_high_n_s16(va, w0 as i16), vb, w1 as i16);
                 let v = vminq_u16(vcombine_u16(q(lo), q(hi)), maxv);
                 store_n(dst.as_mut_ptr().add(y * stride + x), v, (w - x).min(8));
@@ -448,19 +605,34 @@ unsafe fn diff_lt(a: int16x8_t, b: int16x8_t, t: int16x8_t) -> uint16x8_t {
 
 /// bS < 4 luma filter on eight lines (8.7.2.3).
 #[inline(always)]
-unsafe fn luma_filter_normal(v: &mut Lines8, alpha: i32, beta: i32, tc0v: int16x8_t, maxv: int16x8_t) {
+unsafe fn luma_filter_normal(
+    v: &mut Lines8,
+    alpha: i32,
+    beta: i32,
+    tc0v: int16x8_t,
+    maxv: int16x8_t,
+) {
     unsafe {
         let s = |x: uint16x8_t| vreinterpretq_s16_u16(x);
         let (p2, p1, p0, q0, q1, q2) = (s(v[1]), s(v[2]), s(v[3]), s(v[4]), s(v[5]), s(v[6]));
         let alpha = vdupq_n_s16(alpha as i16);
         let beta = vdupq_n_s16(beta as i16);
         let bs_on = vcgtq_s16(tc0v, vdupq_n_s16(-1));
-        let mask = vandq_u16(vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), vandq_u16(diff_lt(q1, q0, beta), bs_on));
+        let mask = vandq_u16(
+            vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+            vandq_u16(diff_lt(q1, q0, beta), bs_on),
+        );
         let ap = diff_lt(p2, p0, beta);
         let aq = diff_lt(q2, q0, beta);
-        let tc = vsubq_s16(vsubq_s16(tc0v, vreinterpretq_s16_u16(ap)), vreinterpretq_s16_u16(aq));
+        let tc = vsubq_s16(
+            vsubq_s16(tc0v, vreinterpretq_s16_u16(ap)),
+            vreinterpretq_s16_u16(aq),
+        );
         // ((q0 − p0) + ((p1 − q1 + 4) >> 2)) >> 1: the standard's delta, inside i16.
-        let d = vshrq_n_s16::<1>(vaddq_s16(vsubq_s16(q0, p0), vshrq_n_s16::<2>(vaddq_s16(vsubq_s16(p1, q1), vdupq_n_s16(4)))));
+        let d = vshrq_n_s16::<1>(vaddq_s16(
+            vsubq_s16(q0, p0),
+            vshrq_n_s16::<2>(vaddq_s16(vsubq_s16(p1, q1), vdupq_n_s16(4))),
+        ));
         let d = vminq_s16(vmaxq_s16(d, vnegq_s16(tc)), tc);
         let np0 = vaddq_s16(p0, d);
         let nq0 = vsubq_s16(q0, d);
@@ -488,7 +660,10 @@ unsafe fn luma_filter_intra(v: &mut Lines8, alpha: i32, beta: i32) {
         let lt = |a: uint16x8_t, b: uint16x8_t, t: uint16x8_t| vcltq_u16(vabdq_u16(a, b), t);
         let alphav = vdupq_n_u16(alpha as u16);
         let beta = vdupq_n_u16(beta as u16);
-        let mask = vandq_u16(vandq_u16(lt(p0, q0, alphav), lt(p1, p0, beta)), lt(q1, q0, beta));
+        let mask = vandq_u16(
+            vandq_u16(lt(p0, q0, alphav), lt(p1, p0, beta)),
+            lt(q1, q0, beta),
+        );
         let strong = lt(p0, q0, vdupq_n_u16(((alpha >> 2) + 2) as u16));
         let ap = vandq_u16(lt(p2, p0, beta), strong);
         let aq = vandq_u16(lt(q2, q0, beta), strong);
@@ -537,7 +712,9 @@ unsafe fn tc0_luma(tc0: &[i16; 4], half: usize) -> int16x8_t {
 #[inline(always)]
 unsafe fn tc0_chroma(tc0: &[i16; 4]) -> int16x8_t {
     unsafe {
-        let t = [tc0[0], tc0[0], tc0[1], tc0[1], tc0[2], tc0[2], tc0[3], tc0[3]];
+        let t = [
+            tc0[0], tc0[0], tc0[1], tc0[1], tc0[2], tc0[2], tc0[3], tc0[3],
+        ];
         vld1q_s16(t.as_ptr())
     }
 }
@@ -591,7 +768,15 @@ unsafe fn store_transposed_8x8(data: *mut u16, stride: usize, v: &Lines8) {
     }
 }
 
-fn deblock_luma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_luma_v(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -610,7 +795,14 @@ fn deblock_luma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta:
     }
 }
 
-fn deblock_luma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_luma_v_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
         return (H264Dsp::<u16>::SCALAR.deblock_luma_v_intra)(data, off, stride, alpha, beta, max);
     }
@@ -625,7 +817,15 @@ fn deblock_luma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32,
     }
 }
 
-fn deblock_luma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_luma_h(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -648,7 +848,14 @@ fn deblock_luma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta:
     }
 }
 
-fn deblock_luma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_luma_h_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
         return (H264Dsp::<u16>::SCALAR.deblock_luma_h_intra)(data, off, stride, alpha, beta, max);
     }
@@ -656,7 +863,8 @@ fn deblock_luma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32,
     unsafe {
         for half in 0..2 {
             let p = data.as_mut_ptr().add(off + half * 8);
-            let mut v: Lines8 = std::array::from_fn(|k| vld1q_u16(p.offset((k as isize - 4) * stride as isize)));
+            let mut v: Lines8 =
+                std::array::from_fn(|k| vld1q_u16(p.offset((k as isize - 4) * stride as isize)));
             luma_filter_intra(&mut v, alpha, beta);
             for k in 1..7 {
                 vst1q_u16(p.offset((k as isize - 4) * stride as isize), v[k]);
@@ -669,19 +877,39 @@ fn deblock_luma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32,
 type ChromaLines = [uint16x8_t; 4];
 
 #[inline(always)]
-unsafe fn chroma_filter_normal(v: &mut ChromaLines, alpha: i32, beta: i32, tc0v: int16x8_t, maxv: int16x8_t) {
+unsafe fn chroma_filter_normal(
+    v: &mut ChromaLines,
+    alpha: i32,
+    beta: i32,
+    tc0v: int16x8_t,
+    maxv: int16x8_t,
+) {
     unsafe {
         let s = |x: uint16x8_t| vreinterpretq_s16_u16(x);
         let (p1, p0, q0, q1) = (s(v[0]), s(v[1]), s(v[2]), s(v[3]));
         let alpha = vdupq_n_s16(alpha as i16);
         let beta = vdupq_n_s16(beta as i16);
         let bs_on = vcgtq_s16(tc0v, vdupq_n_s16(-1));
-        let mask = vandq_u16(vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), vandq_u16(diff_lt(q1, q0, beta), bs_on));
+        let mask = vandq_u16(
+            vandq_u16(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+            vandq_u16(diff_lt(q1, q0, beta), bs_on),
+        );
         let tc = vaddq_s16(tc0v, vdupq_n_s16(1));
-        let d = vshrq_n_s16::<1>(vaddq_s16(vsubq_s16(q0, p0), vshrq_n_s16::<2>(vaddq_s16(vsubq_s16(p1, q1), vdupq_n_s16(4)))));
+        let d = vshrq_n_s16::<1>(vaddq_s16(
+            vsubq_s16(q0, p0),
+            vshrq_n_s16::<2>(vaddq_s16(vsubq_s16(p1, q1), vdupq_n_s16(4))),
+        ));
         let d = vminq_s16(vmaxq_s16(d, vnegq_s16(tc)), tc);
-        v[1] = vbslq_u16(mask, vreinterpretq_u16_s16(clip(vaddq_s16(p0, d), maxv)), v[1]);
-        v[2] = vbslq_u16(mask, vreinterpretq_u16_s16(clip(vsubq_s16(q0, d), maxv)), v[2]);
+        v[1] = vbslq_u16(
+            mask,
+            vreinterpretq_u16_s16(clip(vaddq_s16(p0, d), maxv)),
+            v[1],
+        );
+        v[2] = vbslq_u16(
+            mask,
+            vreinterpretq_u16_s16(clip(vsubq_s16(q0, d), maxv)),
+            v[2],
+        );
     }
 }
 
@@ -692,10 +920,19 @@ unsafe fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
         let lt = |a: uint16x8_t, b: uint16x8_t, t: uint16x8_t| vcltq_u16(vabdq_u16(a, b), t);
         let alpha = vdupq_n_u16(alpha as u16);
         let beta = vdupq_n_u16(beta as u16);
-        let mask = vandq_u16(vandq_u16(lt(p0, q0, alpha), lt(p1, p0, beta)), lt(q1, q0, beta));
+        let mask = vandq_u16(
+            vandq_u16(lt(p0, q0, alpha), lt(p1, p0, beta)),
+            lt(q1, q0, beta),
+        );
         let two = vdupq_n_u16(2);
-        let np0 = vshrq_n_u16::<2>(vaddq_u16(vaddq_u16(vshlq_n_u16::<1>(p1), p0), vaddq_u16(q1, two)));
-        let nq0 = vshrq_n_u16::<2>(vaddq_u16(vaddq_u16(vshlq_n_u16::<1>(q1), q0), vaddq_u16(p1, two)));
+        let np0 = vshrq_n_u16::<2>(vaddq_u16(
+            vaddq_u16(vshlq_n_u16::<1>(p1), p0),
+            vaddq_u16(q1, two),
+        ));
+        let nq0 = vshrq_n_u16::<2>(vaddq_u16(
+            vaddq_u16(vshlq_n_u16::<1>(q1), q0),
+            vaddq_u16(p1, two),
+        ));
         v[1] = vbslq_u16(mask, np0, p0);
         v[2] = vbslq_u16(mask, nq0, q0);
     }
@@ -708,7 +945,11 @@ unsafe fn load_transposed_8x4(data: *const u16, stride: usize) -> ChromaLines {
     unsafe {
         let mut rows = [0u16; 32];
         for i in 0..8 {
-            std::ptr::copy_nonoverlapping(data.add(i * stride).sub(2), rows.as_mut_ptr().add(4 * i), 4);
+            std::ptr::copy_nonoverlapping(
+                data.add(i * stride).sub(2),
+                rows.as_mut_ptr().add(4 * i),
+                4,
+            );
         }
         let c = vld4q_u16(rows.as_ptr());
         [c.0, c.1, c.2, c.3]
@@ -731,7 +972,15 @@ unsafe fn store_transposed_8x4(data: *mut u16, stride: usize, v: &ChromaLines) {
     }
 }
 
-fn deblock_chroma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_chroma_v(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -742,14 +991,29 @@ fn deblock_chroma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, bet
     unsafe {
         let p = data.as_mut_ptr().add(off);
         let mut v = load_transposed_8x4(p, stride);
-        chroma_filter_normal(&mut v, alpha, beta, tc0_chroma(tc0), vdupq_n_s16(max as i16));
+        chroma_filter_normal(
+            &mut v,
+            alpha,
+            beta,
+            tc0_chroma(tc0),
+            vdupq_n_s16(max as i16),
+        );
         store_transposed_8x4(p, stride, &v);
     }
 }
 
-fn deblock_chroma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_chroma_v_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
-        return (H264Dsp::<u16>::SCALAR.deblock_chroma_v_intra)(data, off, stride, alpha, beta, max);
+        return (H264Dsp::<u16>::SCALAR.deblock_chroma_v_intra)(
+            data, off, stride, alpha, beta, max,
+        );
     }
     assert!(off >= 2 && off + 7 * stride + 2 <= data.len());
     unsafe {
@@ -760,7 +1024,15 @@ fn deblock_chroma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i3
     }
 }
 
-fn deblock_chroma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_chroma_h(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -770,21 +1042,46 @@ fn deblock_chroma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, bet
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
-        let mut v: ChromaLines = [vld1q_u16(p.sub(2 * stride)), vld1q_u16(p.sub(stride)), vld1q_u16(p), vld1q_u16(p.add(stride))];
-        chroma_filter_normal(&mut v, alpha, beta, tc0_chroma(tc0), vdupq_n_s16(max as i16));
+        let mut v: ChromaLines = [
+            vld1q_u16(p.sub(2 * stride)),
+            vld1q_u16(p.sub(stride)),
+            vld1q_u16(p),
+            vld1q_u16(p.add(stride)),
+        ];
+        chroma_filter_normal(
+            &mut v,
+            alpha,
+            beta,
+            tc0_chroma(tc0),
+            vdupq_n_s16(max as i16),
+        );
         vst1q_u16(p.sub(stride), v[1]);
         vst1q_u16(p, v[2]);
     }
 }
 
-fn deblock_chroma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_chroma_h_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
-        return (H264Dsp::<u16>::SCALAR.deblock_chroma_h_intra)(data, off, stride, alpha, beta, max);
+        return (H264Dsp::<u16>::SCALAR.deblock_chroma_h_intra)(
+            data, off, stride, alpha, beta, max,
+        );
     }
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
-        let mut v: ChromaLines = [vld1q_u16(p.sub(2 * stride)), vld1q_u16(p.sub(stride)), vld1q_u16(p), vld1q_u16(p.add(stride))];
+        let mut v: ChromaLines = [
+            vld1q_u16(p.sub(2 * stride)),
+            vld1q_u16(p.sub(stride)),
+            vld1q_u16(p),
+            vld1q_u16(p.add(stride)),
+        ];
         chroma_filter_intra(&mut v, alpha, beta);
         vst1q_u16(p.sub(stride), v[1]);
         vst1q_u16(p, v[2]);
@@ -801,7 +1098,10 @@ fn deblock_chroma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i3
 unsafe fn add4(dst: *mut u16, v: int32x4_t, maxv: uint16x4_t) {
     unsafe {
         let p = vreinterpretq_s32_u32(vmovl_u16(vld1_u16(dst)));
-        vst1_u16(dst, vmin_u16(vqmovun_s32(vaddq_s32(p, vrshrq_n_s32::<6>(v))), maxv));
+        vst1_u16(
+            dst,
+            vmin_u16(vqmovun_s32(vaddq_s32(p, vrshrq_n_s32::<6>(v))), maxv),
+        );
     }
 }
 
@@ -810,8 +1110,14 @@ unsafe fn add4(dst: *mut u16, v: int32x4_t, maxv: uint16x4_t) {
 unsafe fn add8(dst: *mut u16, lo: int32x4_t, hi: int32x4_t, maxv: uint16x8_t) {
     unsafe {
         let p = vld1q_u16(dst);
-        let l = vqmovun_s32(vaddq_s32(vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(p))), vrshrq_n_s32::<6>(lo)));
-        let h = vqmovun_s32(vaddq_s32(vreinterpretq_s32_u32(vmovl_high_u16(p)), vrshrq_n_s32::<6>(hi)));
+        let l = vqmovun_s32(vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(p))),
+            vrshrq_n_s32::<6>(lo),
+        ));
+        let h = vqmovun_s32(vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_high_u16(p)),
+            vrshrq_n_s32::<6>(hi),
+        ));
         vst1q_u16(dst, vminq_u16(vcombine_u16(l, h), maxv));
     }
 }
@@ -840,7 +1146,12 @@ unsafe fn idct4_rows(dst: *mut u16, stride: usize, rows: [int32x4_t; 4], max: i3
         let e1 = vsubq_s32(c0, c2);
         let e2 = vsubq_s32(vshrq_n_s32::<1>(c1), c3);
         let e3 = vaddq_s32(c1, vshrq_n_s32::<1>(c3));
-        let [r0, r1, r2, r3] = transpose4([vaddq_s32(e0, e3), vaddq_s32(e1, e2), vsubq_s32(e1, e2), vsubq_s32(e0, e3)]);
+        let [r0, r1, r2, r3] = transpose4([
+            vaddq_s32(e0, e3),
+            vaddq_s32(e1, e2),
+            vsubq_s32(e1, e2),
+            vsubq_s32(e0, e3),
+        ]);
         let g0 = vaddq_s32(r0, r2);
         let g1 = vsubq_s32(r0, r2);
         let g2 = vsubq_s32(vshrq_n_s32::<1>(r1), r3);
@@ -877,7 +1188,16 @@ unsafe fn idct8_pass(d: &[int32x4_t; 8]) -> [int32x4_t; 8] {
         let b7 = sub(a7, sh2(a1));
         let b3 = add(a3, sh2(a5));
         let b5 = sub(sh2(a3), a5);
-        [add(b0, b7), add(b2, b5), add(b4, b3), add(b6, b1), sub(b6, b1), sub(b4, b3), sub(b2, b5), sub(b0, b7)]
+        [
+            add(b0, b7),
+            add(b2, b5),
+            add(b4, b3),
+            add(b6, b1),
+            sub(b6, b1),
+            sub(b4, b3),
+            sub(b2, b5),
+            sub(b0, b7),
+        ]
     }
 }
 
@@ -956,10 +1276,16 @@ unsafe fn dc_add_impl(dst: *mut u16, stride: usize, dc: i32, n: usize, max: i32)
             let p = dst.add(i * stride);
             if n == 4 {
                 let s = vreinterpretq_s32_u32(vmovl_u16(vld1_u16(p)));
-                vst1_u16(p, vmin_u16(vqmovun_s32(vaddq_s32(s, v)), vdup_n_u16(max as u16)));
+                vst1_u16(
+                    p,
+                    vmin_u16(vqmovun_s32(vaddq_s32(s, v)), vdup_n_u16(max as u16)),
+                );
             } else {
                 let s = vld1q_u16(p);
-                let l = vqmovun_s32(vaddq_s32(vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(s))), v));
+                let l = vqmovun_s32(vaddq_s32(
+                    vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(s))),
+                    v,
+                ));
                 let h = vqmovun_s32(vaddq_s32(vreinterpretq_s32_u32(vmovl_high_u16(s)), v));
                 vst1q_u16(p, vminq_u16(vcombine_u16(l, h), vdupq_n_u16(max as u16)));
             }
@@ -994,8 +1320,16 @@ fn residual4(dst: &mut [u16], stride: usize, coefs: &[i32; 16], dc: i32, max: i3
             c[0] = dc;
         }
         let p = c.as_ptr();
-        let rows = [vld1q_s32(p), vld1q_s32(p.add(4)), vld1q_s32(p.add(8)), vld1q_s32(p.add(12))];
-        let ac = vorrq_s32(vorrq_s32(vsetq_lane_s32::<0>(0, rows[0]), rows[1]), vorrq_s32(rows[2], rows[3]));
+        let rows = [
+            vld1q_s32(p),
+            vld1q_s32(p.add(4)),
+            vld1q_s32(p.add(8)),
+            vld1q_s32(p.add(12)),
+        ];
+        let ac = vorrq_s32(
+            vorrq_s32(vsetq_lane_s32::<0>(0, rows[0]), rows[1]),
+            vorrq_s32(rows[2], rows[3]),
+        );
         if vmaxvq_u32(vreinterpretq_u32_s32(ac)) == 0 {
             if c[0] != 0 {
                 dc_add_impl(dst.as_mut_ptr(), stride, c[0], 4, max);
@@ -1013,7 +1347,8 @@ fn residual8(dst: &mut [u16], stride: usize, coefs: &[i32; 64], max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe {
         let p = coefs.as_ptr();
-        let rows: [[int32x4_t; 2]; 8] = std::array::from_fn(|i| [vld1q_s32(p.add(8 * i)), vld1q_s32(p.add(8 * i + 4))]);
+        let rows: [[int32x4_t; 2]; 8] =
+            std::array::from_fn(|i| [vld1q_s32(p.add(8 * i)), vld1q_s32(p.add(8 * i + 4))]);
         let mut ac = vorrq_s32(vsetq_lane_s32::<0>(0, rows[0][0]), rows[0][1]);
         for r in &rows[1..] {
             ac = vorrq_s32(ac, vorrq_s32(r[0], r[1]));
@@ -1071,6 +1406,9 @@ mod tests {
     #[test]
     fn neon_u16_new_installs_the_tier() {
         let d = H264Dsp::<u16>::new(crate::dsp::Cpu::detect());
-        assert!(d.qpel[10] as usize != H264Dsp::<u16>::SCALAR.qpel[10] as usize, "u16 qpel still scalar");
+        assert!(
+            d.qpel[10] as usize != H264Dsp::<u16>::SCALAR.qpel[10] as usize,
+            "u16 qpel still scalar"
+        );
     }
 }

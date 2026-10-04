@@ -18,10 +18,13 @@ use crate::dsp::hevc::HevcDsp;
 
 /// `intraPredAngle` for modes 2..=34 (Table 8-4), indexed by `mode - 2`.
 const INTRA_PRED_ANGLE: [i32; 33] = [
-    32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32,
+    32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13, -9,
+    -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32,
 ];
 /// `invAngle` for modes 11..=25 (Table 8-5), indexed by `mode - 11`.
-const INV_ANGLE: [i32; 15] = [-4096, -1638, -910, -630, -482, -390, -315, -256, -315, -390, -482, -630, -910, -1638, -4096];
+const INV_ANGLE: [i32; 15] = [
+    -4096, -1638, -910, -630, -482, -390, -315, -256, -315, -390, -482, -630, -910, -1638, -4096,
+];
 
 /// The angular predictor's reference array: `ref[k]` for `k` in
 /// `-n..=2n` at index `n + k`, plus room past `3n + 1` for a SIMD kernel's
@@ -72,7 +75,11 @@ impl Default for IntraScratch {
             filtered: None,
             ref_buf: [0; REF_LEN],
             ref_key: None,
-            avail: RefAvail { corner: false, left: [false; 64], top: [false; 64] },
+            avail: RefAvail {
+                corner: false,
+                left: [false; 64],
+                top: [false; 64],
+            },
         }
     }
 }
@@ -128,7 +135,20 @@ pub fn predict<S: Sample>(
     strong: bool,
 ) {
     prepare(plane, sc, x0, y0, n, bit_depth);
-    predict_prepared(dsp, plane, sc, x0, y0, n, mode, c_idx, filter, boundary_filter, bit_depth, strong);
+    predict_prepared(
+        dsp,
+        plane,
+        sc,
+        x0,
+        y0,
+        n,
+        mode,
+        c_idx,
+        filter,
+        boundary_filter,
+        bit_depth,
+        strong,
+    );
 }
 
 /// Gather the reference samples of the `n x n` block at `(x0, y0)` into
@@ -136,8 +156,23 @@ pub fn predict<S: Sample>(
 /// says. Any number of [`predict_prepared`] calls for this block may
 /// follow: a prediction writes only inside the block, and its references
 /// are all outside it.
-pub fn prepare<S: Sample>(plane: &Plane16<S>, sc: &mut IntraScratch, x0: usize, y0: usize, n: usize, bit_depth: u32) {
-    let IntraScratch { left, top, corner, filtered, avail, ref_key, .. } = sc;
+pub fn prepare<S: Sample>(
+    plane: &Plane16<S>,
+    sc: &mut IntraScratch,
+    x0: usize,
+    y0: usize,
+    n: usize,
+    bit_depth: u32,
+) {
+    let IntraScratch {
+        left,
+        top,
+        corner,
+        filtered,
+        avail,
+        ref_key,
+        ..
+    } = sc;
     *filtered = None;
     *ref_key = None;
     let stride = plane.stride;
@@ -146,13 +181,17 @@ pub fn prepare<S: Sample>(plane: &Plane16<S>, sc: &mut IntraScratch, x0: usize, 
     let d = &plane.data;
     // Gather p[-1][-1], p[-1][0..2n] and p[0..2n][-1]. The common case —
     // every sample available — is two straight copies.
-    let all = avail.corner && avail.left[..n2].iter().all(|&a| a) && avail.top[..n2].iter().all(|&a| a);
+    let all =
+        avail.corner && avail.left[..n2].iter().all(|&a| a) && avail.top[..n2].iter().all(|&a| a);
     if all {
         *corner = d[base - stride - 1].to_i32() as u16;
         for (y, l) in left[..n2].iter_mut().enumerate() {
             *l = d[base + y * stride - 1].to_i32() as u16;
         }
-        for (t, s) in top[..n2].iter_mut().zip(&d[base - stride..base - stride + n2]) {
+        for (t, s) in top[..n2]
+            .iter_mut()
+            .zip(&d[base - stride..base - stride + n2])
+        {
             *t = s.to_i32() as u16;
         }
         return;
@@ -220,9 +259,22 @@ pub fn prepare<S: Sample>(plane: &Plane16<S>, sc: &mut IntraScratch, x0: usize, 
 /// `fl` / `ft` / `fc`: the bilinear strong filter for a flat 32x32 luma
 /// block under the SPS flag, the [1, 2, 1] filter otherwise.
 fn smooth(sc: &mut IntraScratch, n: usize, c_idx: usize, bit_depth: u32, strong: bool) {
-    let IntraScratch { left, top, corner, fl, ft, fc, filtered, .. } = sc;
+    let IntraScratch {
+        left,
+        top,
+        corner,
+        fl,
+        ft,
+        fc,
+        filtered,
+        ..
+    } = sc;
     let n2 = 2 * n;
-    let (c, l, t) = (*corner as i32, |i: usize| left[i] as i32, |i: usize| top[i] as i32);
+    let (c, l, t) = (
+        *corner as i32,
+        |i: usize| left[i] as i32,
+        |i: usize| top[i] as i32,
+    );
     let bi = strong
         && c_idx == 0
         && n == 32
@@ -286,8 +338,23 @@ pub fn predict_prepared<S: Sample>(
     }
     let stride = plane.stride;
     let base = plane.offset(x0 as isize, y0 as isize);
-    let IntraScratch { left, top, corner, fl, ft, fc, ref_buf, ref_key, filtered, .. } = sc;
-    let (left, top, corner) = if smoothed { (&*fl, &*ft, *fc) } else { (&*left, &*top, *corner) };
+    let IntraScratch {
+        left,
+        top,
+        corner,
+        fl,
+        ft,
+        fc,
+        ref_buf,
+        ref_key,
+        filtered,
+        ..
+    } = sc;
+    let (left, top, corner) = if smoothed {
+        (&*fl, &*ft, *fc)
+    } else {
+        (&*left, &*top, *corner)
+    };
     let dst = &mut plane.data[base..];
     match mode {
         0 => (dsp.intra_planar)(dst, stride, left, top, n),
@@ -301,7 +368,12 @@ pub fn predict_prepared<S: Sample>(
             // besides the copying, a fresh build right before the kernel
             // reads it costs the kernel's wide loads a failed store
             // forwarding each, which was most of a 4x4 prediction.
-            let key = RefKey { n, smoothed: if smoothed { *filtered } else { None }, main_is_top: mode >= 18, negative_mode: (angle < 0).then_some(mode) };
+            let key = RefKey {
+                n,
+                smoothed: if smoothed { *filtered } else { None },
+                main_is_top: mode >= 18,
+                negative_mode: (angle < 0).then_some(mode),
+            };
             let (main, side) = if mode >= 18 { (top, left) } else { (left, top) };
             if *ref_key != Some(key) {
                 *ref_key = Some(key);
@@ -314,7 +386,8 @@ pub fn predict_prepared<S: Sample>(
                         for x in last..=-1 {
                             // ref[x] = p[-1][-1 + ((x*invAngle+128)>>8)] (or its transpose)
                             let idx = -1 + ((x * inv + 128) >> 8);
-                            ref_buf[(x + n as i32) as usize] = if idx < 0 { corner } else { side[idx as usize] };
+                            ref_buf[(x + n as i32) as usize] =
+                                if idx < 0 { corner } else { side[idx as usize] };
                         }
                     }
                 } else {
@@ -488,7 +561,12 @@ mod tests {
                     let (ly, ln, tn) = (left[y], left[n], top[n]);
                     let ry = n as i32 - 1 - y as i32;
                     for x in 0..n {
-                        let v = ((n as i32 - 1 - x as i32) * ly + (x as i32 + 1) * tn + ry * top[x] + (y as i32 + 1) * ln + n as i32) >> (log2n + 1);
+                        let v = ((n as i32 - 1 - x as i32) * ly
+                            + (x as i32 + 1) * tn
+                            + ry * top[x]
+                            + (y as i32 + 1) * ln
+                            + n as i32)
+                            >> (log2n + 1);
                         plane.data[base + y * stride + x] = S::from_i32(v);
                     }
                 }
@@ -515,7 +593,11 @@ mod tests {
             _ => {
                 let angle = INTRA_PRED_ANGLE[(mode - 2) as usize];
                 let off = n as i32;
-                let (main, side): (&[i32; 64], &[i32; 64]) = if mode >= 18 { (&top, &left) } else { (&left, &top) };
+                let (main, side): (&[i32; 64], &[i32; 64]) = if mode >= 18 {
+                    (&top, &left)
+                } else {
+                    (&left, &top)
+                };
                 ref_buf[off as usize] = corner;
                 for x in 1..=n {
                     ref_buf[off as usize + x] = main[x - 1];
@@ -540,7 +622,11 @@ mod tests {
                     let i_fact = ((y as i32 + 1) * angle) & 31;
                     for x in 0..n {
                         let start = (x as i32 + i_idx + 1 + off) as usize;
-                        let v = if i_fact != 0 { ((32 - i_fact) * ref_buf[start] + i_fact * ref_buf[start + 1] + 16) >> 5 } else { ref_buf[start] };
+                        let v = if i_fact != 0 {
+                            ((32 - i_fact) * ref_buf[start] + i_fact * ref_buf[start + 1] + 16) >> 5
+                        } else {
+                            ref_buf[start]
+                        };
                         let (px, py) = if mode >= 18 { (x, y) } else { (y, x) };
                         plane.data[base + py * stride + px] = S::from_i32(v);
                     }
@@ -562,7 +648,9 @@ mod tests {
     }
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -575,8 +663,14 @@ mod tests {
         {
             let b = Cpu::SCALAR;
             let sse2 = Cpu { sse2: true, ..b };
-            let ssse3 = Cpu { ssse3: true, ..sse2 };
-            let sse41 = Cpu { sse41: true, ..ssse3 };
+            let ssse3 = Cpu {
+                ssse3: true,
+                ..sse2
+            };
+            let sse41 = Cpu {
+                sse41: true,
+                ..ssse3
+            };
             let avx = Cpu { avx: true, ..sse41 };
             let avx2 = Cpu { avx2: true, ..avx };
             let top = Cpu::detect();
@@ -586,7 +680,14 @@ mod tests {
                 ("sse4.1", sse41, top.sse41),
                 ("avx", avx, top.avx),
                 ("avx2", avx2, top.avx2),
-                ("avx512", Cpu { avx512: true, ..avx2 }, top.avx512),
+                (
+                    "avx512",
+                    Cpu {
+                        avx512: true,
+                        ..avx2
+                    },
+                    top.avx512,
+                ),
             ] {
                 if have {
                     v.push((name, HevcDsp::<S>::new(cpu)));
@@ -604,7 +705,11 @@ mod tests {
     /// above-right half missing), plus a random per-unit pattern.
     fn avail_pattern(seed: &mut u64, n: usize, kind: u32) -> RefAvail {
         let n2 = 2 * n;
-        let mut a = RefAvail { corner: true, left: [false; 64], top: [false; 64] };
+        let mut a = RefAvail {
+            corner: true,
+            left: [false; 64],
+            top: [false; 64],
+        };
         let all = |a: &mut RefAvail| {
             a.left[..n2].fill(true);
             a.top[..n2].fill(true);
@@ -659,24 +764,56 @@ mod tests {
                         // ramps) passes the strong filter's flatness test;
                         // random content exercises the clips.
                         let w = 4 * n + 8;
-                        let mut plane = Plane16::<S> { data: vec![S::default(); (w + 16) * (w + 16)], width: w, height: w, pad: 8, stride: w + 16 };
+                        let mut plane = Plane16::<S> {
+                            data: vec![S::default(); (w + 16) * (w + 16)],
+                            width: w,
+                            height: w,
+                            pad: 8,
+                            stride: w + 16,
+                        };
                         for y in 0..w {
                             for x in 0..w {
-                                let v = if flat { ((x + y) as u32 * 3 / 2 + max / 4).min(max) } else { lcg(&mut seed) % (max + 1) };
+                                let v = if flat {
+                                    ((x + y) as u32 * 3 / 2 + max / 4).min(max)
+                                } else {
+                                    lcg(&mut seed) % (max + 1)
+                                };
                                 let o = plane.offset(x as isize, y as isize);
                                 plane.data[o] = S::from_i32(v as i32);
                             }
                         }
                         let avail = avail_pattern(&mut seed, n, kind);
                         for mode in 0..35u32 {
-                            for &(c_idx, filter, boundary, strong) in &[(0usize, true, true, true), (0, true, true, false), (1, false, false, false), (1, true, false, true), (0, false, false, false)] {
+                            for &(c_idx, filter, boundary, strong) in &[
+                                (0usize, true, true, true),
+                                (0, true, true, false),
+                                (1, false, false, false),
+                                (1, true, false, true),
+                                (0, false, false, false),
+                            ] {
                                 let mut want = plane.clone();
-                                predict_reference(&mut want, &avail, n, n, n, mode, c_idx, filter, boundary, bd, strong);
+                                predict_reference(
+                                    &mut want, &avail, n, n, n, mode, c_idx, filter, boundary, bd,
+                                    strong,
+                                );
                                 for (name, d) in &tables {
                                     let mut got = plane.clone();
-                                    let mut sc = IntraScratch { avail: RefAvail { corner: avail.corner, left: avail.left, top: avail.top }, ..Default::default() };
-                                    predict(d, &mut got, &mut sc, n, n, n, mode, c_idx, filter, boundary, bd, strong);
-                                    assert!(got.data == want.data, "{name}: {bd} bits, {n}x{n}, mode {mode}, avail {kind}, flat {flat}, c_idx {c_idx}, filter {filter}, boundary {boundary}, strong {strong}");
+                                    let mut sc = IntraScratch {
+                                        avail: RefAvail {
+                                            corner: avail.corner,
+                                            left: avail.left,
+                                            top: avail.top,
+                                        },
+                                        ..Default::default()
+                                    };
+                                    predict(
+                                        d, &mut got, &mut sc, n, n, n, mode, c_idx, filter,
+                                        boundary, bd, strong,
+                                    );
+                                    assert!(
+                                        got.data == want.data,
+                                        "{name}: {bd} bits, {n}x{n}, mode {mode}, avail {kind}, flat {flat}, c_idx {c_idx}, filter {filter}, boundary {boundary}, strong {strong}"
+                                    );
                                     n_cmp += 1;
                                 }
                             }
@@ -685,14 +822,35 @@ mod tests {
                         // search. Each mode against a fresh reference.
                         for (name, d) in &tables {
                             let mut got = plane.clone();
-                            let mut sc = IntraScratch { avail: RefAvail { corner: avail.corner, left: avail.left, top: avail.top }, ..Default::default() };
+                            let mut sc = IntraScratch {
+                                avail: RefAvail {
+                                    corner: avail.corner,
+                                    left: avail.left,
+                                    top: avail.top,
+                                },
+                                ..Default::default()
+                            };
                             prepare(&got, &mut sc, n, n, n, bd);
                             for mode in (0..35u32).rev() {
-                                predict_prepared(d, &mut got, &mut sc, n, n, n, mode, 0, true, true, bd, true);
+                                predict_prepared(
+                                    d, &mut got, &mut sc, n, n, n, mode, 0, true, true, bd, true,
+                                );
                                 let mut want = plane.clone();
-                                predict_reference(&mut want, &avail, n, n, n, mode, 0, true, true, bd, true);
-                                let rows = |p: &Plane16<S>| (0..n).flat_map(|y| (0..n).map(move |x| (x, y))).map(|(x, y)| p.data[p.offset((n + x) as isize, (n + y) as isize)]).collect::<Vec<_>>();
-                                assert!(rows(&got) == rows(&want), "{name} prepared: {bd} bits, {n}x{n}, mode {mode}, avail {kind}, flat {flat}");
+                                predict_reference(
+                                    &mut want, &avail, n, n, n, mode, 0, true, true, bd, true,
+                                );
+                                let rows = |p: &Plane16<S>| {
+                                    (0..n)
+                                        .flat_map(|y| (0..n).map(move |x| (x, y)))
+                                        .map(|(x, y)| {
+                                            p.data[p.offset((n + x) as isize, (n + y) as isize)]
+                                        })
+                                        .collect::<Vec<_>>()
+                                };
+                                assert!(
+                                    rows(&got) == rows(&want),
+                                    "{name} prepared: {bd} bits, {n}x{n}, mode {mode}, avail {kind}, flat {flat}"
+                                );
                                 n_cmp += 1;
                             }
                         }

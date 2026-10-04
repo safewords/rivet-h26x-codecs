@@ -139,7 +139,12 @@ fn transpose8x8(q: &[[v128; 8]; 2]) -> [[v128; 8]; 2] {
     let mut out = [[i32x4_splat(0); 8]; 2];
     for rh in 0..2 {
         for cb in 0..2 {
-            let t = transpose4([q[rh][4 * cb], q[rh][4 * cb + 1], q[rh][4 * cb + 2], q[rh][4 * cb + 3]]);
+            let t = transpose4([
+                q[rh][4 * cb],
+                q[rh][4 * cb + 1],
+                q[rh][4 * cb + 2],
+                q[rh][4 * cb + 3],
+            ]);
             out[cb][4 * rh..4 * rh + 4].copy_from_slice(&t);
         }
     }
@@ -152,7 +157,8 @@ fn fdct8(residual: &[i16; 64], coeffs: &mut [i32; 64]) {
         // `c[half][k]`: column `k` of rows `4 * half..`, sign-extended.
         let mut c = [[i32x4_splat(0); 8]; 2];
         for (half, ch) in c.iter_mut().enumerate() {
-            let rows: [v128; 4] = std::array::from_fn(|i| v128_load(p.add(8 * (4 * half + i)) as *const v128));
+            let rows: [v128; 4] =
+                std::array::from_fn(|i| v128_load(p.add(8 * (4 * half + i)) as *const v128));
             let lo = transpose4(std::array::from_fn(|i| i32x4_extend_low_i16x8(rows[i])));
             let hi = transpose4(std::array::from_fn(|i| i32x4_extend_high_i16x8(rows[i])));
             ch[..4].copy_from_slice(&lo);
@@ -190,7 +196,14 @@ fn narrow(a: v128, b: v128) -> v128 {
 
 /// `None` when a multiplier is negative (not a u32 one): the caller redoes
 /// the block in the reference.
-unsafe fn quant_impl(coeffs: *const i32, levels: *mut i16, mf: *const i32, n: usize, qbits: u32, offset: i32) -> Option<u32> {
+unsafe fn quant_impl(
+    coeffs: *const i32,
+    levels: *mut i16,
+    mf: *const i32,
+    n: usize,
+    qbits: u32,
+    offset: i32,
+) -> Option<u32> {
     unsafe {
         let off = i64x2_splat(offset as i64);
         let zero = i32x4_splat(0);
@@ -205,28 +218,63 @@ unsafe fn quant_impl(coeffs: *const i32, levels: *mut i16, mf: *const i32, n: us
             let v0 = quant_lanes(ld(0), m0, off, qbits);
             let v1 = quant_lanes(ld(4), m1, off, qbits);
             v128_store(levels.add(i) as *mut v128, narrow(v0, v1));
-            zeros += (i32x4_bitmask(i32x4_eq(v0, zero)) | (i32x4_bitmask(i32x4_eq(v1, zero)) << 4)).count_ones();
+            zeros += (i32x4_bitmask(i32x4_eq(v0, zero)) | (i32x4_bitmask(i32x4_eq(v1, zero)) << 4))
+                .count_ones();
             i += 8;
         }
-        if i32x4_bitmask(signs) != 0 { None } else { Some(n as u32 - zeros) }
+        if i32x4_bitmask(signs) != 0 {
+            None
+        } else {
+            Some(n as u32 - zeros)
+        }
     }
 }
 
-fn quant4(coeffs: &[i32; 16], levels: &mut [i16; 16], mf: &[i32; 16], qbits: u32, offset: i32) -> u32 {
+fn quant4(
+    coeffs: &[i32; 16],
+    levels: &mut [i16; 16],
+    mf: &[i32; 16],
+    qbits: u32,
+    offset: i32,
+) -> u32 {
     if offset < 0 || qbits > 62 {
         return quant4_scalar(coeffs, levels, mf, qbits, offset);
     }
-    match unsafe { quant_impl(coeffs.as_ptr(), levels.as_mut_ptr(), mf.as_ptr(), 16, qbits, offset) } {
+    match unsafe {
+        quant_impl(
+            coeffs.as_ptr(),
+            levels.as_mut_ptr(),
+            mf.as_ptr(),
+            16,
+            qbits,
+            offset,
+        )
+    } {
         Some(nz) => nz,
         None => quant4_scalar(coeffs, levels, mf, qbits, offset),
     }
 }
 
-fn quant8(coeffs: &[i32; 64], levels: &mut [i16; 64], mf: &[i32; 64], qbits: u32, offset: i32) -> u32 {
+fn quant8(
+    coeffs: &[i32; 64],
+    levels: &mut [i16; 64],
+    mf: &[i32; 64],
+    qbits: u32,
+    offset: i32,
+) -> u32 {
     if offset < 0 || qbits > 62 {
         return quant8_scalar(coeffs, levels, mf, qbits, offset);
     }
-    match unsafe { quant_impl(coeffs.as_ptr(), levels.as_mut_ptr(), mf.as_ptr(), 64, qbits, offset) } {
+    match unsafe {
+        quant_impl(
+            coeffs.as_ptr(),
+            levels.as_mut_ptr(),
+            mf.as_ptr(),
+            64,
+            qbits,
+            offset,
+        )
+    } {
         Some(nz) => nz,
         None => quant8_scalar(coeffs, levels, mf, qbits, offset),
     }

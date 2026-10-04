@@ -90,11 +90,17 @@ unsafe fn sad_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize,
             let rb = b.add(y * sb);
             let mut x = 0;
             while x + 8 <= w {
-                acc = i32x4_add(acc, u32x4_extadd_pairwise_u16x8(absdiff(load8(ra.add(x)), load8(rb.add(x)))));
+                acc = i32x4_add(
+                    acc,
+                    u32x4_extadd_pairwise_u16x8(absdiff(load8(ra.add(x)), load8(rb.add(x)))),
+                );
                 x += 8;
             }
             if x + 4 <= w {
-                acc = i32x4_add(acc, u32x4_extadd_pairwise_u16x8(absdiff(load4(ra.add(x)), load4(rb.add(x)))));
+                acc = i32x4_add(
+                    acc,
+                    u32x4_extadd_pairwise_u16x8(absdiff(load4(ra.add(x)), load4(rb.add(x)))),
+                );
             }
         }
         // Wrapping, as the scalar sum's u32 does.
@@ -106,7 +112,10 @@ fn sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usiz
     if w % 4 != 0 || h == 0 {
         return sad_scalar(a, a_stride, b, b_stride, w, h);
     }
-    assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+    assert!(
+        a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+        "block out of range"
+    );
     unsafe { sad_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
 }
 
@@ -120,8 +129,14 @@ unsafe fn ssd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize,
         let mut sq = |d: v128| {
             let lo = u32x4_extmul_low_u16x8(d, d);
             let hi = u32x4_extmul_high_u16x8(d, d);
-            acc = i64x2_add(acc, i64x2_add(u64x2_extend_low_u32x4(lo), u64x2_extend_high_u32x4(lo)));
-            acc = i64x2_add(acc, i64x2_add(u64x2_extend_low_u32x4(hi), u64x2_extend_high_u32x4(hi)));
+            acc = i64x2_add(
+                acc,
+                i64x2_add(u64x2_extend_low_u32x4(lo), u64x2_extend_high_u32x4(lo)),
+            );
+            acc = i64x2_add(
+                acc,
+                i64x2_add(u64x2_extend_low_u32x4(hi), u64x2_extend_high_u32x4(hi)),
+            );
         };
         for y in 0..h {
             let ra = a.add(y * sa);
@@ -143,7 +158,10 @@ fn ssd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usiz
     if w % 4 != 0 || h == 0 {
         return ssd_scalar(a, a_stride, b, b_stride, w, h);
     }
-    assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+    assert!(
+        a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+        "block out of range"
+    );
     unsafe { ssd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
 }
 
@@ -157,7 +175,12 @@ fn butterfly16(r0: v128, r1: v128, r2: v128, r3: v128) -> [v128; 4] {
     let s1 = i16x8_add(r1, r2);
     let s2 = i16x8_sub(r1, r2);
     let s3 = i16x8_sub(r0, r3);
-    [i16x8_add(s0, s1), i16x8_add(s3, s2), i16x8_sub(s0, s1), i16x8_sub(s3, s2)]
+    [
+        i16x8_add(s0, s1),
+        i16x8_add(s3, s2),
+        i16x8_sub(s0, s1),
+        i16x8_sub(s3, s2),
+    ]
 }
 
 #[inline]
@@ -166,7 +189,12 @@ fn butterfly32(r0: v128, r1: v128, r2: v128, r3: v128) -> [v128; 4] {
     let s1 = i32x4_add(r1, r2);
     let s2 = i32x4_sub(r1, r2);
     let s3 = i32x4_sub(r0, r3);
-    [i32x4_add(s0, s1), i32x4_add(s3, s2), i32x4_sub(s0, s1), i32x4_sub(s3, s2)]
+    [
+        i32x4_add(s0, s1),
+        i32x4_add(s3, s2),
+        i32x4_sub(s0, s1),
+        i32x4_sub(s3, s2),
+    ]
 }
 
 /// SATD of the two tiles of i16 differences in `r0..r3` (tile A low, B
@@ -182,9 +210,17 @@ fn pair16(r0: v128, r1: v128, r2: v128, r3: v128) -> v128 {
     let v1 = zip_hi32(u0, u1);
     let v2 = zip_lo32(u2, u3);
     let v3 = zip_hi32(u2, u3);
-    let [w0, w1, w2, w3] = butterfly16(zip_lo64(v0, v2), zip_hi64(v0, v2), zip_lo64(v1, v3), zip_hi64(v1, v3));
+    let [w0, w1, w2, w3] = butterfly16(
+        zip_lo64(v0, v2),
+        zip_hi64(v0, v2),
+        zip_lo64(v1, v3),
+        zip_hi64(v1, v3),
+    );
     // Four absolute values a column: at most 65504, a u16.
-    let s = i16x8_add(i16x8_add(i16x8_abs(w0), i16x8_abs(w1)), i16x8_add(i16x8_abs(w2), i16x8_abs(w3)));
+    let s = i16x8_add(
+        i16x8_add(i16x8_abs(w0), i16x8_abs(w1)),
+        i16x8_add(i16x8_abs(w2), i16x8_abs(w3)),
+    );
     // [A01, A23, B01, B23] -> [A, A, B, B], then the tile rounding.
     let p = u32x4_extadd_pairwise_u16x8(s);
     let q = i32x4_add(p, i32x4_shuffle::<1, 0, 3, 2>(p, p));
@@ -199,8 +235,16 @@ fn tile32(r: [v128; 4]) -> v128 {
     let u1 = zip_lo32(t2, t3);
     let u2 = zip_hi32(t0, t1);
     let u3 = zip_hi32(t2, t3);
-    let [w0, w1, w2, w3] = butterfly32(zip_lo64(u0, u1), zip_hi64(u0, u1), zip_lo64(u2, u3), zip_hi64(u2, u3));
-    let s = i32x4_add(i32x4_add(i32x4_abs(w0), i32x4_abs(w1)), i32x4_add(i32x4_abs(w2), i32x4_abs(w3)));
+    let [w0, w1, w2, w3] = butterfly32(
+        zip_lo64(u0, u1),
+        zip_hi64(u0, u1),
+        zip_lo64(u2, u3),
+        zip_hi64(u2, u3),
+    );
+    let s = i32x4_add(
+        i32x4_add(i32x4_abs(w0), i32x4_abs(w1)),
+        i32x4_add(i32x4_abs(w2), i32x4_abs(w3)),
+    );
     let x = i32x4_add(s, i32x4_shuffle::<2, 3, 0, 1>(s, s));
     let t = i32x4_add(x, i32x4_shuffle::<1, 0, 3, 2>(x, x));
     u32x4_shr(i32x4_add(t, i32x4_splat(1)), 1)
@@ -211,13 +255,23 @@ fn tile32(r: [v128; 4]) -> v128 {
 /// is below 2048, in i32 otherwise.
 #[inline]
 fn pair(ra: [v128; 4], rb: [v128; 4]) -> v128 {
-    let seen = v128_or(v128_or(v128_or(ra[0], ra[1]), v128_or(ra[2], ra[3])), v128_or(v128_or(rb[0], rb[1]), v128_or(rb[2], rb[3])));
+    let seen = v128_or(
+        v128_or(v128_or(ra[0], ra[1]), v128_or(ra[2], ra[3])),
+        v128_or(v128_or(rb[0], rb[1]), v128_or(rb[2], rb[3])),
+    );
     if !v128_any_true(v128_and(seen, i16x8_splat(!2047))) {
         let d = |k: usize| i16x8_sub(ra[k], rb[k]);
         pair16(d(0), d(1), d(2), d(3))
     } else {
-        let lo = std::array::from_fn(|k| i32x4_sub(u32x4_extend_low_u16x8(ra[k]), u32x4_extend_low_u16x8(rb[k])));
-        let hi = std::array::from_fn(|k| i32x4_sub(u32x4_extend_high_u16x8(ra[k]), u32x4_extend_high_u16x8(rb[k])));
+        let lo = std::array::from_fn(|k| {
+            i32x4_sub(u32x4_extend_low_u16x8(ra[k]), u32x4_extend_low_u16x8(rb[k]))
+        });
+        let hi = std::array::from_fn(|k| {
+            i32x4_sub(
+                u32x4_extend_high_u16x8(ra[k]),
+                u32x4_extend_high_u16x8(rb[k]),
+            )
+        });
         zip_lo64(tile32(lo), tile32(hi))
     }
 }
@@ -228,12 +282,17 @@ unsafe fn satd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize
         if w == 4 {
             let mut y = 0;
             while y + 8 <= h {
-                let rows = |p: *const u16, s: usize| std::array::from_fn(|r| zip_lo64(load4(p.add((y + r) * s)), load4(p.add((y + r + 4) * s))));
+                let rows = |p: *const u16, s: usize| {
+                    std::array::from_fn(|r| {
+                        zip_lo64(load4(p.add((y + r) * s)), load4(p.add((y + r + 4) * s)))
+                    })
+                };
                 acc = i32x4_add(acc, pair(rows(a, sa), rows(b, sb)));
                 y += 8;
             }
             if y < h {
-                let rows = |p: *const u16, s: usize| std::array::from_fn(|r| load4(p.add((y + r) * s)));
+                let rows =
+                    |p: *const u16, s: usize| std::array::from_fn(|r| load4(p.add((y + r) * s)));
                 acc = i32x4_add(acc, pair(rows(a, sa), rows(b, sb)));
             }
         } else {
@@ -243,12 +302,14 @@ unsafe fn satd_impl(a: *const u16, sa: usize, b: *const u16, sb: usize, w: usize
                 let rb = b.add(y * sb);
                 let mut x = 0;
                 while x + 8 <= w {
-                    let rows = |p: *const u16, s: usize| std::array::from_fn(|r| load8(p.add(r * s + x)));
+                    let rows =
+                        |p: *const u16, s: usize| std::array::from_fn(|r| load8(p.add(r * s + x)));
                     acc = i32x4_add(acc, pair(rows(ra, sa), rows(rb, sb)));
                     x += 8;
                 }
                 if x < w {
-                    let rows = |p: *const u16, s: usize| std::array::from_fn(|r| load4(p.add(r * s + x)));
+                    let rows =
+                        |p: *const u16, s: usize| std::array::from_fn(|r| load4(p.add(r * s + x)));
                     acc = i32x4_add(acc, pair(rows(ra, sa), rows(rb, sb)));
                 }
                 y += 4;
@@ -263,6 +324,9 @@ fn satd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usi
     if w % 4 != 0 || h % 4 != 0 || h == 0 {
         return satd_scalar(a, a_stride, b, b_stride, w, h);
     }
-    assert!(a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w, "block out of range");
+    assert!(
+        a.len() >= (h - 1) * a_stride + w && b.len() >= (h - 1) * b_stride + w,
+        "block out of range"
+    );
     unsafe { satd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
 }

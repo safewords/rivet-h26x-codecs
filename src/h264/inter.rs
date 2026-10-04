@@ -43,7 +43,12 @@ pub struct McScratch<S: Sample> {
 
 impl<S: Sample> Default for McScratch<S> {
     fn default() -> Self {
-        Self { pred: [[[S::default(); 16 * PRED_STRIDE]; 3]; 2], window: Window { data: [S::default(); 32 * 32] } }
+        Self {
+            pred: [[[S::default(); 16 * PRED_STRIDE]; 3]; 2],
+            window: Window {
+                data: [S::default(); 32 * 32],
+            },
+        }
     }
 }
 

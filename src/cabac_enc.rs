@@ -148,7 +148,14 @@ impl<'a> CabacEncoder<'a> {
     /// H.264 that means after `cabac_alignment_one_bit`.
     pub fn new(w: &'a mut BitWriter) -> Self {
         debug_assert!(w.byte_aligned(), "CABAC data starts on a byte boundary");
-        Self { w: Out::Bits(w), frac: 0.0, low: 0, range: 510, outstanding: 0, first: true }
+        Self {
+            w: Out::Bits(w),
+            frac: 0.0,
+            low: 0,
+            range: 510,
+            outstanding: 0,
+            first: true,
+        }
     }
 
     /// An encoder that counts the bits it would write and produces none.
@@ -171,7 +178,14 @@ impl<'a> CabacEncoder<'a> {
     /// offset cancels. Callers wanting an absolute figure should count the
     /// whole slice.
     pub fn counting() -> CabacEncoder<'static> {
-        CabacEncoder { w: Out::Count(0), frac: 0.0, low: 0, range: 510, outstanding: 0, first: true }
+        CabacEncoder {
+            w: Out::Count(0),
+            frac: 0.0,
+            low: 0,
+            range: 510,
+            outstanding: 0,
+            first: true,
+        }
     }
 
     /// `PutBit(b)` (9.3.4.3): emit `b`, then settle every outstanding bit as
@@ -361,8 +375,16 @@ mod tests {
                 let i = ((range - 256) as usize * 64 + p) * 2;
                 let mps_cost = (range as f64 / (range - lps) as f64).log2();
                 let lps_cost = (range as f64 / lps as f64).log2();
-                assert_eq!(BIN_COST[i].to_bits(), mps_cost.to_bits(), "range {range} state {p} mps");
-                assert_eq!(BIN_COST[i + 1].to_bits(), lps_cost.to_bits(), "range {range} state {p} lps");
+                assert_eq!(
+                    BIN_COST[i].to_bits(),
+                    mps_cost.to_bits(),
+                    "range {range} state {p} mps"
+                );
+                assert_eq!(
+                    BIN_COST[i + 1].to_bits(),
+                    lps_cost.to_bits(),
+                    "range {range} state {p} lps"
+                );
             }
         }
     }
@@ -431,7 +453,11 @@ mod tests {
             }
         }
         c.encode_terminate(1);
-        assert_eq!(c.bits_counted(), written, "counted bits differ from the bits written");
+        assert_eq!(
+            c.bits_counted(),
+            written,
+            "counted bits differ from the bits written"
+        );
         // And the fractional accounting agrees with the emitted count to
         // within the flush. It is the fractional figure a decision must
         // compare on: emitted bits read as ZERO for a fragment shorter
@@ -442,7 +468,10 @@ mod tests {
             (frac - written as f64).abs() <= 8.0,
             "fractional cost {frac:.2} and emitted bits {written} disagree by more than the flush"
         );
-        assert_eq!(cnt_ctx, enc_ctx, "counting advanced the contexts differently from writing");
+        assert_eq!(
+            cnt_ctx, enc_ctx,
+            "counting advanced the contexts differently from writing"
+        );
 
         let mut dec_ctx = contexts();
         let mut d = Cabac::new(&data);
@@ -456,7 +485,11 @@ mod tests {
                 Op::Terminate => assert_eq!(d.terminate(), 0, "op {k}: {op:?}"),
             }
         }
-        assert_eq!(d.terminate(), 1, "the closing terminate did not read back as 1");
+        assert_eq!(
+            d.terminate(),
+            1,
+            "the closing terminate did not read back as 1"
+        );
         assert!(!d.overrun(), "decoder ran past what the encoder wrote");
         assert_eq!(
             enc_ctx, dec_ctx,
@@ -484,7 +517,11 @@ mod tests {
         }
         // Alternating, which keeps the state machine moving rather than
         // saturating at one end.
-        round_trip(&(0..500).map(|i| Op::Decision(i % POOL, (i % 2) as u32)).collect::<Vec<_>>());
+        round_trip(
+            &(0..500)
+                .map(|i| Op::Decision(i % POOL, (i % 2) as u32))
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]
@@ -507,7 +544,9 @@ mod tests {
     fn round_trips_random_sequences() {
         let mut seed = 0x9e3779b9u64;
         let mut lcg = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         for trial in 0..300 {

@@ -4,7 +4,9 @@
 //! on twice the lanes.
 
 /// A picture sample: `u8` (8-bit streams) or `u16` (deeper).
-pub trait Sample: Copy + Default + Send + Sync + PartialEq + Eq + std::fmt::Debug + 'static {
+pub trait Sample:
+    Copy + Default + Send + Sync + PartialEq + Eq + std::fmt::Debug + 'static
+{
     /// Bytes per sample.
     const BYTES: usize;
     /// Widen.

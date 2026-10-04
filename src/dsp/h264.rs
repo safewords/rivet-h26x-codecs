@@ -30,15 +30,39 @@ pub const PRED_STRIDE: usize = 16;
 pub type QpelFn<S> = fn(dst: &mut [S], src: &[S], src_stride: usize, w: usize, h: usize, max: i32);
 /// Chroma bilinear into a [`PRED_STRIDE`]-strided scratch block: `src` at the
 /// block's integer chroma position, fractions `xf`/`yf` in eighths.
-pub type ChromaFn<S> = fn(dst: &mut [S], src: &[S], src_stride: usize, w: usize, h: usize, xf: i32, yf: i32);
+pub type ChromaFn<S> =
+    fn(dst: &mut [S], src: &[S], src_stride: usize, w: usize, h: usize, xf: i32, yf: i32);
 /// `dst = src` (a [`PRED_STRIDE`]-strided scratch block into a strided plane).
 pub type CopyFn<S> = fn(dst: &mut [S], stride: usize, src: &[S], w: usize, h: usize);
 /// `dst = (a + b + 1) >> 1` (both [`PRED_STRIDE`]-strided scratch blocks).
 pub type AvgFn<S> = fn(dst: &mut [S], stride: usize, a: &[S], b: &[S], w: usize, h: usize);
 /// `dst = clip(((src * w + round) >> log_wd) + o)` (8-278 / 8-279).
-pub type WeightedUniFn<S> = fn(dst: &mut [S], stride: usize, src: &[S], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, max: i32);
+pub type WeightedUniFn<S> = fn(
+    dst: &mut [S],
+    stride: usize,
+    src: &[S],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+);
 /// `dst = clip(((a * w0 + b * w1 + 2^log_wd) >> (log_wd + 1)) + ((o0 + o1 + 1) >> 1))` (8-280).
-pub type WeightedBiFn<S> = fn(dst: &mut [S], stride: usize, a: &[S], b: &[S], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32);
+pub type WeightedBiFn<S> = fn(
+    dst: &mut [S],
+    stride: usize,
+    a: &[S],
+    b: &[S],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+);
 
 /// Deblock sixteen lines of a luma edge with bS < 4 (8.7.2.3). `off` is the
 /// offset of q0 on the first line; a *vertical* edge (`_v`) has its lines
@@ -46,9 +70,11 @@ pub type WeightedBiFn<S> = fn(dst: &mut [S], stride: usize, a: &[S], b: &[S], w:
 /// other way round. `tc0[i / 4]` is the segment's tC0 (already scaled to
 /// the bit depth, as are alpha and beta), or −1 for bS 0 (leave the line
 /// alone).
-pub type LumaDeblockFn<S> = fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32);
+pub type LumaDeblockFn<S> =
+    fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32);
 /// Deblock sixteen lines of a luma edge with bS 4 (8.7.2.4).
-pub type LumaDeblockIntraFn<S> = fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, max: i32);
+pub type LumaDeblockIntraFn<S> =
+    fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, max: i32);
 /// Deblock eight lines of a luma *vertical* edge with bS < 4, `tc0[i / 2]`.
 ///
 /// This is the mixed frame / field macroblock edge of an MBAFF picture
@@ -60,15 +86,19 @@ pub type LumaDeblockIntraFn<S> = fn(data: &mut [S], off: usize, stride: usize, a
 /// and the p side advances twice as fast — hence `tc0[i / 2]` over the
 /// same four entries. Horizontal mixed edges do not need this: they are
 /// already filtered as whole field edges by the sixteen-line kernels.
-pub type LumaDeblock8Fn<S> = fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32);
+pub type LumaDeblock8Fn<S> =
+    fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32);
 /// Deblock eight lines of a luma vertical edge with bS 4 — the same edge
 /// as [`LumaDeblock8Fn`], whose strength is 4 for a whole half or for
 /// none of it.
-pub type LumaDeblock8IntraFn<S> = fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, max: i32);
+pub type LumaDeblock8IntraFn<S> =
+    fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, max: i32);
 /// Deblock eight lines of a 4:2:0 chroma edge with bS < 4; `tc0[i / 2]`.
-pub type ChromaDeblockFn<S> = fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32);
+pub type ChromaDeblockFn<S> =
+    fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32);
 /// Deblock eight lines of a 4:2:0 chroma edge with bS 4.
-pub type ChromaDeblockIntraFn<S> = fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, max: i32);
+pub type ChromaDeblockIntraFn<S> =
+    fn(data: &mut [S], off: usize, stride: usize, alpha: i32, beta: i32, max: i32);
 
 /// Inverse 4x4 transform (8.5.12.2) of dequantised coefficients in raster
 /// order, added to the prediction in `dst` with clipping.
@@ -166,16 +196,36 @@ macro_rules! scalar_table {
             avg: avg_scalar::<$S>,
             weighted_uni: weighted_uni_scalar::<$S>,
             weighted_bi: weighted_bi_scalar::<$S>,
-            deblock_luma_v: |d, off, stride, a, b, tc0, max| deblock_luma_scalar(d, off, stride, 1, a, b, Some(tc0), max),
-            deblock_luma_h: |d, off, stride, a, b, tc0, max| deblock_luma_scalar(d, off, 1, stride, a, b, Some(tc0), max),
-            deblock_luma_v_intra: |d, off, stride, a, b, max| deblock_luma_scalar(d, off, stride, 1, a, b, None, max),
-            deblock_luma_h_intra: |d, off, stride, a, b, max| deblock_luma_scalar(d, off, 1, stride, a, b, None, max),
-            deblock_luma8_v: |d, off, stride, a, b, tc0, max| deblock_luma8_scalar(d, off, stride, 1, a, b, Some(tc0), max),
-            deblock_luma8_v_intra: |d, off, stride, a, b, max| deblock_luma8_scalar(d, off, stride, 1, a, b, None, max),
-            deblock_chroma_v: |d, off, stride, a, b, tc0, max| deblock_chroma_scalar(d, off, stride, 1, a, b, Some(tc0), max),
-            deblock_chroma_h: |d, off, stride, a, b, tc0, max| deblock_chroma_scalar(d, off, 1, stride, a, b, Some(tc0), max),
-            deblock_chroma_v_intra: |d, off, stride, a, b, max| deblock_chroma_scalar(d, off, stride, 1, a, b, None, max),
-            deblock_chroma_h_intra: |d, off, stride, a, b, max| deblock_chroma_scalar(d, off, 1, stride, a, b, None, max),
+            deblock_luma_v: |d, off, stride, a, b, tc0, max| {
+                deblock_luma_scalar(d, off, stride, 1, a, b, Some(tc0), max)
+            },
+            deblock_luma_h: |d, off, stride, a, b, tc0, max| {
+                deblock_luma_scalar(d, off, 1, stride, a, b, Some(tc0), max)
+            },
+            deblock_luma_v_intra: |d, off, stride, a, b, max| {
+                deblock_luma_scalar(d, off, stride, 1, a, b, None, max)
+            },
+            deblock_luma_h_intra: |d, off, stride, a, b, max| {
+                deblock_luma_scalar(d, off, 1, stride, a, b, None, max)
+            },
+            deblock_luma8_v: |d, off, stride, a, b, tc0, max| {
+                deblock_luma8_scalar(d, off, stride, 1, a, b, Some(tc0), max)
+            },
+            deblock_luma8_v_intra: |d, off, stride, a, b, max| {
+                deblock_luma8_scalar(d, off, stride, 1, a, b, None, max)
+            },
+            deblock_chroma_v: |d, off, stride, a, b, tc0, max| {
+                deblock_chroma_scalar(d, off, stride, 1, a, b, Some(tc0), max)
+            },
+            deblock_chroma_h: |d, off, stride, a, b, tc0, max| {
+                deblock_chroma_scalar(d, off, 1, stride, a, b, Some(tc0), max)
+            },
+            deblock_chroma_v_intra: |d, off, stride, a, b, max| {
+                deblock_chroma_scalar(d, off, stride, 1, a, b, None, max)
+            },
+            deblock_chroma_h_intra: |d, off, stride, a, b, max| {
+                deblock_chroma_scalar(d, off, 1, stride, a, b, None, max)
+            },
             idct4_add: idct4_add_scalar::<$S>,
             idct8_add: idct8_add_scalar::<$S>,
             idct4_dc_add: |d, s, dc, max| dc_add_scalar(d, s, dc, 4, max),
@@ -298,7 +348,11 @@ pub fn install_simd_u16(d: &mut H264Dsp<u16>, cpu: Cpu) {
 /// that range. A call outside it, which no conforming stream makes but a
 /// caller could, goes to the scalar reference. These are the tests every
 /// tier applies, so that every tier refuses the same calls.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+))]
 pub(crate) mod simd16 {
     /// The largest sample maximum the kernels are exact for: 14 bits, the
     /// deepest H.264 allows.
@@ -317,7 +371,9 @@ pub(crate) mod simd16 {
     /// Whether a bS 4 loop-filter call is inside the kernels' range.
     #[inline(always)]
     pub(crate) fn strong_in_range(alpha: i32, beta: i32, max: i32) -> bool {
-        (1..=DEEPEST).contains(&max) && (0..=DEEPEST).contains(&alpha) && (0..=DEEPEST).contains(&beta)
+        (1..=DEEPEST).contains(&max)
+            && (0..=DEEPEST).contains(&alpha)
+            && (0..=DEEPEST).contains(&beta)
     }
 
     /// Whether weighted prediction's arguments are inside the kernels' range:
@@ -325,7 +381,10 @@ pub(crate) mod simd16 {
     /// denominator and offsets a stream can carry.
     #[inline(always)]
     pub(crate) fn weights_in_range(log_wd: i32, ws: [i32; 2], os: [i32; 2], max: i32) -> bool {
-        (1..=32767).contains(&max) && (0..=14).contains(&log_wd) && ws.iter().all(|&w| w as i16 as i32 == w) && os.iter().all(|&o| o.unsigned_abs() <= 1 << 20)
+        (1..=32767).contains(&max)
+            && (0..=14).contains(&log_wd)
+            && ws.iter().all(|&w| w as i16 as i32 == w)
+            && os.iter().all(|&o| o.unsigned_abs() <= 1 << 20)
     }
 }
 
@@ -349,18 +408,39 @@ fn g<S: Sample>(src: &[S], stride: usize, x: usize, y: usize) -> i32 {
 #[inline(always)]
 fn b1<S: Sample>(src: &[S], stride: usize, x: usize, yy: usize) -> i32 {
     let r = &src[yy * stride + x..];
-    tap6(r[0].to_i32(), r[1].to_i32(), r[2].to_i32(), r[3].to_i32(), r[4].to_i32(), r[5].to_i32())
+    tap6(
+        r[0].to_i32(),
+        r[1].to_i32(),
+        r[2].to_i32(),
+        r[3].to_i32(),
+        r[4].to_i32(),
+        r[5].to_i32(),
+    )
 }
 
 /// Vertical six-tap intermediate `h1` at window column `xx`, block row `y`.
 #[inline(always)]
 fn h1<S: Sample>(src: &[S], stride: usize, xx: usize, y: usize) -> i32 {
     let c = &src[y * stride + xx..];
-    tap6(c[0].to_i32(), c[stride].to_i32(), c[2 * stride].to_i32(), c[3 * stride].to_i32(), c[4 * stride].to_i32(), c[5 * stride].to_i32())
+    tap6(
+        c[0].to_i32(),
+        c[stride].to_i32(),
+        c[2 * stride].to_i32(),
+        c[3 * stride].to_i32(),
+        c[4 * stride].to_i32(),
+        c[5 * stride].to_i32(),
+    )
 }
 
 /// Scalar interpolation for position `(XF, YF)`.
-fn qpel_scalar<S: Sample, const XF: usize, const YF: usize>(dst: &mut [S], src: &[S], stride: usize, w: usize, h: usize, max: i32) {
+fn qpel_scalar<S: Sample, const XF: usize, const YF: usize>(
+    dst: &mut [S],
+    src: &[S],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     // b: half-sample horizontally at block (x, y): b1 at window row y + 2.
     let b = |x: usize, y: usize| ((b1(src, stride, x, y + 2) + 16) >> 5).clamp(0, max);
     // hh: half-sample vertically at block (x, y): h1 at window column x + 2.
@@ -376,7 +456,14 @@ fn qpel_scalar<S: Sample, const XF: usize, const YF: usize>(dst: &mut [S], src: 
     // architectures we build for and nothing selects these paths but
     // `H26X_NO_SIMD=1`.
     let j = |x: usize, y: usize| {
-        let j1 = tap6(b1(src, stride, x, y), b1(src, stride, x, y + 1), b1(src, stride, x, y + 2), b1(src, stride, x, y + 3), b1(src, stride, x, y + 4), b1(src, stride, x, y + 5));
+        let j1 = tap6(
+            b1(src, stride, x, y),
+            b1(src, stride, x, y + 1),
+            b1(src, stride, x, y + 2),
+            b1(src, stride, x, y + 3),
+            b1(src, stride, x, y + 4),
+            b1(src, stride, x, y + 5),
+        );
         ((j1 + 512) >> 10).clamp(0, max)
     };
     for y in 0..h {
@@ -409,13 +496,24 @@ fn qpel_scalar<S: Sample, const XF: usize, const YF: usize>(dst: &mut [S], src: 
 // Chroma / combination (scalar)
 // ----------------------------------------------------------------------
 
-fn chroma_scalar<S: Sample>(dst: &mut [S], src: &[S], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
+fn chroma_scalar<S: Sample>(
+    dst: &mut [S],
+    src: &[S],
+    stride: usize,
+    w: usize,
+    h: usize,
+    xf: i32,
+    yf: i32,
+) {
     let (a, b, c, d) = ((8 - xf) * (8 - yf), xf * (8 - yf), (8 - xf) * yf, xf * yf);
     for y in 0..h {
         let r0 = &src[y * stride..];
         let r1 = &src[(y + 1) * stride..];
         for x in 0..w {
-            let v = a * r0[x].to_i32() + b * r0[x + 1].to_i32() + c * r1[x].to_i32() + d * r1[x + 1].to_i32();
+            let v = a * r0[x].to_i32()
+                + b * r0[x + 1].to_i32()
+                + c * r1[x].to_i32()
+                + d * r1[x + 1].to_i32();
             dst[y * PRED_STRIDE + x] = S::from_i32((v + 32) >> 6);
         }
     }
@@ -430,36 +528,69 @@ fn copy_scalar<S: Sample>(dst: &mut [S], stride: usize, src: &[S], w: usize, h: 
 fn avg_scalar<S: Sample>(dst: &mut [S], stride: usize, a: &[S], b: &[S], w: usize, h: usize) {
     for y in 0..h {
         for x in 0..w {
-            dst[y * stride + x] = S::from_i32((a[y * PRED_STRIDE + x].to_i32() + b[y * PRED_STRIDE + x].to_i32() + 1) >> 1);
+            dst[y * stride + x] = S::from_i32(
+                (a[y * PRED_STRIDE + x].to_i32() + b[y * PRED_STRIDE + x].to_i32() + 1) >> 1,
+            );
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_uni_scalar<S: Sample>(dst: &mut [S], stride: usize, src: &[S], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, max: i32) {
+fn weighted_uni_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    src: &[S],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+) {
     if log_wd >= 1 {
         let round = 1 << (log_wd - 1);
         for y in 0..h {
             for x in 0..w {
-                dst[y * stride + x] = S::from_i32((((src[y * PRED_STRIDE + x].to_i32() * wt + round) >> log_wd) + o).clamp(0, max));
+                dst[y * stride + x] = S::from_i32(
+                    (((src[y * PRED_STRIDE + x].to_i32() * wt + round) >> log_wd) + o)
+                        .clamp(0, max),
+                );
             }
         }
     } else {
         for y in 0..h {
             for x in 0..w {
-                dst[y * stride + x] = S::from_i32((src[y * PRED_STRIDE + x].to_i32() * wt + o).clamp(0, max));
+                dst[y * stride + x] =
+                    S::from_i32((src[y * PRED_STRIDE + x].to_i32() * wt + o).clamp(0, max));
             }
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi_scalar<S: Sample>(dst: &mut [S], stride: usize, a: &[S], b: &[S], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32) {
+fn weighted_bi_scalar<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    a: &[S],
+    b: &[S],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+) {
     let off = (o0 + o1 + 1) >> 1;
     let round = 1 << log_wd;
     for y in 0..h {
         for x in 0..w {
-            let v = ((a[y * PRED_STRIDE + x].to_i32() * w0 + b[y * PRED_STRIDE + x].to_i32() * w1 + round) >> (log_wd + 1)) + off;
+            let v = ((a[y * PRED_STRIDE + x].to_i32() * w0
+                + b[y * PRED_STRIDE + x].to_i32() * w1
+                + round)
+                >> (log_wd + 1))
+                + off;
             dst[y * stride + x] = S::from_i32(v.clamp(0, max));
         }
     }
@@ -473,7 +604,15 @@ fn weighted_bi_scalar<S: Sample>(dst: &mut [S], stride: usize, a: &[S], b: &[S],
 /// `p[0..4]` are p0..p3 (p0 nearest the edge), `q[0..4]` are q0..q3.
 /// `tc0 == None` is bS 4. `max` is the sample maximum.
 #[inline]
-pub(crate) fn deblock_line(p: &mut [i32; 4], q: &mut [i32; 4], tc0: Option<i32>, alpha: i32, beta: i32, chroma: bool, max: i32) {
+pub(crate) fn deblock_line(
+    p: &mut [i32; 4],
+    q: &mut [i32; 4],
+    tc0: Option<i32>,
+    alpha: i32,
+    beta: i32,
+    chroma: bool,
+    max: i32,
+) {
     let (p0, p1, p2, p3) = (p[0], p[1], p[2], p[3]);
     let (q0, q1, q2, q3) = (q[0], q[1], q[2], q[3]);
     if !((p0 - q0).abs() < alpha && (p1 - p0).abs() < beta && (q1 - q0).abs() < beta) {
@@ -482,7 +621,11 @@ pub(crate) fn deblock_line(p: &mut [i32; 4], q: &mut [i32; 4], tc0: Option<i32>,
     let ap = (p2 - p0).abs();
     let aq = (q2 - q0).abs();
     if let Some(tc0) = tc0 {
-        let tc = if chroma { tc0 + 1 } else { tc0 + (ap < beta) as i32 + (aq < beta) as i32 };
+        let tc = if chroma {
+            tc0 + 1
+        } else {
+            tc0 + (ap < beta) as i32 + (aq < beta) as i32
+        };
         let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
         p[0] = (p0 + delta).clamp(0, max);
         q[0] = (q0 - delta).clamp(0, max);
@@ -519,7 +662,16 @@ pub(crate) fn deblock_line(p: &mut [i32; 4], q: &mut [i32; 4], tc0: Option<i32>,
 /// eight.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn deblock_luma_lines<S: Sample, const LINES: usize>(data: &mut [S], off: usize, step: usize, across: usize, alpha: i32, beta: i32, tc0: Option<&[i16; 4]>, max: i32) {
+fn deblock_luma_lines<S: Sample, const LINES: usize>(
+    data: &mut [S],
+    off: usize,
+    step: usize,
+    across: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: Option<&[i16; 4]>,
+    max: i32,
+) {
     for i in 0..LINES {
         let t = match tc0 {
             Some(t) => {
@@ -547,19 +699,46 @@ fn deblock_luma_lines<S: Sample, const LINES: usize>(data: &mut [S], off: usize,
 
 /// Sixteen luma lines.
 #[allow(clippy::too_many_arguments)]
-fn deblock_luma_scalar<S: Sample>(data: &mut [S], off: usize, step: usize, across: usize, alpha: i32, beta: i32, tc0: Option<&[i16; 4]>, max: i32) {
+fn deblock_luma_scalar<S: Sample>(
+    data: &mut [S],
+    off: usize,
+    step: usize,
+    across: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: Option<&[i16; 4]>,
+    max: i32,
+) {
     deblock_luma_lines::<S, 16>(data, off, step, across, alpha, beta, tc0, max);
 }
 
 /// Eight luma lines, for an MBAFF mixed edge (see [`LumaDeblock8Fn`]).
 #[allow(clippy::too_many_arguments)]
-fn deblock_luma8_scalar<S: Sample>(data: &mut [S], off: usize, step: usize, across: usize, alpha: i32, beta: i32, tc0: Option<&[i16; 4]>, max: i32) {
+fn deblock_luma8_scalar<S: Sample>(
+    data: &mut [S],
+    off: usize,
+    step: usize,
+    across: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: Option<&[i16; 4]>,
+    max: i32,
+) {
     deblock_luma_lines::<S, 8>(data, off, step, across, alpha, beta, tc0, max);
 }
 
 /// Eight chroma lines (4:2:0): line `i` uses `tc0[i / 2]`.
 #[allow(clippy::too_many_arguments)]
-fn deblock_chroma_scalar<S: Sample>(data: &mut [S], off: usize, step: usize, across: usize, alpha: i32, beta: i32, tc0: Option<&[i16; 4]>, max: i32) {
+fn deblock_chroma_scalar<S: Sample>(
+    data: &mut [S],
+    off: usize,
+    step: usize,
+    across: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: Option<&[i16; 4]>,
+    max: i32,
+) {
     for i in 0..8 {
         let t = match tc0 {
             Some(t) => {
@@ -647,7 +826,12 @@ fn idct4_add_wide<S: Sample>(dst: &mut [S], stride: usize, coeffs: &[i16; 16], m
 fn idct4_add_i32<S: Sample>(dst: &mut [S], stride: usize, coeffs: &[i32; 16], max: i32) {
     let mut tmp = [0i32; 16];
     for i in 0..4 {
-        let (d0, d1, d2, d3) = (coeffs[i * 4], coeffs[i * 4 + 1], coeffs[i * 4 + 2], coeffs[i * 4 + 3]);
+        let (d0, d1, d2, d3) = (
+            coeffs[i * 4],
+            coeffs[i * 4 + 1],
+            coeffs[i * 4 + 2],
+            coeffs[i * 4 + 3],
+        );
         let e0 = d0 + d2;
         let e1 = d0 - d2;
         let e2 = (d1 >> 1) - d3;
@@ -690,7 +874,16 @@ fn idct8_1d_i32(d: &[i32; 8]) -> [i32; 8] {
     let b7 = a7 - (a1 >> 2);
     let b3 = a3 + (a5 >> 2);
     let b5 = (a3 >> 2) - a5;
-    [b0 + b7, b2 + b5, b4 + b3, b6 + b1, b6 - b1, b4 - b3, b2 - b5, b0 - b7]
+    [
+        b0 + b7,
+        b2 + b5,
+        b4 + b3,
+        b6 + b1,
+        b6 - b1,
+        b4 - b3,
+        b2 - b5,
+        b0 - b7,
+    ]
 }
 
 /// The 8x8 inverse transform in i32 (samples deeper than 8 bits).
@@ -726,10 +919,22 @@ fn idct8_1d_i16(d: &[i16; 8]) -> [i16; 8] {
     let b2 = a4.wrapping_add(a2);
     let b4 = a4.wrapping_sub(a2);
     let b6 = a0.wrapping_sub(a6);
-    let a1 = d[5].wrapping_sub(d[3]).wrapping_sub(d[7]).wrapping_sub(d[7] >> 1);
-    let a3 = d[1].wrapping_add(d[7]).wrapping_sub(d[3]).wrapping_sub(d[3] >> 1);
-    let a5 = d[7].wrapping_sub(d[1]).wrapping_add(d[5]).wrapping_add(d[5] >> 1);
-    let a7 = d[3].wrapping_add(d[5]).wrapping_add(d[1]).wrapping_add(d[1] >> 1);
+    let a1 = d[5]
+        .wrapping_sub(d[3])
+        .wrapping_sub(d[7])
+        .wrapping_sub(d[7] >> 1);
+    let a3 = d[1]
+        .wrapping_add(d[7])
+        .wrapping_sub(d[3])
+        .wrapping_sub(d[3] >> 1);
+    let a5 = d[7]
+        .wrapping_sub(d[1])
+        .wrapping_add(d[5])
+        .wrapping_add(d[5] >> 1);
+    let a7 = d[3]
+        .wrapping_add(d[5])
+        .wrapping_add(d[1])
+        .wrapping_add(d[1] >> 1);
     let b1 = a1.wrapping_add(a7 >> 2);
     let b7 = a7.wrapping_sub(a1 >> 2);
     let b3 = a3.wrapping_add(a5 >> 2);
@@ -758,7 +963,16 @@ fn idct8_add_scalar<S: Sample>(dst: &mut [S], stride: usize, coeffs: &[i16; 64],
     }
     let mut out = [0i16; 64];
     for j in 0..8 {
-        let col = [tmp[j], tmp[8 + j], tmp[16 + j], tmp[24 + j], tmp[32 + j], tmp[40 + j], tmp[48 + j], tmp[56 + j]];
+        let col = [
+            tmp[j],
+            tmp[8 + j],
+            tmp[16 + j],
+            tmp[24 + j],
+            tmp[32 + j],
+            tmp[40 + j],
+            tmp[48 + j],
+            tmp[56 + j],
+        ];
         let o = idct8_1d_i16(&col);
         for i in 0..8 {
             out[i * 8 + j] = o[i];
@@ -768,7 +982,11 @@ fn idct8_add_scalar<S: Sample>(dst: &mut [S], stride: usize, coeffs: &[i16; 64],
 }
 
 fn dc_add_scalar<S: Sample>(dst: &mut [S], stride: usize, dc: i32, n: usize, max: i32) {
-    let v = if S::BYTES == 1 { ((dc as i16).wrapping_add(32) >> 6) as i32 } else { (dc + 32) >> 6 };
+    let v = if S::BYTES == 1 {
+        ((dc as i16).wrapping_add(32) >> 6) as i32
+    } else {
+        (dc + 32) >> 6
+    };
     for y in 0..n {
         for x in 0..n {
             let p = &mut dst[y * stride + x];

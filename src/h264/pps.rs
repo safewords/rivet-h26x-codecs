@@ -87,7 +87,9 @@ impl Pps {
         let bottom_field_pic_order_in_frame_present = r.flag();
         let num_slice_groups = r.ue() + 1;
         if num_slice_groups > 8 {
-            return Err(Error::bitstream("PPS: num_slice_groups_minus1 out of range"));
+            return Err(Error::bitstream(
+                "PPS: num_slice_groups_minus1 out of range",
+            ));
         }
         let mut slice_groups = None;
         if num_slice_groups > 1 {
@@ -166,10 +168,18 @@ impl Pps {
             if r.flag() {
                 // pic_scaling_matrix_present_flag. Rule A falls back to the
                 // SPS lists when the SPS sent any, else the defaults.
-                let sps = sps_lookup(sps_id)
-                    .ok_or_else(|| Error::bitstream(format!("PPS {id} references unknown SPS {sps_id}")))?;
-                let fallback = sps.scaling_lists.clone().unwrap_or_else(ScalingLists::default_lists);
-                let count8x8 = if transform_8x8_mode { if sps.chroma_format_idc == 3 { 6 } else { 2 } } else { 0 };
+                let sps = sps_lookup(sps_id).ok_or_else(|| {
+                    Error::bitstream(format!("PPS {id} references unknown SPS {sps_id}"))
+                })?;
+                let fallback = sps
+                    .scaling_lists
+                    .clone()
+                    .unwrap_or_else(ScalingLists::default_lists);
+                let count8x8 = if transform_8x8_mode {
+                    if sps.chroma_format_idc == 3 { 6 } else { 2 }
+                } else {
+                    0
+                };
                 let mut lists = parse_scaling_matrix(&mut r, &fallback, count8x8);
                 if !transform_8x8_mode {
                     lists.list8x8 = fallback.list8x8;
@@ -178,7 +188,9 @@ impl Pps {
             }
             second_chroma_qp_index_offset = r.se();
             if !(-12..=12).contains(&second_chroma_qp_index_offset) {
-                return Err(Error::bitstream("PPS: second_chroma_qp_index_offset out of range"));
+                return Err(Error::bitstream(
+                    "PPS: second_chroma_qp_index_offset out of range",
+                ));
             }
         }
         r.finish("PPS")?;

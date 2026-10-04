@@ -182,36 +182,41 @@
 //! against the 8 before gains 1.9% YUV at QP 22-40 (3.3% at 34-43), every
 //! plane better.
 
+use super::aq;
 use super::gop::{Coded, Kind, Scheduler};
 use super::h265_deblock::{deblock_inter_picture, deblock_picture};
-use super::h265_intra::{CuDecision, IntraCtx, IntraPicture, MIN_CB_LOG2, Srcs, TreeCu, ssd_lambda};
-use super::h265_me::{write_prediction_unit, InterCuDecision, InterCuKind, InterPicture, PCuDecision, TreeRefs, MAX_MERGE_CAND};
-use super::rc::{Insensitivity, PicKind, RateController};
+use super::h265_intra::{
+    CuDecision, IntraCtx, IntraPicture, MIN_CB_LOG2, Srcs, TreeCu, ssd_lambda,
+};
+use super::h265_me::{
+    InterCuDecision, InterCuKind, InterPicture, MAX_MERGE_CAND, PCuDecision, TreeRefs,
+    write_prediction_unit,
+};
 use super::h265_sao::{SaoPlan, sao_picture};
-use super::aq;
-use super::h265_wp;
 use super::h265_syntax::{self as syn, Cpb, PpsOptions};
-use crate::hevc::ctu::explicit_weighting;
+use super::h265_wp;
+use super::rc::{Insensitivity, PicKind, RateController};
 use super::{Access, BWeighting, Config, RateControl};
 use crate::bitwriter::BitWriter;
 use crate::cabac_enc::CabacEncoder;
+use crate::dsp::Cpu;
 use crate::dsp::distortion::DistortionDsp;
 use crate::dsp::hevc::HevcDsp;
 use crate::dsp::hevc_enc::HevcEncDsp;
-use crate::dsp::Cpu;
+use crate::hevc::ctu::explicit_weighting;
+use crate::hevc::ctu::{
+    SaoCtx, SaoMergeNb, SplitCuNb, qp_y_from_pred, qp_y_pred_from, write_cbf_chroma,
+    write_cbf_luma, write_cu_qp_delta, write_cu_skip_flag, write_cu_transquant_bypass_flag,
+    write_inter_pred_idc, write_intra_chroma_pred_mode, write_merge_flag, write_merge_idx,
+    write_mpm_idx, write_mvd, write_mvp_flag, write_part_mode_inter, write_part_mode_inter_at,
+    write_part_mode_intra, write_pred_mode_flag, write_prev_intra_luma_pred_flag, write_ref_idx,
+    write_rem_intra_luma_pred_mode, write_rqt_root_cbf, write_sao, write_split_cu_flag,
+    write_split_transform_flag,
+};
 use crate::hevc::ctx::Contexts;
 use crate::hevc::pic::PicInfo;
-use crate::sample::Sample;
-use crate::hevc::ctu::{
-    SaoCtx, SaoMergeNb, SplitCuNb, qp_y_from_pred, qp_y_pred_from, write_cbf_chroma, write_cbf_luma, write_cu_qp_delta,
-    write_cu_skip_flag, write_sao,
-    write_cu_transquant_bypass_flag, write_merge_flag, write_merge_idx, write_mvd,
-    write_inter_pred_idc, write_mvp_flag, write_part_mode_inter, write_part_mode_inter_at, write_pred_mode_flag,
-    write_ref_idx, write_rqt_root_cbf,
-    write_intra_chroma_pred_mode, write_mpm_idx, write_part_mode_intra, write_prev_intra_luma_pred_flag,
-    write_rem_intra_luma_pred_mode, write_split_cu_flag, write_split_transform_flag,
-};
 use crate::hevc::residual::{ResidualParams, residual_scan_idx, write_residual};
+use crate::sample::Sample;
 use crate::{Error, Result};
 
 /// H.265 encoder. See the module documentation for what is and is not built.
@@ -405,7 +410,11 @@ impl H265Encoder {
     /// the 8..=14 both decoders and the transform arithmetic admit.
     pub fn new(cfg: Config) -> Result<Self> {
         cfg.validate()?;
-        let inner = if cfg.bit_depth > 8 { Inner::Wide(Core::new(cfg)?) } else { Inner::Eight(Core::new(cfg)?) };
+        let inner = if cfg.bit_depth > 8 {
+            Inner::Wide(Core::new(cfg)?)
+        } else {
+            Inner::Eight(Core::new(cfg)?)
+        };
         Ok(H265Encoder { inner })
     }
 
@@ -520,7 +529,11 @@ impl<S: Sample> Core<S> {
                 // anything else asked for on purpose is refused by name.
                 return Err(Error::unsupported(format!(
                     "H.265 encode: B weighting {w:?} {} (H.265 has no implicit mode, and weights B slices explicitly exactly when weighted_pred is on)",
-                    if cfg.weighted_pred { "with weighted prediction" } else { "without weighted prediction" }
+                    if cfg.weighted_pred {
+                        "with weighted prediction"
+                    } else {
+                        "without weighted prediction"
+                    }
                 )));
             }
         }
@@ -571,7 +584,8 @@ impl<S: Sample> Core<S> {
         // no slice reads, and one every such stream coded before B slices
         // were weighted does not have.
         let pps_opts = PpsOptions {
-            cu_qp_delta_depth: (cfg.aq_strength > 0.0).then_some(u32::from(tree_depth(&cfg, &g) > 0 && cfg.gop != 0)),
+            cu_qp_delta_depth: (cfg.aq_strength > 0.0)
+                .then_some(u32::from(tree_depth(&cfg, &g) > 0 && cfg.gop != 0)),
             weighted_pred: cfg.weighted_pred,
             weighted_bipred: cfg.weighted_pred && cfg.bframes > 0,
         };
@@ -612,13 +626,23 @@ impl<S: Sample> Core<S> {
         // Declared at a constant rate where the caller asked for one
         // (`Config::validate` has refused it without a buffer).
         let cpb = cpb.map(|c| c.with_cbr(cfg.cbr));
-        let cbr = cpb.filter(|c| c.cbr).map(|c| super::hrd::ConstantRate::new(&c, cfg.frame_rate()));
+        let cbr = cpb
+            .filter(|c| c.cbr)
+            .map(|c| super::hrd::ConstantRate::new(&c, cfg.frame_rate()));
         let rc = match cfg.rate {
             // The controller aims at the *declared* rate where a buffer
             // was declared, so the two cannot disagree by the rounding.
             RateControl::Bitrate { bps } => {
                 let bps = cpb.map_or(bps, |c| c.bit_rate as u32);
-                let rc = RateController::with_cpb(bps, cfg.frame_rate_f64(), cfg.width, cfg.height, cfg.gop, cfg.bframes, cpb.map(|c| c.size));
+                let rc = RateController::with_cpb(
+                    bps,
+                    cfg.frame_rate_f64(),
+                    cfg.width,
+                    cfg.height,
+                    cfg.gop,
+                    cfg.bframes,
+                    cpb.map(|c| c.size),
+                );
                 Some(if cfg.cbr { rc.constant_rate() } else { rc })
             }
             _ => None,
@@ -682,7 +706,13 @@ impl<S: Sample> Core<S> {
             // which may already have been coded and left `held`, so its
             // luma is kept aside for exactly this.
             let (dw, dh) = (self.cfg.width as usize, self.cfg.height as usize);
-            let cost = PicCost::measure(&samples[..dw * dh], dw, dh, self.last_luma.as_deref(), self.cfg.bit_depth);
+            let cost = PicCost::measure(
+                &samples[..dw * dh],
+                dw,
+                dh,
+                self.last_luma.as_deref(),
+                self.cfg.bit_depth,
+            );
             if self.last_luma.is_some() && scene_cut(self.last_intra, cost.intra) {
                 self.cuts.insert(display);
             }
@@ -771,9 +801,15 @@ impl<S: Sample> Core<S> {
     /// rate, and none for a picture that spent what the buffer had room
     /// for.
     fn stuff(&mut self, access: &mut Access) -> usize {
-        let Some(buffer) = self.cbr.as_mut() else { return 0 };
+        let Some(buffer) = self.cbr.as_mut() else {
+            return 0;
+        };
         let over = buffer.filler_bits(access.data.len() as u64 * 8);
-        let filler = if over > 0 { syn::filler_nal(over) } else { Vec::new() };
+        let filler = if over > 0 {
+            syn::filler_nal(over)
+        } else {
+            Vec::new()
+        };
         access.data.extend_from_slice(&filler);
         buffer.remove(access.data.len() as u64 * 8);
         filler.len()
@@ -802,7 +838,9 @@ impl<S: Sample> Core<S> {
             let bits = a.access.data.len() as u64 * 8;
             // A picture planned from a seed and nothing else: its own bits
             // are the measurement the seed stood in for.
-            if attempt == 0 && let Some(again) = self.rc.as_mut().and_then(|rc| rc.seed_recode(bits)) {
+            if attempt == 0
+                && let Some(again) = self.rc.as_mut().and_then(|rc| rc.seed_recode(bits))
+            {
                 self.seed_recoded += 1;
                 qp = again;
                 continue;
@@ -815,7 +853,10 @@ impl<S: Sample> Core<S> {
             };
             // Under a constant rate the buffer is walked exactly as well,
             // and the exact figure is the one the stream is held to.
-            let afford = self.cbr.as_ref().map_or(afford, |b| afford.min(b.available()));
+            let afford = self
+                .cbr
+                .as_ref()
+                .map_or(afford, |b| afford.min(b.available()));
             if bits <= afford {
                 if let Some(rc) = self.rc.as_mut() {
                     rc.note_recode(qp);
@@ -862,10 +903,16 @@ impl<S: Sample> Core<S> {
             RateControl::Bitrate { .. } => {
                 let kind = pic_kind(c.kind);
                 if self.cfg.lookahead == 0 {
-                    self.rc.as_mut().expect("a bitrate configuration builds a controller").pick_qp(kind)
+                    self.rc
+                        .as_mut()
+                        .expect("a bitrate configuration builds a controller")
+                        .pick_qp(kind)
                 } else {
                     let (cost, window) = self.lookahead_window(c, upcoming);
-                    self.rc.as_mut().expect("a bitrate configuration builds a controller").pick_qp_ahead(kind, cost, &window)
+                    self.rc
+                        .as_mut()
+                        .expect("a bitrate configuration builds a controller")
+                        .pick_qp_ahead(kind, cost, &window)
                 }
             }
         })
@@ -882,21 +929,38 @@ impl<S: Sample> Core<S> {
         let qp_ref = self.last_qp.map_or(26, i32::from);
         let cost_of = |kind: Kind, display: u64| -> f64 {
             let pc = self.costs.get(&display).copied().unwrap_or_default();
-            let cost = if kind.is_intra() { pc.intra } else { pc.inter_cost(qp_ref, self.cfg.weighted_pred) };
+            let cost = if kind.is_intra() {
+                pc.intra
+            } else {
+                pc.inter_cost(qp_ref, self.cfg.weighted_pred)
+            };
             (cost as f64).max(1.0)
         };
         // Only the pictures of this picture's own scene: none with a cut
         // between it and this one. See `scene_cut` for why.
         let same_scene = |display: u64| {
-            let (lo, hi) = if display < c.display { (display, c.display) } else { (c.display, display) };
+            let (lo, hi) = if display < c.display {
+                (display, c.display)
+            } else {
+                (c.display, display)
+            };
             self.cuts.range(lo + 1..=hi).next().is_none()
         };
         let mine = cost_of(c.kind, c.display);
         let mut window = vec![(pic_kind(c.kind), mine)];
-        window.extend(upcoming.iter().filter(|u| same_scene(u.display)).map(|u| (pic_kind(u.kind), cost_of(u.kind, u.display))));
+        window.extend(
+            upcoming
+                .iter()
+                .filter(|u| same_scene(u.display))
+                .map(|u| (pic_kind(u.kind), cost_of(u.kind, u.display))),
+        );
         let ahead = self.next_display - self.offered;
         window.extend(
-            self.sched.preview(ahead).iter().filter(|p| same_scene(p.display)).map(|p| (pic_kind(p.kind), cost_of(p.kind, p.display))),
+            self.sched
+                .preview(ahead)
+                .iter()
+                .filter(|p| same_scene(p.display))
+                .map(|p| (pic_kind(p.kind), cost_of(p.kind, p.display))),
         );
         (mine, window)
     }
@@ -916,7 +980,9 @@ impl<S: Sample> Core<S> {
             (0..h)
                 .map(|y| {
                     let row = &p.data[o + y * p.stride..];
-                    (0..w).map(|x| u64::from(row[x].to_i32().abs_diff(s[y * w + x].to_i32())).pow(2)).sum::<u64>()
+                    (0..w)
+                        .map(|x| u64::from(row[x].to_i32().abs_diff(s[y * w + x].to_i32())).pow(2))
+                        .sum::<u64>()
                 })
                 .sum()
         };
@@ -960,7 +1026,9 @@ impl<S: Sample> Core<S> {
             // SSD-against-bits choice in this encoder uses.
             let mut plain = self.code_inter_picture(c, src, qp, bypass, false)?;
             let lam = ssd_lambda(i32::from(qp), self.cfg.bit_depth);
-            let cost = |a: &Attempt<S>| self.display_ssd(&a.frame, src) as f64 + lam * (a.access.data.len() * 8) as f64;
+            let cost = |a: &Attempt<S>| {
+                self.display_ssd(&a.frame, src) as f64 + lam * (a.access.data.len() * 8) as f64
+            };
             if cost(&plain) < cost(&fitted) {
                 plain.census.wp_rd_default += 1;
                 return Ok(plain);
@@ -1046,7 +1114,10 @@ impl<S: Sample> Core<S> {
         // does not, SELF fails on every coded edge while CROSS stays
         // green.
         let deblock = true;
-        out.extend_from_slice(&syn::annexb(syn::NAL_PPS, &syn::write_pps_opts(self.pps_qp, bypass, deblock, &self.pps_opts)));
+        out.extend_from_slice(&syn::annexb(
+            syn::NAL_PPS,
+            &syn::write_pps_opts(self.pps_qp, bypass, deblock, &self.pps_opts),
+        ));
         // A buffering period may begin at any IRAP, and this encoder makes
         // every one of them one: the message carries the initial removal
         // delay, which is the single number the schedule cannot derive
@@ -1065,10 +1136,16 @@ impl<S: Sample> Core<S> {
         // HDR10 static metadata, with every IRAP so that a stream joined at
         // any of them carries it (as x265 does with repeated headers).
         if let Some(m) = self.cfg.mastering_display.as_ref() {
-            out.extend_from_slice(&syn::annexb(syn::NAL_PREFIX_SEI, &syn::write_mastering_display_sei(m)));
+            out.extend_from_slice(&syn::annexb(
+                syn::NAL_PREFIX_SEI,
+                &syn::write_mastering_display_sei(m),
+            ));
         }
         if let Some(c) = self.cfg.content_light.as_ref() {
-            out.extend_from_slice(&syn::annexb(syn::NAL_PREFIX_SEI, &syn::write_content_light_level_sei(c)));
+            out.extend_from_slice(&syn::annexb(
+                syn::NAL_PREFIX_SEI,
+                &syn::write_content_light_level_sei(c),
+            ));
         }
 
         let mut w = BitWriter::with_capacity(cw * ch / 2);
@@ -1124,8 +1201,16 @@ impl<S: Sample> Core<S> {
         let max_depth = self.tree_depth();
         let log2_qg = self.log2_qg();
         let offsets = self.aq_offsets(&py, cw, ch, log2_qg);
-        let want = |x: usize, y: usize, log2: u32| cu_want(qp, offsets.as_deref(), cw, log2_qg, x, y, log2);
-        let src = Srcs { y: &py, y_stride: cw, cb: &pcb, cr: &pcr, c_stride: ccw };
+        let want = |x: usize, y: usize, log2: u32| {
+            cu_want(qp, offsets.as_deref(), cw, log2_qg, x, y, log2)
+        };
+        let src = Srcs {
+            y: &py,
+            y_stride: cw,
+            cb: &pcb,
+            cr: &pcr,
+            c_stride: ccw,
+        };
         let mut cus: Vec<TreeCu<CuDecision>> = Vec::with_capacity(wc * hc);
         let mut ctu_start = Vec::with_capacity(wc * hc + 1);
         for cy in 0..hc {
@@ -1136,9 +1221,19 @@ impl<S: Sample> Core<S> {
                     continue;
                 }
                 let (x0, y0) = (cxu << g.log2_ctb, cy << g.log2_ctb);
-                let cctx = IntraCtx { qp: want(x0, y0, g.log2_ctb), ..ictx };
+                let cctx = IntraCtx {
+                    qp: want(x0, y0, g.log2_ctb),
+                    ..ictx
+                };
                 let d = pic.code_ctu(&cctx, cxu, cy, &py, cw, &pcb, &pcr, ccw);
-                cus.push(TreeCu { x0, y0, log2: g.log2_ctb, depth: 0, bits: 0.0, d });
+                cus.push(TreeCu {
+                    x0,
+                    y0,
+                    log2: g.log2_ctb,
+                    depth: 0,
+                    bits: 0.0,
+                    d,
+                });
             }
         }
         ctu_start.push(cus.len());
@@ -1155,8 +1250,27 @@ impl<S: Sample> Core<S> {
         // Then SAO, over the deblocked samples, which is the order 8.7
         // fixes and the order `decoder.rs` applies them in.
         let plan = self.cfg.sao.then(|| {
-            let (sps, pps) = parsed_sets(&self.cfg, &g, i32::from(qp), bypass, deblock, self.cpb.as_ref(), &self.pps_opts);
-            sao_picture(&ictx, &mut pic.recon, &mut info, &sps, &pps, &py, cw, &pcb, &pcr, ccw)
+            let (sps, pps) = parsed_sets(
+                &self.cfg,
+                &g,
+                i32::from(qp),
+                bypass,
+                deblock,
+                self.cpb.as_ref(),
+                &self.pps_opts,
+            );
+            sao_picture(
+                &ictx,
+                &mut pic.recon,
+                &mut info,
+                &sps,
+                &pps,
+                &py,
+                cw,
+                &pcb,
+                &pcr,
+                ccw,
+            )
         });
         let mut census = KindCensus::of_intra(&cus, i32::from(qp));
         {
@@ -1165,17 +1279,37 @@ impl<S: Sample> Core<S> {
             // the delta against the same prediction the decision pass
             // settled with, and a decoder derives that prediction from
             // the stream alone.
-            let mut chain = offsets.is_some().then(|| QgChain::new(i32::from(qp), bit_depth, &g, log2_qg));
+            let mut chain = offsets
+                .is_some()
+                .then(|| QgChain::new(i32::from(qp), bit_depth, &g, log2_qg));
             let mut tc = TreeCtx::new(&g);
             let start = e.position();
             for cy in 0..hc {
                 for cxu in 0..wc {
                     let addr = cy * wc + cxu;
-                    write_sao_for(&mut e, &mut cx, plan.as_ref(), addr, cxu, cy, bit_depth, cat);
+                    write_sao_for(
+                        &mut e,
+                        &mut cx,
+                        plan.as_ref(),
+                        addr,
+                        cxu,
+                        cy,
+                        bit_depth,
+                        cat,
+                    );
                     let ctu = &cus[ctu_start[addr]..ctu_start[addr + 1]];
-                    census.qp_delta += write_tree(&mut e, &mut cx, ctu, (cxu << g.log2_ctb, cy << g.log2_ctb), g.log2_ctb, &mut tc, chain.as_mut(), &mut |e, cx, cu, _, _, delta| {
-                        write_cu_intra_i(e, cx, &cu.d, bypass, cat, delta)
-                    });
+                    census.qp_delta += write_tree(
+                        &mut e,
+                        &mut cx,
+                        ctu,
+                        (cxu << g.log2_ctb, cy << g.log2_ctb),
+                        g.log2_ctb,
+                        &mut tc,
+                        chain.as_mut(),
+                        &mut |e, cx, cu, _, _, delta| {
+                            write_cu_intra_i(e, cx, &cu.d, bypass, cat, delta)
+                        },
+                    );
                     e.encode_terminate(u32::from(cy == hc - 1 && cxu == wc - 1));
                 }
             }
@@ -1249,7 +1383,11 @@ impl<S: Sample> Core<S> {
                 self.refs.remove(0);
             }
         }
-        debug_assert_eq!(self.refs.iter().map(|f| f.poc).collect::<Vec<_>>(), want, "the slice's reference picture set promised these");
+        debug_assert_eq!(
+            self.refs.iter().map(|f| f.poc).collect::<Vec<_>>(),
+            want,
+            "the slice's reference picture set promised these"
+        );
     }
 
     /// How many reference pictures the encoder holds: two for the B
@@ -1291,7 +1429,14 @@ impl<S: Sample> Core<S> {
     /// `fit_b` false codes a B picture under a table of defaults whatever
     /// its fit says: the alternative `code_attempt` prices a fitted table
     /// against. It changes nothing for a P picture.
-    fn code_inter_picture(&mut self, c: Coded, src: &[S], qp: u8, bypass: bool, fit_b: bool) -> Result<Attempt<S>> {
+    fn code_inter_picture(
+        &mut self,
+        c: Coded,
+        src: &[S],
+        qp: u8,
+        bypass: bool,
+        fit_b: bool,
+    ) -> Result<Attempt<S>> {
         let g = self.geom;
         let pps_qp = self.pps_qp;
         let (dw, dh) = (self.cfg.width as usize, self.cfg.height as usize);
@@ -1361,11 +1506,22 @@ impl<S: Sample> Core<S> {
         // from the reference picture set, so index 0 must be the nearest.
         // A B picture takes one past reference: its second list is the
         // future anchor, and `max_refs` names the P choice only.
-        let mut l0: Vec<&crate::hevc::frame::Frame<S>> = self.refs.iter().filter(|f| f.poc < cur).collect();
+        let mut l0: Vec<&crate::hevc::frame::Frame<S>> =
+            self.refs.iter().filter(|f| f.poc < cur).collect();
         l0.sort_by_key(|f| -f.poc);
-        l0.truncate(if c.kind == Kind::B { 1 } else { (self.cfg.max_refs.max(1) as usize).min(l0.len()) });
-        let past = *l0.first().ok_or_else(|| Error::bitstream("H.265 encode: an inter picture with no past reference"))?;
-        let future = self.refs.iter().filter(|f| f.poc > cur).min_by_key(|f| f.poc);
+        l0.truncate(if c.kind == Kind::B {
+            1
+        } else {
+            (self.cfg.max_refs.max(1) as usize).min(l0.len())
+        });
+        let past = *l0.first().ok_or_else(|| {
+            Error::bitstream("H.265 encode: an inter picture with no past reference")
+        })?;
+        let future = self
+            .refs
+            .iter()
+            .filter(|f| f.poc > cur)
+            .min_by_key(|f| f.poc);
         if c.kind == Kind::B && future.is_none() {
             return Err(Error::bitstream(
                 "H.265 encode: a B picture with no future reference",
@@ -1420,8 +1576,24 @@ impl<S: Sample> Core<S> {
                 let luma = h265_wp::fit_plane(&dist, &src[..dw * dh], dw, &rf.y, dw, dh, bit_depth);
                 let (cb, cr) = if cat != 0 {
                     (
-                        h265_wp::fit_plane(&dist, &src[dw * dh..dw * dh + cdw * cdh], cdw, &rf.cb, cdw, cdh, bit_depth),
-                        h265_wp::fit_plane(&dist, &src[dw * dh + cdw * cdh..], cdw, &rf.cr, cdw, cdh, bit_depth),
+                        h265_wp::fit_plane(
+                            &dist,
+                            &src[dw * dh..dw * dh + cdw * cdh],
+                            cdw,
+                            &rf.cb,
+                            cdw,
+                            cdh,
+                            bit_depth,
+                        ),
+                        h265_wp::fit_plane(
+                            &dist,
+                            &src[dw * dh + cdw * cdh..],
+                            cdw,
+                            &rf.cr,
+                            cdw,
+                            cdh,
+                            bit_depth,
+                        ),
                     )
                 } else {
                     (identity, identity)
@@ -1432,13 +1604,29 @@ impl<S: Sample> Core<S> {
             // older reference of a fade is further down the ramp and
             // wants a different gain, and a B picture's two anchors sit on
             // either side of it, so each list's gain is its own too.
-            let l1: Vec<&crate::hevc::frame::Frame<S>> = if c.kind == Kind::B { future.into_iter().collect() } else { Vec::new() };
-            let fits: [Vec<[h265_wp::PlaneFit; 3]>; 2] = [l0.iter().map(&fit).collect(), l1.iter().map(&fit).collect()];
-            let entries = |list: &[[h265_wp::PlaneFit; 3]]| list.iter().map(|f| h265_wp::entry_for(*f, bit_depth, bit_depth)).collect();
-            (h265_wp::table_for([entries(&fits[0]), entries(&fits[1])]), fits)
+            let l1: Vec<&crate::hevc::frame::Frame<S>> = if c.kind == Kind::B {
+                future.into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            let fits: [Vec<[h265_wp::PlaneFit; 3]>; 2] =
+                [l0.iter().map(&fit).collect(), l1.iter().map(&fit).collect()];
+            let entries = |list: &[[h265_wp::PlaneFit; 3]]| {
+                list.iter()
+                    .map(|f| h265_wp::entry_for(*f, bit_depth, bit_depth))
+                    .collect()
+            };
+            (
+                h265_wp::table_for([entries(&fits[0]), entries(&fits[1])]),
+                fits,
+            )
         });
         match (&wp, c.kind) {
-            (Some((t, _)), Kind::P) => pic.wp = (0..l0.len()).map(|r| explicit_weighting(t, bit_depth, bit_depth, [r as i8, -1])).collect(),
+            (Some((t, _)), Kind::P) => {
+                pic.wp = (0..l0.len())
+                    .map(|r| explicit_weighting(t, bit_depth, bit_depth, [r as i8, -1]))
+                    .collect()
+            }
             // A B slice's three predictions — list 0, list 1, both — each
             // weighted as the reader derives it for reference 0 of the
             // lists it uses. A table whose every entry is the default
@@ -1446,8 +1634,19 @@ impl<S: Sample> Core<S> {
             // bi alike (`w = 1 << denom` and `o = 0` reduce 8.5.3.3.4.3 to
             // 8.5.3.3.4.2), so it leaves the walk on default weighting and
             // its fused kernels.
-            (Some((t, fits)), Kind::B) if fits.iter().flatten().any(|f| f.iter().any(h265_wp::PlaneFit::used)) => {
-                pic.set_b_weights(t, bit_depth, bit_depth, past, future.expect("a B picture has a future anchor (checked above)"));
+            (Some((t, fits)), Kind::B)
+                if fits
+                    .iter()
+                    .flatten()
+                    .any(|f| f.iter().any(h265_wp::PlaneFit::used)) =>
+            {
+                pic.set_b_weights(
+                    t,
+                    bit_depth,
+                    bit_depth,
+                    past,
+                    future.expect("a B picture has a future anchor (checked above)"),
+                );
             }
             _ => {}
         }
@@ -1479,7 +1678,12 @@ impl<S: Sample> Core<S> {
                 // following P picture with three or more references then
                 // named a picture libavcodec had already dropped ("Could
                 // not find ref with POC 0").
-                kept_deltas: self.refs_after(&c).into_iter().filter(|p| *p != cur && !used.contains(p)).map(|poc| poc - cur).collect(),
+                kept_deltas: self
+                    .refs_after(&c)
+                    .into_iter()
+                    .filter(|p| *p != cur && !used.contains(p))
+                    .map(|poc| poc - cur)
+                    .collect(),
                 // As in `code_picture`, and from the same switch.
                 sao: sao_flags(self.cfg.sao, cat),
                 // The table a P slice must carry under `weighted_pred_flag`
@@ -1515,8 +1719,16 @@ impl<S: Sample> Core<S> {
         let max_depth = self.tree_depth();
         let log2_qg = self.log2_qg();
         let offsets = self.aq_offsets(&py, cw, ch, log2_qg);
-        let want = |x: usize, y: usize, log2: u32| cu_want(qp, offsets.as_deref(), cw, log2_qg, x, y, log2);
-        let src = Srcs { y: &py, y_stride: cw, cb: &pcb, cr: &pcr, c_stride: ccw };
+        let want = |x: usize, y: usize, log2: u32| {
+            cu_want(qp, offsets.as_deref(), cw, log2_qg, x, y, log2)
+        };
+        let src = Srcs {
+            y: &py,
+            y_stride: cw,
+            cb: &pcb,
+            cr: &pcr,
+            c_stride: ccw,
+        };
         let refs = match future {
             Some(r1) if c.kind == Kind::B => TreeRefs::B(past, r1),
             _ => TreeRefs::P(&l0),
@@ -1531,7 +1743,10 @@ impl<S: Sample> Core<S> {
                     continue;
                 }
                 let (x0, y0) = (cxu << g.log2_ctb, cy << g.log2_ctb);
-                let cctx = IntraCtx { qp: want(x0, y0, g.log2_ctb), ..mctx };
+                let cctx = IntraCtx {
+                    qp: want(x0, y0, g.log2_ctb),
+                    ..mctx
+                };
                 let d = match future {
                     Some(r1) if c.kind == Kind::B => {
                         pic.code_ctu_b(&cctx, past, r1, cxu, cy, &py, cw, &pcb, &pcr, ccw)
@@ -1546,11 +1761,20 @@ impl<S: Sample> Core<S> {
                 // reconstructed beside it, which the PPS's
                 // `constrained_intra_pred_flag` 0 makes references.
                 let coded = if matches!(d.kind, InterCuKind::UseIntra) {
-                    PCuDecision::Intra(Box::new(pic.code_ctu_intra(&cctx, cxu, cy, &py, cw, &pcb, &pcr, ccw)))
+                    PCuDecision::Intra(Box::new(
+                        pic.code_ctu_intra(&cctx, cxu, cy, &py, cw, &pcb, &pcr, ccw),
+                    ))
                 } else {
                     PCuDecision::Inter(d)
                 };
-                cus.push(TreeCu { x0, y0, log2: g.log2_ctb, depth: 0, bits: 0.0, d: coded });
+                cus.push(TreeCu {
+                    x0,
+                    y0,
+                    log2: g.log2_ctb,
+                    depth: 0,
+                    bits: 0.0,
+                    d: coded,
+                });
             }
         }
         ctu_start.push(cus.len());
@@ -1570,19 +1794,36 @@ impl<S: Sample> Core<S> {
             if fits.iter().flatten().any(|f| f[0].used()) {
                 wp_stats.0 = 1;
                 for cu in &cus {
-                    let PCuDecision::Inter(d) = &cu.d else { continue };
+                    let PCuDecision::Inter(d) = &cu.d else {
+                        continue;
+                    };
                     // A CU counts when a list it predicts from carries a
                     // chosen luma fit; a bi CU is scored as the pair.
                     let ref_idx = [d.ref_idx, d.ref_idx_l1];
-                    let fitted = |list: usize| ref_idx[list] >= 0 && fits[list][ref_idx[list] as usize][0].used();
+                    let fitted = |list: usize| {
+                        ref_idx[list] >= 0 && fits[list][ref_idx[list] as usize][0].used()
+                    };
                     if !fitted(0) && !fitted(1) {
                         continue;
                     }
                     let (plain, weighted) = match refs {
-                        TreeRefs::B(r0, r1) => pic.weighting_gain_b(&mctx, r0, r1, cu.x0, cu.y0, cu.log2, &py, cw, [d.mv, d.mv_l1], ref_idx),
+                        TreeRefs::B(r0, r1) => pic.weighting_gain_b(
+                            &mctx,
+                            r0,
+                            r1,
+                            cu.x0,
+                            cu.y0,
+                            cu.log2,
+                            &py,
+                            cw,
+                            [d.mv, d.mv_l1],
+                            ref_idx,
+                        ),
                         TreeRefs::P(_) => {
                             let r = d.ref_idx as usize;
-                            pic.weighting_gain(&mctx, l0[r], r, cu.x0, cu.y0, cu.log2, &py, cw, d.mv)
+                            pic.weighting_gain(
+                                &mctx, l0[r], r, cu.x0, cu.y0, cu.log2, &py, cw, d.mv,
+                            )
                         }
                     };
                     wp_stats.1 += u64::from(weighted < plain);
@@ -1610,7 +1851,9 @@ impl<S: Sample> Core<S> {
         census.wp_lost += wp_stats.2;
         {
             let mut e = CabacEncoder::new(&mut w);
-            let mut chain = offsets.is_some().then(|| QgChain::new(i32::from(qp), bit_depth, &g, log2_qg));
+            let mut chain = offsets
+                .is_some()
+                .then(|| QgChain::new(i32::from(qp), bit_depth, &g, log2_qg));
             // cu_skip_flag's context counts *skipped* available
             // neighbours and split_cu_flag's counts deeper ones; the tree
             // context carries both, per 4x4, as the units are written.
@@ -1620,12 +1863,44 @@ impl<S: Sample> Core<S> {
             for cy in 0..hc {
                 for cxu in 0..wc {
                     let addr = cy * wc + cxu;
-                    write_sao_for(&mut e, &mut cx, plan.as_ref(), addr, cxu, cy, bit_depth, cat);
+                    write_sao_for(
+                        &mut e,
+                        &mut cx,
+                        plan.as_ref(),
+                        addr,
+                        cxu,
+                        cy,
+                        bit_depth,
+                        cat,
+                    );
                     let ctu = &cus[ctu_start[addr]..ctu_start[addr + 1]];
-                    census.qp_delta += write_tree(&mut e, &mut cx, ctu, (cxu << g.log2_ctb, cy << g.log2_ctb), g.log2_ctb, &mut tc, chain.as_mut(), &mut |e, cx, cu, left, above, delta| match &cu.d {
-                        PCuDecision::Inter(d) => write_cu_inter(e, cx, d, left, above, cat, bypass, delta, nref, cu.depth, c.kind == Kind::B),
-                        PCuDecision::Intra(d) => write_cu_intra_in_p(e, cx, d, left, above, cat, bypass, delta),
-                    });
+                    census.qp_delta += write_tree(
+                        &mut e,
+                        &mut cx,
+                        ctu,
+                        (cxu << g.log2_ctb, cy << g.log2_ctb),
+                        g.log2_ctb,
+                        &mut tc,
+                        chain.as_mut(),
+                        &mut |e, cx, cu, left, above, delta| match &cu.d {
+                            PCuDecision::Inter(d) => write_cu_inter(
+                                e,
+                                cx,
+                                d,
+                                left,
+                                above,
+                                cat,
+                                bypass,
+                                delta,
+                                nref,
+                                cu.depth,
+                                c.kind == Kind::B,
+                            ),
+                            PCuDecision::Intra(d) => {
+                                write_cu_intra_in_p(e, cx, d, left, above, cat, bypass, delta)
+                            }
+                        },
+                    );
                     e.encode_terminate(u32::from(cy == hc - 1 && cxu == wc - 1));
                 }
             }
@@ -1637,7 +1912,11 @@ impl<S: Sample> Core<S> {
         let mut out = Vec::new();
         // A picture nothing will reference is a sub-layer non-reference
         // picture, and saying so lets a decoder discard it.
-        let nal = if c.reference { syn::NAL_TRAIL_R } else { syn::NAL_TRAIL_N };
+        let nal = if c.reference {
+            syn::NAL_TRAIL_R
+        } else {
+            syn::NAL_TRAIL_N
+        };
         out.extend_from_slice(&syn::annexb(nal, &w.into_nal()));
 
         let mut rec = Vec::with_capacity(self.frame_bytes);
@@ -1666,7 +1945,12 @@ impl<S: Sample> Core<S> {
             frame: pic.recon,
             clears_refs: false,
             census,
-            b_fitted: c.kind == Kind::B && wp.as_ref().is_some_and(|(_, fits)| fits.iter().flatten().any(|f| f.iter().any(h265_wp::PlaneFit::used))),
+            b_fitted: c.kind == Kind::B
+                && wp.as_ref().is_some_and(|(_, fits)| {
+                    fits.iter()
+                        .flatten()
+                        .any(|f| f.iter().any(h265_wp::PlaneFit::used))
+                }),
         })
     }
 
@@ -1676,7 +1960,17 @@ impl<S: Sample> Core<S> {
     /// and the decisions keep the context's. Reads the configuration
     /// only: an attempt stays free of writes to `self`.
     fn aq_offsets(&self, py: &[S], cw: usize, ch: usize, log2_qg: u32) -> Option<Vec<i32>> {
-        (self.cfg.aq_strength > 0.0).then(|| aq::ctb_offsets(py, cw, cw, ch, log2_qg, self.cfg.bit_depth, self.cfg.aq_strength))
+        (self.cfg.aq_strength > 0.0).then(|| {
+            aq::ctb_offsets(
+                py,
+                cw,
+                cw,
+                ch,
+                log2_qg,
+                self.cfg.bit_depth,
+                self.cfg.aq_strength,
+            )
+        })
     }
 
     /// How many quadtree levels below the CTB this stream's units may
@@ -1849,7 +2143,8 @@ impl PicCost {
     /// `qp_ref` can cost: [`REF_NOISE_AT_45`] of the intra cost, scaled
     /// by the reference's step size.
     fn inter_floor(&self, qp_ref: i32) -> u64 {
-        (self.intra as f64 * REF_NOISE_AT_45 * 2f64.powf((qp_ref - 45) as f64 / REF_NOISE_HALVING)) as u64
+        (self.intra as f64 * REF_NOISE_AT_45 * 2f64.powf((qp_ref - 45) as f64 / REF_NOISE_HALVING))
+            as u64
     }
 
     /// Measure a `w` by `h` luma plane (stride `w`) of `bit_depth`-bit
@@ -1866,7 +2161,13 @@ impl PicCost {
     /// under `--lookahead 8` at 96 kbps seeded its keyframe at 41 against 29
     /// for the 8-bit clip, spent 3496 of 12287 planned bits and ended at
     /// 0.77x of target. So each sum is shifted down by `bit_depth - 8`.
-    fn measure<S: Sample>(luma: &[S], w: usize, h: usize, prev: Option<&[S]>, bit_depth: u32) -> Self {
+    fn measure<S: Sample>(
+        luma: &[S],
+        w: usize,
+        h: usize,
+        prev: Option<&[S]>,
+        bit_depth: u32,
+    ) -> Self {
         let dist = DistortionDsp::<S>::new(Cpu::detect_honouring_env());
         let (bw, bh) = (w / 8, h / 8);
         let mut flat = [S::default(); 64];
@@ -1898,7 +2199,8 @@ impl PicCost {
                     let mean = (diff + if diff >= 0 { 32 } else { -32 }) / 64;
                     for y in 0..8 {
                         for x in 0..8 {
-                            shifted[y * 8 + x] = S::from_i32((p[at + y * w + x].to_i32() + mean).clamp(0, top));
+                            shifted[y * 8 + x] =
+                                S::from_i32((p[at + y * w + x].to_i32() + mean).clamp(0, top));
                         }
                     }
                     inter_ac += u64::from((dist.satd)(block, w, &shifted, 8, 8, 8));
@@ -1907,10 +2209,25 @@ impl PicCost {
             }
         }
         let shift = bit_depth.saturating_sub(8);
-        let (intra, inter, inter_ac, dc) = (intra >> shift, inter >> shift, inter_ac >> shift, dc >> shift);
+        let (intra, inter, inter_ac, dc) = (
+            intra >> shift,
+            inter >> shift,
+            inter_ac >> shift,
+            dc >> shift,
+        );
         match prev {
-            Some(_) => PicCost { intra, inter, inter_ac, dc },
-            None => PicCost { intra, inter: intra, inter_ac: intra, dc: 0 },
+            Some(_) => PicCost {
+                intra,
+                inter,
+                inter_ac,
+                dc,
+            },
+            None => PicCost {
+                intra,
+                inter: intra,
+                inter_ac: intra,
+                dc: 0,
+            },
         }
     }
 }
@@ -1926,7 +2243,9 @@ pub const DEFAULT_CU_DEPTH: u32 = 2;
 /// [`DEFAULT_CU_DEPTH`] when it asks nothing, held above the 8x8 minimum
 /// coding block — so a 16x16 CTB splits at most once.
 fn tree_depth(cfg: &Config, g: &syn::Geometry) -> u32 {
-    cfg.max_cu_depth.unwrap_or(DEFAULT_CU_DEPTH).min(g.log2_ctb - MIN_CB_LOG2)
+    cfg.max_cu_depth
+        .unwrap_or(DEFAULT_CU_DEPTH)
+        .min(g.log2_ctb - MIN_CB_LOG2)
 }
 
 /// The quantiser the unit of `1 << log2` at `(x0, y0)` codes at: the
@@ -1940,8 +2259,18 @@ fn tree_depth(cfg: &Config, g: &syn::Geometry) -> u32 {
 /// quantisation group restarts at every quadtree node at least the group
 /// size), so it takes the rounded mean of the offsets it covers — the one
 /// quantiser a single delta can give it.
-fn cu_want(pic_qp: u8, offsets: Option<&[i32]>, width: usize, log2_qg: u32, x0: usize, y0: usize, log2: u32) -> i32 {
-    let Some(o) = offsets else { return i32::from(pic_qp) };
+fn cu_want(
+    pic_qp: u8,
+    offsets: Option<&[i32]>,
+    width: usize,
+    log2_qg: u32,
+    x0: usize,
+    y0: usize,
+    log2: u32,
+) -> i32 {
+    let Some(o) = offsets else {
+        return i32::from(pic_qp);
+    };
     let wq = width.div_ceil(1 << log2_qg);
     let (gx, gy) = (x0 >> log2_qg, y0 >> log2_qg);
     let off = if log2 <= log2_qg {
@@ -2074,7 +2403,10 @@ impl QgChain {
             self.delta = want - pred;
         }
         let qp_y = qp_y_from_pred(pred, self.delta, self.bit_depth);
-        debug_assert!(!has_cbf || qp_y == want, "a unit with a cbf must hold the quantiser it was coded at ({want}), not {qp_y}");
+        debug_assert!(
+            !has_cbf || qp_y == want,
+            "a unit with a cbf must hold the quantiser it was coded at ({want}), not {qp_y}"
+        );
         self.hold(x0, y0, log2, qp_y);
         qp_y
     }
@@ -2148,7 +2480,14 @@ enum TreeStep {
     /// `split_cu_flag` is coded here when `flag` — above the minimum coding
     /// block and wholly inside the picture; a node crossing the picture
     /// edge is split by inference.
-    Enter { x0: usize, y0: usize, log2: u32, depth: u32, split: bool, flag: bool },
+    Enter {
+        x0: usize,
+        y0: usize,
+        log2: u32,
+        depth: u32,
+        split: bool,
+        flag: bool,
+    },
     /// The coding unit at this index of the CTB's units.
     Unit(usize),
     /// The node ends: a quantisation group may end.
@@ -2164,17 +2503,45 @@ enum TreeStep {
 /// flag and a child starting outside the picture is not visited, which is
 /// `coding_quadtree`'s inference (the flag is read only where `x0 + size <=
 /// pic_width` and `y0 + size <= pic_height`), mirrored.
-fn tree_steps<D>(ctu: &[TreeCu<D>], (x_ctb, y_ctb): (usize, usize), log2_ctb: u32, (pw, ph): (usize, usize)) -> Vec<TreeStep> {
+fn tree_steps<D>(
+    ctu: &[TreeCu<D>],
+    (x_ctb, y_ctb): (usize, usize),
+    log2_ctb: u32,
+    (pw, ph): (usize, usize),
+) -> Vec<TreeStep> {
     #[allow(clippy::too_many_arguments)]
-    fn node<D>(ctu: &[TreeCu<D>], idx: &mut usize, x0: usize, y0: usize, log2: u32, depth: u32, pic: (usize, usize), out: &mut Vec<TreeStep>) {
+    fn node<D>(
+        ctu: &[TreeCu<D>],
+        idx: &mut usize,
+        x0: usize,
+        y0: usize,
+        log2: u32,
+        depth: u32,
+        pic: (usize, usize),
+        out: &mut Vec<TreeStep>,
+    ) {
         let size = 1usize << log2;
         let inside = x0 + size <= pic.0 && y0 + size <= pic.1;
         let cu = &ctu[*idx];
         let leaf = inside && cu.x0 == x0 && cu.y0 == y0 && cu.log2 == log2;
-        debug_assert!(leaf || (cu.log2 < log2 && log2 > MIN_CB_LOG2), "units do not tile the node of {} at ({x0},{y0})", 1 << log2);
-        out.push(TreeStep::Enter { x0, y0, log2, depth, split: !leaf, flag: inside && log2 > MIN_CB_LOG2 });
+        debug_assert!(
+            leaf || (cu.log2 < log2 && log2 > MIN_CB_LOG2),
+            "units do not tile the node of {} at ({x0},{y0})",
+            1 << log2
+        );
+        out.push(TreeStep::Enter {
+            x0,
+            y0,
+            log2,
+            depth,
+            split: !leaf,
+            flag: inside && log2 > MIN_CB_LOG2,
+        });
         if leaf {
-            debug_assert_eq!(cu.depth, depth, "a unit's recorded depth disagrees with its place in the tree");
+            debug_assert_eq!(
+                cu.depth, depth,
+                "a unit's recorded depth disagrees with its place in the tree"
+            );
             out.push(TreeStep::Unit(*idx));
             *idx += 1;
         } else {
@@ -2191,23 +2558,44 @@ fn tree_steps<D>(ctu: &[TreeCu<D>], (x_ctb, y_ctb): (usize, usize), log2_ctb: u3
     let mut out = Vec::with_capacity(3 * ctu.len() + 8);
     let mut idx = 0;
     node(ctu, &mut idx, x_ctb, y_ctb, log2_ctb, 0, (pw, ph), &mut out);
-    assert_eq!(idx, ctu.len(), "units left over after the CTB's quadtree was walked");
+    assert_eq!(
+        idx,
+        ctu.len(),
+        "units left over after the CTB's quadtree was walked"
+    );
     out
 }
 
 /// Settle every unit's `QpY` in decode order through `chain` — see
 /// [`QgChain`]. `want` is the quantiser each unit was coded at.
-fn settle_tree<D: CodedUnit>(chain: &mut QgChain, cus: &mut [TreeCu<D>], ctu_start: &[usize], g: &syn::Geometry, want: &dyn Fn(usize, usize, u32) -> i32) {
+fn settle_tree<D: CodedUnit>(
+    chain: &mut QgChain,
+    cus: &mut [TreeCu<D>],
+    ctu_start: &[usize],
+    g: &syn::Geometry,
+    want: &dyn Fn(usize, usize, u32) -> i32,
+) {
     let wc = g.ctbs_wide as usize;
     for (k, range) in ctu_start.windows(2).enumerate() {
         let ctu = &mut cus[range[0]..range[1]];
         let at = ((k % wc) << g.log2_ctb, (k / wc) << g.log2_ctb);
-        for step in tree_steps(ctu, at, g.log2_ctb, (g.coded_width as usize, g.coded_height as usize)) {
+        for step in tree_steps(
+            ctu,
+            at,
+            g.log2_ctb,
+            (g.coded_width as usize, g.coded_height as usize),
+        ) {
             match step {
                 TreeStep::Enter { x0, y0, log2, .. } => chain.enter(x0, y0, log2),
                 TreeStep::Unit(i) => {
                     let cu = &mut ctu[i];
-                    let q = chain.settle(cu.x0, cu.y0, cu.log2, want(cu.x0, cu.y0, cu.log2), cu.d.any_cbf());
+                    let q = chain.settle(
+                        cu.x0,
+                        cu.y0,
+                        cu.log2,
+                        want(cu.x0, cu.y0, cu.log2),
+                        cu.d.any_cbf(),
+                    );
                     cu.d.set_qp_y(q);
                 }
                 TreeStep::Leave { x0, y0, log2 } => chain.leave(x0, y0, log2),
@@ -2232,7 +2620,12 @@ struct TreeCtx {
 impl TreeCtx {
     fn new(g: &syn::Geometry) -> Self {
         let (w4, h4) = (g.coded_width as usize / 4, g.coded_height as usize / 4);
-        TreeCtx { w4, pic: (g.coded_width as usize, g.coded_height as usize), ct_depth: vec![0; w4 * h4], skip: vec![0; w4 * h4] }
+        TreeCtx {
+            w4,
+            pic: (g.coded_width as usize, g.coded_height as usize),
+            ct_depth: vec![0; w4 * h4],
+            skip: vec![0; w4 * h4],
+        }
     }
 
     fn at(&self, grid: &[u8], x: usize, y: usize) -> u8 {
@@ -2243,7 +2636,8 @@ impl TreeCtx {
 /// A leaf writer for [`write_tree`]: the unit, its left and above
 /// neighbours' `cu_skip_flag` where available, and the `CuQpDeltaVal` to
 /// spell in it.
-type LeafWriter<'a, D> = dyn FnMut(&mut CabacEncoder<'_>, &mut Contexts, &TreeCu<D>, Option<bool>, Option<bool>, Option<i32>) + 'a;
+type LeafWriter<'a, D> = dyn FnMut(&mut CabacEncoder<'_>, &mut Contexts, &TreeCu<D>, Option<bool>, Option<bool>, Option<i32>)
+    + 'a;
 
 /// Write one CTB's coding quadtree: every node's `split_cu_flag` in the
 /// reader's order with the reader's neighbour-depth context, each unit
@@ -2263,7 +2657,14 @@ fn write_tree<D: CodedUnit>(
     let mut deltas = 0;
     for step in tree_steps(ctu, at, log2_ctb, tc.pic) {
         match step {
-            TreeStep::Enter { x0, y0, log2, depth, split, flag } => {
+            TreeStep::Enter {
+                x0,
+                y0,
+                log2,
+                depth,
+                split,
+                flag,
+            } => {
                 if flag {
                     let nb = SplitCuNb {
                         left_depth: (x0 > 0).then(|| tc.at(&tc.ct_depth, x0 - 1, y0)),
@@ -2277,14 +2678,24 @@ fn write_tree<D: CodedUnit>(
             }
             TreeStep::Unit(i) => {
                 let cu = &ctu[i];
-                let delta = chain.as_deref_mut().and_then(|ch| ch.spell(cu.x0, cu.y0, cu.log2, cu.d.qp_y(), cu.d.any_cbf()));
+                let delta = chain
+                    .as_deref_mut()
+                    .and_then(|ch| ch.spell(cu.x0, cu.y0, cu.log2, cu.d.qp_y(), cu.d.any_cbf()));
                 deltas += u64::from(delta.is_some());
                 let left = (cu.x0 > 0).then(|| tc.at(&tc.skip, cu.x0 - 1, cu.y0) != 0);
                 let above = (cu.y0 > 0).then(|| tc.at(&tc.skip, cu.x0, cu.y0 - 1) != 0);
                 leaf(e, cx, cu, left, above, delta);
                 let n = 1usize << cu.log2;
                 PicInfo::fill4(&mut tc.ct_depth, tc.w4, cu.x0, cu.y0, n, n, cu.depth as u8);
-                PicInfo::fill4(&mut tc.skip, tc.w4, cu.x0, cu.y0, n, n, u8::from(cu.d.skipped()));
+                PicInfo::fill4(
+                    &mut tc.skip,
+                    tc.w4,
+                    cu.x0,
+                    cu.y0,
+                    n,
+                    n,
+                    u8::from(cu.d.skipped()),
+                );
             }
             TreeStep::Leave { x0, y0, log2 } => {
                 if let Some(ch) = chain.as_deref_mut() {
@@ -2303,7 +2714,16 @@ fn write_tree<D: CodedUnit>(
 pub(crate) fn split_flag_bits(init_type: usize, qp: i32, split: bool) -> f32 {
     let mut cx = Contexts::new(init_type, qp);
     let mut e = CabacEncoder::counting();
-    write_split_cu_flag(&mut e, &mut cx, &SplitCuNb { left_depth: None, above_depth: None }, 0, split);
+    write_split_cu_flag(
+        &mut e,
+        &mut cx,
+        &SplitCuNb {
+            left_depth: None,
+            above_depth: None,
+        },
+        0,
+        split,
+    );
     e.fractional_bits() as f32
 }
 
@@ -2321,12 +2741,24 @@ pub(crate) fn intra_cu_bits(d: &CuDecision, cat: u32, qp: i32, pps_bypass: bool)
 /// with neutral skip contexts, `nref` active list-0 references and the
 /// unit at quadtree depth `depth`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn p_cu_bits(d: &PCuDecision, cat: u32, qp: i32, pps_bypass: bool, is_b: bool, nref: u32, depth: u32) -> f32 {
+pub(crate) fn p_cu_bits(
+    d: &PCuDecision,
+    cat: u32,
+    qp: i32,
+    pps_bypass: bool,
+    is_b: bool,
+    nref: u32,
+    depth: u32,
+) -> f32 {
     let mut cx = Contexts::new(if is_b { 2 } else { 1 }, qp);
     let mut e = CabacEncoder::counting();
     match d {
-        PCuDecision::Inter(d) => write_cu_inter(&mut e, &mut cx, d, None, None, cat, pps_bypass, None, nref, depth, is_b),
-        PCuDecision::Intra(d) => write_cu_intra_in_p(&mut e, &mut cx, d, None, None, cat, pps_bypass, None),
+        PCuDecision::Inter(d) => write_cu_inter(
+            &mut e, &mut cx, d, None, None, cat, pps_bypass, None, nref, depth, is_b,
+        ),
+        PCuDecision::Intra(d) => {
+            write_cu_intra_in_p(&mut e, &mut cx, d, None, None, cat, pps_bypass, None)
+        }
     }
     e.fractional_bits() as f32
 }
@@ -2458,7 +2890,9 @@ impl KindCensus {
                         InterCuKind::Parts => match d.part {
                             crate::hevc::ctu::PartMode::P2NxN => c.part_2nxn += 1,
                             crate::hevc::ctu::PartMode::PNx2N => c.part_nx2n += 1,
-                            other => unreachable!("an inter shape this encoder does not decide: {other:?}"),
+                            other => unreachable!(
+                                "an inter shape this encoder does not decide: {other:?}"
+                            ),
                         },
                         InterCuKind::UseIntra => unreachable!("replaced by the intra decision"),
                     }
@@ -2548,7 +2982,10 @@ fn model_bits<D>(cus: &[TreeCu<D>]) -> u64 {
 /// choosing `type_idx` 0; a cleared slice flag would instead forbid the
 /// choice picture-wide for one bit.
 fn sao_flags(sao: bool, cat: u32) -> Option<syn::SaoFlags> {
-    sao.then(|| syn::SaoFlags { luma: true, chroma: (cat != 0).then_some(true) })
+    sao.then(|| syn::SaoFlags {
+        luma: true,
+        chroma: (cat != 0).then_some(true),
+    })
 }
 
 /// The parameter sets a picture is coded against, parsed back through the
@@ -2557,12 +2994,28 @@ fn sao_flags(sao: bool, cat: u32) -> Option<syn::SaoFlags> {
 /// building them from the very bytes the stream carries is what keeps the
 /// encoder's idea of the geometry and the decoder's identical.
 #[allow(clippy::too_many_arguments)]
-fn parsed_sets(cfg: &Config, g: &syn::Geometry, qp: i32, bypass: bool, deblock: bool, cpb: Option<&Cpb>, opts: &PpsOptions) -> (crate::hevc::sps::Sps, crate::hevc::pps::Pps) {
-    let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(cfg, g, LOG2_MAX_POC_LSB, cpb)))
-        .expect("the encoder's own SPS parses");
-    let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps_opts(qp, bypass, deblock, opts)))
-        .expect("the encoder's own PPS parses");
-    pps.resolve_tiles(&sps).expect("one tile covering the picture");
+fn parsed_sets(
+    cfg: &Config,
+    g: &syn::Geometry,
+    qp: i32,
+    bypass: bool,
+    deblock: bool,
+    cpb: Option<&Cpb>,
+    opts: &PpsOptions,
+) -> (crate::hevc::sps::Sps, crate::hevc::pps::Pps) {
+    let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(
+        cfg,
+        g,
+        LOG2_MAX_POC_LSB,
+        cpb,
+    )))
+    .expect("the encoder's own SPS parses");
+    let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps_opts(
+        qp, bypass, deblock, opts,
+    )))
+    .expect("the encoder's own PPS parses");
+    pps.resolve_tiles(&sps)
+        .expect("one tile covering the picture");
     (sps, pps)
 }
 
@@ -2573,7 +3026,16 @@ fn parsed_sets(cfg: &Config, g: &syn::Geometry, qp: i32, bypass: bool, deblock: 
 /// Called at the top of every CTU, ahead of the coding quadtree, which is
 /// where `decode_ctu` reads it.
 #[allow(clippy::too_many_arguments)]
-fn write_sao_for(e: &mut CabacEncoder, cx: &mut Contexts, plan: Option<&SaoPlan>, addr: usize, cxu: usize, cy: usize, bit_depth: u32, cat: u32) {
+fn write_sao_for(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    plan: Option<&SaoPlan>,
+    addr: usize,
+    cxu: usize,
+    cy: usize,
+    bit_depth: u32,
+    cat: u32,
+) {
     let Some(plan) = plan else { return };
     let sctx = SaoCtx {
         sao_luma: true,
@@ -2593,7 +3055,10 @@ fn write_sao_for(e: &mut CabacEncoder, cx: &mut Contexts, plan: Option<&SaoPlan>
     };
     // One slice, one tile: the reader's availability test for the merge
     // flags is exactly the picture edge.
-    let nb = SaoMergeNb { left: cxu > 0, up: cy > 0 };
+    let nb = SaoMergeNb {
+        left: cxu > 0,
+        up: cy > 0,
+    };
     write_sao(e, cx, &sctx, &nb, plan.merges[addr], &plan.params[addr]);
 }
 
@@ -2636,8 +3101,14 @@ fn write_cu_inter(
     is_b: bool,
 ) {
     let log2 = d.log2_cu;
-    debug_assert!(pps_bypass || !d.bypass, "a bypass CU is unspellable unless the PPS enables the flag");
-    debug_assert!(u32::from(d.ref_idx.max(0) as u8) < nref.max(1), "a CU naming a reference beyond the active list");
+    debug_assert!(
+        pps_bypass || !d.bypass,
+        "a bypass CU is unspellable unless the PPS enables the flag"
+    );
+    debug_assert!(
+        u32::from(d.ref_idx.max(0) as u8) < nref.max(1),
+        "a CU naming a reference beyond the active list"
+    );
     // The unit's `split_cu_flag`, and the quadtree above it, are the
     // tree walk's to write (`write_tree`); this spells the coding unit.
     // cu_transquant_bypass_flag is the CU's VERY FIRST bin - `coding_unit`
@@ -2654,7 +3125,10 @@ fn write_cu_inter(
     // A quantiser delta rides in the transform tree, so a CU without one
     // — skipped, or root cbf 0 below — cannot have been handed a delta:
     // the reader would take no bin for it.
-    debug_assert!(qp_delta.is_none() || d.rqt_root_cbf, "a quantiser delta was handed to a CU with no transform tree");
+    debug_assert!(
+        qp_delta.is_none() || d.rqt_root_cbf,
+        "a quantiser delta was handed to a CU with no transform tree"
+    );
     if let InterCuKind::Skip { merge_idx } = d.kind {
         write_merge_idx(e, cx, MAX_MERGE_CAND as u32, u32::from(merge_idx));
         return;
@@ -2685,7 +3159,10 @@ fn write_cu_inter(
             write_merge_idx(e, cx, MAX_MERGE_CAND as u32, u32::from(merge_idx));
             // No rqt_root_cbf: the reader infers it true, so the tree
             // below is not optional here.
-            debug_assert!(d.rqt_root_cbf, "a merge CU with no residual must be spelled as a skip");
+            debug_assert!(
+                d.rqt_root_cbf,
+                "a merge CU with no residual must be spelled as a skip"
+            );
         }
         InterCuKind::Amvp { mvp_flag, mvd } => {
             write_merge_flag(e, cx, false);
@@ -2759,12 +3236,15 @@ fn write_cu_inter(
     // never carry the bin at all and must genuinely have luma
     // coefficients; the decision module guarantees that by spelling a
     // residual-free CU as a skip or as rqt_root_cbf 0.
-    let any_chroma_cbf =
-        cat != 0 && (d.cbf_chroma[0] || d.cbf_chroma[1] || d.cbf_chroma_bot[0] || d.cbf_chroma_bot[1]);
+    let any_chroma_cbf = cat != 0
+        && (d.cbf_chroma[0] || d.cbf_chroma[1] || d.cbf_chroma_bot[0] || d.cbf_chroma_bot[1]);
     if any_chroma_cbf {
         write_cbf_luma(e, cx, 0, d.cbf_luma);
     } else {
-        debug_assert!(d.cbf_luma, "an inter leaf with no chroma cbf has cbf_luma inferred 1");
+        debug_assert!(
+            d.cbf_luma,
+            "an inter leaf with no chroma cbf has cbf_luma inferred 1"
+        );
     }
     // cu_qp_delta_abs / sign, where `transform_unit` reads it: after the
     // cbfs and before any residual. This single depth-0 unit is the first
@@ -2809,9 +3289,18 @@ fn write_cu_inter(
         for comp in 0..2 {
             let pair = if cat == 2 { 2 } else { 1 };
             for t in 0..pair {
-                let cbf = if t == 0 { d.cbf_chroma[comp] } else { d.cbf_chroma_bot[comp] };
+                let cbf = if t == 0 {
+                    d.cbf_chroma[comp]
+                } else {
+                    d.cbf_chroma_bot[comp]
+                };
                 if cbf {
-                    write_residual(e, cx, &params(log2c, comp + 1), &d.chroma[comp][t * nc2..(t + 1) * nc2]);
+                    write_residual(
+                        e,
+                        cx,
+                        &params(log2c, comp + 1),
+                        &d.chroma[comp][t * nc2..(t + 1) * nc2],
+                    );
                 }
             }
         }
@@ -2841,8 +3330,20 @@ fn write_cu_inter(
 /// CU carries a cbf for the reader to read it under — the encoder's
 /// quantiser chain decides both; see [`write_cu_intra_body`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_ctu_intra(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, ctu_x: usize, ctu_y: usize, pps_bypass: bool, cat: u32, qp_delta: Option<i32>) {
-    debug_assert!(pps_bypass || !d.bypass, "a bypass CU is unspellable unless the PPS enables the flag");
+pub(crate) fn write_ctu_intra(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &CuDecision,
+    ctu_x: usize,
+    ctu_y: usize,
+    pps_bypass: bool,
+    cat: u32,
+    qp_delta: Option<i32>,
+) {
+    debug_assert!(
+        pps_bypass || !d.bypass,
+        "a bypass CU is unspellable unless the PPS enables the flag"
+    );
     // A whole-CTB unit: every coded neighbour has depth 0, and in a single
     // slice availability is picture geometry. (The quadtree walk writes its
     // own flags with the real neighbour depths; this serves the rate model.)
@@ -2857,8 +3358,18 @@ pub(crate) fn write_ctu_intra(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDec
 /// One intra coding unit of an **I** slice, without the quadtree around
 /// it: what [`write_ctu_intra`] spells after its `split_cu_flag`, and what
 /// the quadtree walk spells for every unit of an I picture.
-pub(crate) fn write_cu_intra_i(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, pps_bypass: bool, cat: u32, qp_delta: Option<i32>) {
-    debug_assert!(pps_bypass || !d.bypass, "a bypass CU is unspellable unless the PPS enables the flag");
+pub(crate) fn write_cu_intra_i(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &CuDecision,
+    pps_bypass: bool,
+    cat: u32,
+    qp_delta: Option<i32>,
+) {
+    debug_assert!(
+        pps_bypass || !d.bypass,
+        "a bypass CU is unspellable unless the PPS enables the flag"
+    );
     // An I slice reads no `cu_skip_flag` and no `pred_mode_flag` — both
     // are gated on `slice_type != I` (ctu.rs:405, ctu.rs:434) — so the
     // CU starts at the bypass flag.
@@ -2906,7 +3417,10 @@ fn write_cu_intra_in_p(
     pps_bypass: bool,
     qp_delta: Option<i32>,
 ) {
-    debug_assert!(pps_bypass || !d.bypass, "a bypass CU is unspellable unless the PPS enables the flag");
+    debug_assert!(
+        pps_bypass || !d.bypass,
+        "a bypass CU is unspellable unless the PPS enables the flag"
+    );
     // `coding_unit` reads cu_transquant_bypass_flag BEFORE cu_skip_flag,
     // so it comes first here too.
     if pps_bypass {
@@ -2945,10 +3459,22 @@ fn write_cu_intra_in_p(
 /// (`IsCuQpDeltaCoded` gates the rest). The caller guarantees such a
 /// unit exists (`CuDecision::any_cbf`); a delta left unspelled at the
 /// end is a caller bug and is asserted.
-fn write_cu_intra_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, cat: u32, qp_delta: Option<i32>) {
+fn write_cu_intra_body(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &CuDecision,
+    cat: u32,
+    qp_delta: Option<i32>,
+) {
     let log2 = d.log2_cu;
-    debug_assert!((MIN_CB_LOG2..=5).contains(&log2), "a coding unit is 8x8 to 32x32");
-    debug_assert!(!d.nxn || log2 == MIN_CB_LOG2, "PART_NxN exists only at the minimum CU size");
+    debug_assert!(
+        (MIN_CB_LOG2..=5).contains(&log2),
+        "a coding unit is 8x8 to 32x32"
+    );
+    debug_assert!(
+        !d.nxn || log2 == MIN_CB_LOG2,
+        "PART_NxN exists only at the minimum CU size"
+    );
     if d.nxn {
         write_cu_intra_nxn_body(e, cx, d, cat, qp_delta);
         return;
@@ -3038,12 +3564,20 @@ fn write_cu_intra_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, 
             // The delta, at the first child with a cbf: its luma bin, or
             // the chroma bins it coded just above (which exist only under
             // a set parent bin — the reader infers a clear one otherwise).
-            let child_chroma = cat != 0 && (0..2).any(|comp| d.cbf_chroma[comp] && (d.cbf_chroma_tu[comp][i] || d.cbf_chroma_tu_bot[comp][i]));
+            let child_chroma = cat != 0
+                && (0..2).any(|comp| {
+                    d.cbf_chroma[comp] && (d.cbf_chroma_tu[comp][i] || d.cbf_chroma_tu_bot[comp][i])
+                });
             if pending.is_some() && (d.cbf_luma[4 * i] || child_chroma) {
                 write_cu_qp_delta(e, cx, pending.take().expect("checked"));
             }
             if d.cbf_luma[4 * i] {
-                write_residual(e, cx, &params(log2 - 1, 0, d.luma_modes[0]), &d.luma[i * q..(i + 1) * q]);
+                write_residual(
+                    e,
+                    cx,
+                    &params(log2 - 1, 0, d.luma_modes[0]),
+                    &d.luma[i * q..(i + 1) * q],
+                );
             }
             if cat != 0 {
                 for comp in 0..2 {
@@ -3055,7 +3589,11 @@ fn write_cu_intra_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, 
                     // components outermost, squares within.
                     let pair = if cat == 2 { 2 } else { 1 };
                     for t in 0..pair {
-                        let cbf = if t == 0 { d.cbf_chroma_tu[comp][i] } else { d.cbf_chroma_tu_bot[comp][i] };
+                        let cbf = if t == 0 {
+                            d.cbf_chroma_tu[comp][i]
+                        } else {
+                            d.cbf_chroma_tu_bot[comp][i]
+                        };
                         if cbf {
                             let slot = if cat == 2 { 2 * i + t } else { i };
                             write_residual(
@@ -3069,7 +3607,10 @@ fn write_cu_intra_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, 
                 }
             }
         }
-        debug_assert!(pending.is_none(), "a quantiser delta was handed to a split CU with no coded cbf");
+        debug_assert!(
+            pending.is_none(),
+            "a quantiser delta was handed to a split CU with no coded cbf"
+        );
         return;
     }
 
@@ -3089,7 +3630,8 @@ fn write_cu_intra_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, 
     write_cbf_luma(e, cx, 0, d.cbf_luma[0]);
     if let Some(v) = pending.take() {
         debug_assert!(
-            d.cbf_luma[0] || (cat != 0 && (0..2).any(|comp| d.cbf_chroma[comp] || d.cbf_chroma_bot[comp])),
+            d.cbf_luma[0]
+                || (cat != 0 && (0..2).any(|comp| d.cbf_chroma[comp] || d.cbf_chroma_bot[comp])),
             "a quantiser delta was handed to a CU with no coded cbf"
         );
         write_cu_qp_delta(e, cx, v);
@@ -3105,7 +3647,11 @@ fn write_cu_intra_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, 
         for comp in 0..2 {
             let pair = if cat == 2 { 2 } else { 1 };
             for t in 0..pair {
-                let cbf = if t == 0 { d.cbf_chroma[comp] } else { d.cbf_chroma_bot[comp] };
+                let cbf = if t == 0 {
+                    d.cbf_chroma[comp]
+                } else {
+                    d.cbf_chroma_bot[comp]
+                };
                 if cbf {
                     write_residual(
                         e,
@@ -3141,7 +3687,13 @@ fn write_cu_intra_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, 
 ///   blocks at 4:4:4, Cb then Cr under its own block's chroma mode, and at
 ///   4:2:0 and 4:2:2 the CU's chroma once, after the fourth child
 ///   (`blk_idx == 3`).
-fn write_cu_intra_nxn_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecision, cat: u32, qp_delta: Option<i32>) {
+fn write_cu_intra_nxn_body(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &CuDecision,
+    cat: u32,
+    qp_delta: Option<i32>,
+) {
     let mut pending = qp_delta;
     for pb in 0..4 {
         write_prev_intra_luma_pred_flag(e, cx, d.luma_syntax[pb].prev_flag);
@@ -3186,7 +3738,8 @@ fn write_cu_intra_nxn_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecisi
             }
         }
     }
-    let inherited = cat != 0 && cat != 3 && (0..2).any(|comp| d.cbf_chroma[comp] || d.cbf_chroma_bot[comp]);
+    let inherited =
+        cat != 0 && cat != 3 && (0..2).any(|comp| d.cbf_chroma[comp] || d.cbf_chroma_bot[comp]);
     for i in 0..4 {
         if cat == 3 {
             for comp in 0..2 {
@@ -3196,32 +3749,58 @@ fn write_cu_intra_nxn_body(e: &mut CabacEncoder, cx: &mut Contexts, d: &CuDecisi
             }
         }
         write_cbf_luma(e, cx, 1, d.cbf_luma[4 * i]);
-        let child_chroma = if cat == 3 { (0..2).any(|comp| d.cbf_chroma_tu[comp][i]) } else { inherited };
+        let child_chroma = if cat == 3 {
+            (0..2).any(|comp| d.cbf_chroma_tu[comp][i])
+        } else {
+            inherited
+        };
         if pending.is_some() && (d.cbf_luma[4 * i] || child_chroma) {
             write_cu_qp_delta(e, cx, pending.take().expect("checked"));
         }
         if d.cbf_luma[4 * i] {
-            write_residual(e, cx, &params(0, d.luma_modes[i]), &d.luma[16 * i..16 * i + 16]);
+            write_residual(
+                e,
+                cx,
+                &params(0, d.luma_modes[i]),
+                &d.luma[16 * i..16 * i + 16],
+            );
         }
         if cat == 3 {
             for comp in 0..2 {
                 if d.cbf_chroma_tu[comp][i] {
-                    write_residual(e, cx, &params(comp + 1, d.chroma_mode_nxn[i]), &d.chroma[comp][16 * i..16 * i + 16]);
+                    write_residual(
+                        e,
+                        cx,
+                        &params(comp + 1, d.chroma_mode_nxn[i]),
+                        &d.chroma[comp][16 * i..16 * i + 16],
+                    );
                 }
             }
         } else if cat != 0 && i == 3 {
             for comp in 0..2 {
                 let pair = if cat == 2 { 2 } else { 1 };
                 for t in 0..pair {
-                    let cbf = if t == 0 { d.cbf_chroma[comp] } else { d.cbf_chroma_bot[comp] };
+                    let cbf = if t == 0 {
+                        d.cbf_chroma[comp]
+                    } else {
+                        d.cbf_chroma_bot[comp]
+                    };
                     if cbf {
-                        write_residual(e, cx, &params(comp + 1, d.chroma_mode), &d.chroma[comp][t * 16..(t + 1) * 16]);
+                        write_residual(
+                            e,
+                            cx,
+                            &params(comp + 1, d.chroma_mode),
+                            &d.chroma[comp][t * 16..(t + 1) * 16],
+                        );
                     }
                 }
             }
         }
     }
-    debug_assert!(pending.is_none(), "a quantiser delta was handed to an NxN CU with no coded cbf");
+    debug_assert!(
+        pending.is_none(),
+        "a quantiser delta was handed to an NxN CU with no coded cbf"
+    );
 }
 
 #[cfg(test)]
@@ -3231,7 +3810,12 @@ mod tests {
     use crate::dsp::hevc::install_simd_u8;
 
     fn cfg(w: u32, h: u32, chroma: ChromaFormat) -> Config {
-        Config { width: w, height: h, chroma, ..Config::default() }
+        Config {
+            width: w,
+            height: h,
+            chroma,
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -3243,7 +3827,11 @@ mod tests {
             (ChromaFormat::Yuv444, 3.0),
         ] {
             let e = H265Encoder::new(cfg(64, 64, chroma)).unwrap();
-            assert_eq!(e.frame_bytes(), (64.0 * 64.0 * per_px) as usize, "{chroma:?}");
+            assert_eq!(
+                e.frame_bytes(),
+                (64.0 * 64.0 * per_px) as usize,
+                "{chroma:?}"
+            );
         }
     }
 
@@ -3269,8 +3857,14 @@ mod tests {
         let (a10, b10) = (widen(&a8), widen(&b8));
         let c8 = PicCost::measure(&b8, w, h, Some(&a8[..]), 8);
         let c10 = PicCost::measure(&b10, w, h, Some(&a10[..]), 10);
-        assert!(c8.intra > 10_000 && c8.inter > 10_000, "the pictures must have content to cost: {c8:?}");
-        for (name, a, b) in [("intra", c8.intra, c10.intra), ("inter", c8.inter, c10.inter)] {
+        assert!(
+            c8.intra > 10_000 && c8.inter > 10_000,
+            "the pictures must have content to cost: {c8:?}"
+        );
+        for (name, a, b) in [
+            ("intra", c8.intra, c10.intra),
+            ("inter", c8.inter, c10.inter),
+        ] {
             let (lo, hi) = (a.min(b) as f64, a.max(b) as f64);
             assert!(hi / lo < 1.01, "{name}: 8-bit {a} against 10-bit {b}");
         }
@@ -3287,21 +3881,40 @@ mod tests {
     fn a_brightness_step_is_measured_apart_from_the_rest_of_the_change() {
         let (w, h) = (64usize, 64usize);
         let blocks = (w / 8 * (h / 8)) as u64;
-        let pic = |dx: usize| -> Vec<u8> { (0..w * h).map(|i| (40 + ((i % w + dx) * 7 + (i / w) * 3) % 150) as u8).collect() };
+        let pic = |dx: usize| -> Vec<u8> {
+            (0..w * h)
+                .map(|i| (40 + ((i % w + dx) * 7 + (i / w) * 3) % 150) as u8)
+                .collect()
+        };
         let prev = pic(0);
         let darker: Vec<u8> = prev.iter().map(|&s| s - 5).collect();
         let fade = PicCost::measure(&darker, w, h, Some(&prev[..]), 8);
-        assert_eq!((fade.inter, fade.inter_ac, fade.dc), (32 * 5 * blocks, 0, 5 * blocks), "a uniform step: {fade:?}");
+        assert_eq!(
+            (fade.inter, fade.inter_ac, fade.dc),
+            (32 * 5 * blocks, 0, 5 * blocks),
+            "a uniform step: {fade:?}"
+        );
 
         let moved = PicCost::measure(&pic(1), w, h, Some(&prev[..]), 8);
-        assert!(moved.inter_ac > 10_000 && 32 * moved.dc < moved.inter_ac / 4, "motion is mostly not a brightness step: {moved:?}");
+        assert!(
+            moved.inter_ac > 10_000 && 32 * moved.dc < moved.inter_ac / 4,
+            "motion is mostly not a brightness step: {moved:?}"
+        );
 
         let widen = |p: &[u8]| p.iter().map(|&s| u16::from(s) << 2).collect::<Vec<u16>>();
         let fade10 = PicCost::measure(&widen(&darker), w, h, Some(&widen(&prev)[..]), 10);
-        assert_eq!((fade10.inter, fade10.inter_ac, fade10.dc), (fade.inter, fade.inter_ac, fade.dc), "10-bit: {fade10:?}");
+        assert_eq!(
+            (fade10.inter, fade10.inter_ac, fade10.dc),
+            (fade.inter, fade.inter_ac, fade.dc),
+            "10-bit: {fade10:?}"
+        );
 
         let first = PicCost::measure(&prev, w, h, None, 8);
-        assert_eq!((first.inter, first.inter_ac, first.dc), (first.intra, first.intra, 0), "no previous picture: {first:?}");
+        assert_eq!(
+            (first.inter, first.inter_ac, first.dc),
+            (first.intra, first.intra, 0),
+            "no previous picture: {first:?}"
+        );
     }
 
     /// The intra cap on an inter picture's planning cost is dropped
@@ -3314,21 +3927,68 @@ mod tests {
     fn the_intra_cap_is_dropped_exactly_when_the_change_is_a_brightness_step() {
         // qp_ref 21: the noise floor is 0.14 * 2^-2 = 0.035 of intra, far
         // under every inter cost here.
-        let step = |inter_ac: u64, dc: u64| PicCost { intra: 1000, inter: 3000, inter_ac, dc };
-        assert_eq!(step(200, 50).inter_cost(21, false), 3000, "200 + 16 * 50 = 1000: a step, uncapped");
-        assert_eq!(step(200, 51).inter_cost(21, false), 1000, "200 + 16 * 51 = 1016: more than a step, capped");
-        assert_eq!(step(1001, 0).inter_cost(21, false), 1000, "no step at all, and dearer than intra: capped");
-        assert_eq!(step(0, 62).inter_cost(21, false), 3000, "all step: uncapped");
-        assert_eq!(step(0, 63).inter_cost(21, false), 1000, "16 * 63 = 1008: capped");
+        let step = |inter_ac: u64, dc: u64| PicCost {
+            intra: 1000,
+            inter: 3000,
+            inter_ac,
+            dc,
+        };
+        assert_eq!(
+            step(200, 50).inter_cost(21, false),
+            3000,
+            "200 + 16 * 50 = 1000: a step, uncapped"
+        );
+        assert_eq!(
+            step(200, 51).inter_cost(21, false),
+            1000,
+            "200 + 16 * 51 = 1016: more than a step, capped"
+        );
+        assert_eq!(
+            step(1001, 0).inter_cost(21, false),
+            1000,
+            "no step at all, and dearer than intra: capped"
+        );
+        assert_eq!(
+            step(0, 62).inter_cost(21, false),
+            3000,
+            "all step: uncapped"
+        );
+        assert_eq!(
+            step(0, 63).inter_cost(21, false),
+            1000,
+            "16 * 63 = 1008: capped"
+        );
         for (ac, dc) in [(200, 50), (0, 62)] {
-            assert_eq!(step(ac, dc).inter_cost(21, true), 1000, "weighted prediction keeps the cap ({ac}, {dc})");
+            assert_eq!(
+                step(ac, dc).inter_cost(21, true),
+                1000,
+                "weighted prediction keeps the cap ({ac}, {dc})"
+            );
         }
-        let cheap = PicCost { intra: 5000, inter: 3000, inter_ac: 2900, dc: 100 };
+        let cheap = PicCost {
+            intra: 5000,
+            inter: 3000,
+            inter_ac: 2900,
+            dc: 100,
+        };
         for weighted in [false, true] {
-            assert_eq!(cheap.inter_cost(21, weighted), 3000, "cheaper than intra: the inter cost (weighted {weighted})");
+            assert_eq!(
+                cheap.inter_cost(21, weighted),
+                3000,
+                "cheaper than intra: the inter cost (weighted {weighted})"
+            );
         }
-        let held = PicCost { intra: 100_000, inter: 0, inter_ac: 0, dc: 0 };
-        assert_eq!(held.inter_cost(45, false), 14_000, "a held picture is planned at the reference's noise");
+        let held = PicCost {
+            intra: 100_000,
+            inter: 0,
+            inter_ac: 0,
+            dc: 0,
+        };
+        assert_eq!(
+            held.inter_cost(45, false),
+            14_000,
+            "a held picture is planned at the reference's noise"
+        );
     }
 
     /// Pictures whose four CTBs differ sharply in variance — flat, a
@@ -3342,7 +4002,11 @@ mod tests {
             ChromaFormat::Yuv422 => (2, 1),
             _ => (1, 1),
         };
-        let (cw, ch) = if chroma == ChromaFormat::Monochrome { (0, 0) } else { (w / sw, h / sh) };
+        let (cw, ch) = if chroma == ChromaFormat::Monochrome {
+            (0, 0)
+        } else {
+            (w / sw, h / sh)
+        };
         let shift = bit_depth - 8;
         (0..count)
             .map(|i| {
@@ -3355,7 +4019,13 @@ mod tests {
                             (false, false) => 110 + i as i32,
                             (true, false) => ((x + y + i) % 96) as i32 + 60,
                             (false, true) => (seed >> 24) as i32,
-                            (true, true) => if ((x / 4) + (y / 4) + i) % 2 == 0 { 40 } else { 200 },
+                            (true, true) => {
+                                if ((x / 4) + (y / 4) + i) % 2 == 0 {
+                                    40
+                                } else {
+                                    200
+                                }
+                            }
                         };
                         samples.push((v.clamp(0, 255) as u32) << shift);
                     }
@@ -3370,7 +4040,10 @@ mod tests {
                 if shift == 0 {
                     samples.iter().map(|&v| v as u8).collect()
                 } else {
-                    samples.iter().flat_map(|&v| (v as u16).to_le_bytes()).collect()
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect()
                 }
             })
             .collect()
@@ -3412,7 +4085,10 @@ mod tests {
                 .unwrap();
                 let mut units = Vec::new();
                 for f in &frames {
-                    units.extend(e.push(f).expect("an adaptively quantised picture should code"));
+                    units.extend(
+                        e.push(f)
+                            .expect("an adaptively quantised picture should code"),
+                    );
                 }
                 units.extend(e.flush().unwrap());
                 assert_eq!(units.len(), frames.len(), "{tag}");
@@ -3420,8 +4096,14 @@ mod tests {
                 let census = e.census();
                 let deltas: u64 = census.by_kind.iter().map(|k| k.qp_delta).sum();
                 let moved: u64 = census.by_kind.iter().map(|k| k.qp_moved).sum();
-                assert!(deltas > 0, "{tag} qp {qp}: no CU coded a cu_qp_delta, so the syntax was never exercised");
-                assert!(moved > 0, "{tag} qp {qp}: no CTB left the picture quantiser, so the feature did nothing");
+                assert!(
+                    deltas > 0,
+                    "{tag} qp {qp}: no CU coded a cu_qp_delta, so the syntax was never exercised"
+                );
+                assert!(
+                    moved > 0,
+                    "{tag} qp {qp}: no CTB left the picture quantiser, so the feature did nothing"
+                );
                 if bframes > 0 {
                     assert!(census.by_kind[2].cus > 0, "{tag}: no B picture was coded");
                 }
@@ -3432,7 +4114,8 @@ mod tests {
                 // does.
                 let mut dec = crate::hevc::HevcDecoder::new();
                 for u in &units {
-                    dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag} qp {qp}: {err}"));
+                    dec.push_annexb(&u.data)
+                        .unwrap_or_else(|err| panic!("{tag} qp {qp}: {err}"));
                 }
                 dec.flush().unwrap();
                 let mut by_display = vec![None; units.len()];
@@ -3440,9 +4123,15 @@ mod tests {
                     by_display[(u.poc / 2) as usize] = Some(u.encode_index as usize);
                 }
                 for (i, coded) in by_display.iter().enumerate() {
-                    let want = &e.reconstructions()[coded.unwrap_or_else(|| panic!("{tag} qp {qp}: display index {i} never coded"))];
-                    let got = dec.next_picture().unwrap_or_else(|| panic!("{tag} qp {qp}: picture {i} missing"));
-                    assert!(got.into_packed() == *want, "{tag} qp {qp}: picture {i} differs from the reconstruction");
+                    let want = &e.reconstructions()[coded
+                        .unwrap_or_else(|| panic!("{tag} qp {qp}: display index {i} never coded"))];
+                    let got = dec
+                        .next_picture()
+                        .unwrap_or_else(|| panic!("{tag} qp {qp}: picture {i} missing"));
+                    assert!(
+                        got.into_packed() == *want,
+                        "{tag} qp {qp}: picture {i} differs from the reconstruction"
+                    );
                 }
             }
         }
@@ -3451,7 +4140,12 @@ mod tests {
         // the switch absent — the PPS bit clear and no delta anywhere.
         let frames = aq_frames(ChromaFormat::Yuv420, 8, 3);
         let encode = |strength: f32| -> Vec<u8> {
-            let mut e = H265Encoder::new(Config { gop: 8, aq_strength: strength, ..cfg(64, 64, ChromaFormat::Yuv420) }).unwrap();
+            let mut e = H265Encoder::new(Config {
+                gop: 8,
+                aq_strength: strength,
+                ..cfg(64, 64, ChromaFormat::Yuv420)
+            })
+            .unwrap();
             let mut out = Vec::new();
             for f in &frames {
                 for u in e.push(f).unwrap() {
@@ -3461,11 +4155,18 @@ mod tests {
             for u in e.flush().unwrap() {
                 out.extend_from_slice(&u.data);
             }
-            assert_eq!(e.census().by_kind.iter().map(|k| k.qp_delta).sum::<u64>() > 0, strength > 0.0);
+            assert_eq!(
+                e.census().by_kind.iter().map(|k| k.qp_delta).sum::<u64>() > 0,
+                strength > 0.0
+            );
             out
         };
         assert_eq!(encode(0.0), encode(Config::default().aq_strength));
-        assert_ne!(encode(0.0), encode(1.0), "strength 1 must change the stream");
+        assert_ne!(
+            encode(0.0),
+            encode(1.0),
+            "strength 1 must change the stream"
+        );
 
         // Lossless has no quantiser to adapt: refused by name.
         let err = H265Encoder::new(Config {
@@ -3487,7 +4188,11 @@ mod tests {
             ChromaFormat::Yuv422 => (2, 1),
             _ => (1, 1),
         };
-        let (cw, ch) = if chroma == ChromaFormat::Monochrome { (0, 0) } else { (w / sw, h / sh) };
+        let (cw, ch) = if chroma == ChromaFormat::Monochrome {
+            (0, 0)
+        } else {
+            (w / sw, h / sh)
+        };
         let shift = bit_depth - 8;
         (0..count)
             .map(|i| {
@@ -3500,7 +4205,9 @@ mod tests {
                         // Texture with structure and a little noise, so the
                         // search has something to match and the fit has
                         // variance to work with.
-                        let base = 40 + ((x * 3 + y * 5 + (x * y) / 7) % 150) as i32 + ((seed >> 28) as i32 - 8);
+                        let base = 40
+                            + ((x * 3 + y * 5 + (x * y) / 7) % 150) as i32
+                            + ((seed >> 28) as i32 - 8);
                         let v = (f64::from(base) * gain).round().clamp(0.0, 255.0) as u32;
                         samples.push(v << shift);
                     }
@@ -3512,7 +4219,14 @@ mod tests {
                         }
                     }
                 }
-                if shift == 0 { samples.iter().map(|&v| v as u8).collect() } else { samples.iter().flat_map(|&v| (v as u16).to_le_bytes()).collect() }
+                if shift == 0 {
+                    samples.iter().map(|&v| v as u8).collect()
+                } else {
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect()
+                }
             })
             .collect()
     }
@@ -3540,8 +4254,14 @@ mod tests {
             let tag = format!("{chroma:?} {bit_depth}-bit bframes={bframes}");
             let frames = fade_frames(chroma, bit_depth, 8);
             let encode = |weighted_pred: bool| -> (Vec<Access>, Vec<Vec<u8>>, Census) {
-                let mut e = H265Encoder::new(Config { gop: 8, bframes, bit_depth, weighted_pred, ..cfg(64, 64, chroma) })
-                    .unwrap_or_else(|err| panic!("{tag}: {err}"));
+                let mut e = H265Encoder::new(Config {
+                    gop: 8,
+                    bframes,
+                    bit_depth,
+                    weighted_pred,
+                    ..cfg(64, 64, chroma)
+                })
+                .unwrap_or_else(|err| panic!("{tag}: {err}"));
                 let mut units = Vec::new();
                 for f in &frames {
                     units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
@@ -3554,13 +4274,19 @@ mod tests {
             let bytes = |u: &[Access]| u.iter().map(|a| a.data.len()).sum::<usize>();
             let p = &census.by_kind[1];
             assert!(p.wp_on > 0, "{tag}: no P picture chose a weighting: {p:?}");
-            assert!(p.wp_won > p.wp_lost, "{tag}: the fit lost more CUs than it won: {p:?}");
+            assert!(
+                p.wp_won > p.wp_lost,
+                "{tag}: the fit lost more CUs than it won: {p:?}"
+            );
             if bframes > 0 {
                 // The B pictures between the fade's anchors are weighted
                 // too, or the B round trip below proves default weighting.
                 let b = &census.by_kind[2];
                 assert!(b.wp_on > 0, "{tag}: no B picture chose a weighting: {b:?}");
-                assert!(b.wp_won > b.wp_lost, "{tag}: the B fit lost more CUs than it won: {b:?}");
+                assert!(
+                    b.wp_won > b.wp_lost,
+                    "{tag}: the B fit lost more CUs than it won: {b:?}"
+                );
             }
             assert!(
                 (bytes(&with) as f64) < (bytes(&without) as f64) * 0.9,
@@ -3570,7 +4296,8 @@ mod tests {
             );
             let mut dec = crate::hevc::HevcDecoder::new();
             for u in &with {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: {err}"));
             }
             dec.flush().unwrap();
             let mut by_display = vec![None; with.len()];
@@ -3578,28 +4305,57 @@ mod tests {
                 by_display[(u.poc / 2) as usize] = Some(u.encode_index as usize);
             }
             for (i, coded) in by_display.iter().enumerate() {
-                let want = &recon[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                assert!(got.into_packed() == *want, "{tag}: picture {i} differs from the reconstruction");
+                let want =
+                    &recon[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                assert!(
+                    got.into_packed() == *want,
+                    "{tag}: picture {i} differs from the reconstruction"
+                );
             }
         }
 
         // A held clip: the identity fits, nothing is chosen, and the
         // table costs its flags and nothing more.
-        let held: Vec<Vec<u8>> = std::iter::repeat_n(fade_frames(ChromaFormat::Yuv420, 8, 1).remove(0), 6).collect();
+        let held: Vec<Vec<u8>> =
+            std::iter::repeat_n(fade_frames(ChromaFormat::Yuv420, 8, 1).remove(0), 6).collect();
         let encode = |weighted_pred: bool| -> (usize, Census) {
-            let mut e = H265Encoder::new(Config { gop: 8, weighted_pred, ..cfg(64, 64, ChromaFormat::Yuv420) }).unwrap();
+            let mut e = H265Encoder::new(Config {
+                gop: 8,
+                weighted_pred,
+                ..cfg(64, 64, ChromaFormat::Yuv420)
+            })
+            .unwrap();
             let mut bytes = 0;
             for f in &held {
-                bytes += e.push(f).unwrap().iter().map(|a| a.data.len()).sum::<usize>();
+                bytes += e
+                    .push(f)
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.data.len())
+                    .sum::<usize>();
             }
-            bytes += e.flush().unwrap().iter().map(|a| a.data.len()).sum::<usize>();
+            bytes += e
+                .flush()
+                .unwrap()
+                .iter()
+                .map(|a| a.data.len())
+                .sum::<usize>();
             (bytes, *e.census())
         };
         let (with, census) = encode(true);
         let (without, _) = encode(false);
-        assert_eq!(census.by_kind[1].wp_on, 0, "a held clip chose a weighting: {:?}", census.by_kind[1]);
-        assert!(with >= without && with <= without + 2 * held.len(), "the table of defaults should cost bits, not bytes: {with} against {without}");
+        assert_eq!(
+            census.by_kind[1].wp_on, 0,
+            "a held clip chose a weighting: {:?}",
+            census.by_kind[1]
+        );
+        assert!(
+            with >= without && with <= without + 2 * held.len(),
+            "the table of defaults should cost bits, not bytes: {with} against {without}"
+        );
     }
 
     /// The picture-level check between a B picture's fitted table and a
@@ -3629,10 +4385,19 @@ mod tests {
             e.census().by_kind[2]
         };
         let kept = run(2, 26);
-        assert!(kept.wp_on > 0, "bframes=2 QP 26: no B picture took a fitted table: {kept:?}");
-        assert_eq!(kept.wp_rd_default, 0, "bframes=2 QP 26: a fitted table lost to the defaults: {kept:?}");
+        assert!(
+            kept.wp_on > 0,
+            "bframes=2 QP 26: no B picture took a fitted table: {kept:?}"
+        );
+        assert_eq!(
+            kept.wp_rd_default, 0,
+            "bframes=2 QP 26: a fitted table lost to the defaults: {kept:?}"
+        );
         let mid = run(1, 40);
-        assert!(mid.wp_rd_default > 0, "bframes=1 QP 40: every fitted table was kept: {mid:?}");
+        assert!(
+            mid.wp_rd_default > 0,
+            "bframes=1 QP 40: every fitted table was kept: {mid:?}"
+        );
     }
 
     /// Two references: every P slice declares two active references in
@@ -3655,10 +4420,21 @@ mod tests {
             // Drifting content, so the older reference is a genuinely
             // different picture; a fade under weighting, so each
             // reference wants its own gain.
-            let frames = if weighted_pred { fade_frames(chroma, bit_depth, 8) } else { aq_frames(chroma, bit_depth, 8) };
+            let frames = if weighted_pred {
+                fade_frames(chroma, bit_depth, 8)
+            } else {
+                aq_frames(chroma, bit_depth, 8)
+            };
             let encode = |max_refs: u32| -> (Vec<Access>, Vec<Vec<u8>>, Census) {
-                let mut e = H265Encoder::new(Config { gop: 8, bframes, bit_depth, max_refs, weighted_pred, ..cfg(64, 64, chroma) })
-                    .unwrap_or_else(|err| panic!("{tag}: {err}"));
+                let mut e = H265Encoder::new(Config {
+                    gop: 8,
+                    bframes,
+                    bit_depth,
+                    max_refs,
+                    weighted_pred,
+                    ..cfg(64, 64, chroma)
+                })
+                .unwrap_or_else(|err| panic!("{tag}: {err}"));
                 let mut units = Vec::new();
                 for f in &frames {
                     units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
@@ -3669,17 +4445,29 @@ mod tests {
             let (two, recon, census) = encode(2);
             let (one, _, _) = encode(1);
             assert_eq!(two.len(), frames.len(), "{tag}");
-            let bytes = |u: &[Access]| u.iter().flat_map(|a| a.data.iter().copied()).collect::<Vec<u8>>();
-            assert_ne!(bytes(&two), bytes(&one), "{tag}: a second reference changed nothing — the header must at least declare it");
+            let bytes = |u: &[Access]| {
+                u.iter()
+                    .flat_map(|a| a.data.iter().copied())
+                    .collect::<Vec<u8>>()
+            };
+            assert_ne!(
+                bytes(&two),
+                bytes(&one),
+                "{tag}: a second reference changed nothing — the header must at least declare it"
+            );
             let p = &census.by_kind[1];
             assert!(p.cus > 0, "{tag}: no P picture");
             // Reported, not required: `ref_older` is how many CUs took
             // the older picture.
-            eprintln!("{tag}: {} of {} P CUs chose the older reference", p.ref_older, p.cus);
+            eprintln!(
+                "{tag}: {} of {} P CUs chose the older reference",
+                p.ref_older, p.cus
+            );
 
             let mut dec = crate::hevc::HevcDecoder::new();
             for u in &two {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: {err}"));
             }
             dec.flush().unwrap();
             let mut by_display = vec![None; two.len()];
@@ -3687,9 +4475,15 @@ mod tests {
                 by_display[(u.poc / 2) as usize] = Some(u.encode_index as usize);
             }
             for (i, coded) in by_display.iter().enumerate() {
-                let want = &recon[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                assert!(got.into_packed() == *want, "{tag}: picture {i} differs from the reconstruction");
+                let want =
+                    &recon[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                assert!(
+                    got.into_packed() == *want,
+                    "{tag}: picture {i} differs from the reconstruction"
+                );
             }
         }
     }
@@ -3722,7 +4516,10 @@ mod tests {
                 for (i, f) in frames.iter().enumerate() {
                     let out = e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}"));
                     if (i as u32) < lookahead {
-                        assert!(out.is_empty(), "{tag}: picture {i} was released before the lookahead filled");
+                        assert!(
+                            out.is_empty(),
+                            "{tag}: picture {i} was released before the lookahead filled"
+                        );
                     }
                     units.extend(out);
                 }
@@ -3732,15 +4529,36 @@ mod tests {
             };
             let (with, recon) = run(lookahead);
             let (without, _) = run(0);
-            assert_eq!(with.len(), frames.len(), "{tag}: one access unit per picture");
-            let typing = |u: &[Access]| u.iter().map(|a| (a.poc, a.keyframe, a.encode_index)).collect::<Vec<_>>();
-            assert_eq!(typing(&with), typing(&without), "{tag}: the lookahead changed the picture typing or order");
-            let bytes = |u: &[Access]| u.iter().flat_map(|a| a.data.iter().copied()).collect::<Vec<u8>>();
-            assert_ne!(bytes(&with), bytes(&without), "{tag}: the lookahead changed nothing about the stream");
+            assert_eq!(
+                with.len(),
+                frames.len(),
+                "{tag}: one access unit per picture"
+            );
+            let typing = |u: &[Access]| {
+                u.iter()
+                    .map(|a| (a.poc, a.keyframe, a.encode_index))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                typing(&with),
+                typing(&without),
+                "{tag}: the lookahead changed the picture typing or order"
+            );
+            let bytes = |u: &[Access]| {
+                u.iter()
+                    .flat_map(|a| a.data.iter().copied())
+                    .collect::<Vec<u8>>()
+            };
+            assert_ne!(
+                bytes(&with),
+                bytes(&without),
+                "{tag}: the lookahead changed nothing about the stream"
+            );
 
             let mut dec = crate::hevc::HevcDecoder::new();
             for u in &with {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: {err}"));
             }
             dec.flush().unwrap();
             let mut by_display = vec![None; with.len()];
@@ -3748,15 +4566,24 @@ mod tests {
                 by_display[(u.poc / 2) as usize] = Some(u.encode_index as usize);
             }
             for (i, coded) in by_display.iter().enumerate() {
-                let want = &recon[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                assert!(got.into_packed() == *want, "{tag}: picture {i} differs from the reconstruction");
+                let want =
+                    &recon[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                assert!(
+                    got.into_packed() == *want,
+                    "{tag}: picture {i} differs from the reconstruction"
+                );
             }
         }
 
-        let err = H265Encoder::new(Config { lookahead: 4, ..cfg(64, 64, ChromaFormat::Yuv420) })
-            .err()
-            .expect("a lookahead at a constant quantiser must refuse");
+        let err = H265Encoder::new(Config {
+            lookahead: 4,
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        })
+        .err()
+        .expect("a lookahead at a constant quantiser must refuse");
         assert!(format!("{err}").contains("lookahead"), "{err}");
     }
 
@@ -3799,15 +4626,27 @@ mod tests {
             (units, e.reconstructions().to_vec(), e.seed_recodes())
         };
         let (with, recon, recodes) = run(8);
-        assert!((1..=2).contains(&recodes), "the seeded keyframe of a smooth gradient was not coded again: {recodes} extra codings");
+        assert!(
+            (1..=2).contains(&recodes),
+            "the seeded keyframe of a smooth gradient was not coded again: {recodes} extra codings"
+        );
         let (_, _, none) = run(0);
         assert_eq!(none, 0, "a stream without a lookahead was coded again");
         // A seeded pick is never below the seed's floor, 26. The coding that
         // ships is the second one, lower than that, so it is larger than
         // the keyframe at 26.
-        let mut at_floor = H265Encoder::new(Config { gop: 8, rate: super::super::RateControl::ConstantQp(26), ..cfg(64, 64, ChromaFormat::Yuv420) }).unwrap();
+        let mut at_floor = H265Encoder::new(Config {
+            gop: 8,
+            rate: super::super::RateControl::ConstantQp(26),
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        })
+        .unwrap();
         let floor_bytes = at_floor.push(&frames[0]).unwrap()[0].data.len();
-        assert!(with[0].data.len() > floor_bytes * 3 / 2, "the keyframe shipped at {} bytes against {floor_bytes} at the seed's floor: the first coding shipped", with[0].data.len());
+        assert!(
+            with[0].data.len() > floor_bytes * 3 / 2,
+            "the keyframe shipped at {} bytes against {floor_bytes} at the seed's floor: the first coding shipped",
+            with[0].data.len()
+        );
 
         let mut dec = crate::hevc::HevcDecoder::new();
         for u in &with {
@@ -3819,8 +4658,13 @@ mod tests {
             by_display[(u.poc / 2) as usize] = Some(u.encode_index as usize);
         }
         for (i, coded) in by_display.iter().enumerate() {
-            let got = dec.next_picture().unwrap_or_else(|| panic!("picture {i} missing"));
-            assert!(got.into_packed() == recon[coded.expect("every picture coded")], "picture {i} differs from the reconstruction the encoder kept");
+            let got = dec
+                .next_picture()
+                .unwrap_or_else(|| panic!("picture {i} missing"));
+            assert!(
+                got.into_packed() == recon[coded.expect("every picture coded")],
+                "picture {i} differs from the reconstruction the encoder kept"
+            );
         }
     }
 
@@ -3829,7 +4673,11 @@ mod tests {
     #[test]
     fn intra_codes_and_the_remaining_holes_name_themselves() {
         // The real path: every picture an IDR, 4:2:0, constant QP.
-        let mut e = H265Encoder::new(Config { gop: 0, ..cfg(64, 64, ChromaFormat::Yuv420) }).unwrap();
+        let mut e = H265Encoder::new(Config {
+            gop: 0,
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        })
+        .unwrap();
         let frame = vec![64u8; 64 * 64 * 3 / 2];
         let out = e.push(&frame).unwrap();
         assert_eq!(out.len(), 1, "an all-intra picture should code");
@@ -3844,7 +4692,11 @@ mod tests {
             (ChromaFormat::Yuv422, 64 * 64 * 2),
             (ChromaFormat::Yuv444, 64 * 64 * 3),
         ] {
-            let mut e = H265Encoder::new(Config { gop: 0, ..cfg(64, 64, chroma) }).unwrap();
+            let mut e = H265Encoder::new(Config {
+                gop: 0,
+                ..cfg(64, 64, chroma)
+            })
+            .unwrap();
             let out = e.push(&vec![64u8; per]).unwrap();
             assert_eq!(out.len(), 1, "{chroma:?} should code");
             assert!(!out[0].data.is_empty());
@@ -3860,7 +4712,11 @@ mod tests {
             (ChromaFormat::Yuv422, 64 * 64 * 2),
             (ChromaFormat::Yuv444, 64 * 64 * 3),
         ] {
-            let mut e = H265Encoder::new(Config { gop: 8, ..cfg(64, 64, chroma) }).unwrap();
+            let mut e = H265Encoder::new(Config {
+                gop: 8,
+                ..cfg(64, 64, chroma)
+            })
+            .unwrap();
             let frame = vec![64u8; per];
             let mut units = Vec::new();
             for _ in 0..3 {
@@ -3869,9 +4725,15 @@ mod tests {
             units.extend(e.flush().unwrap());
             assert_eq!(units.len(), 3, "{chroma:?}: one access unit per picture");
             assert!(units[0].keyframe, "{chroma:?}: the first is an IDR");
-            assert!(!units[1].keyframe && !units[2].keyframe, "{chroma:?}: the rest are P");
+            assert!(
+                !units[1].keyframe && !units[2].keyframe,
+                "{chroma:?}: the rest are P"
+            );
             assert!(units.iter().all(|u| !u.data.is_empty()), "{chroma:?}");
-            assert!(e.reconstructions().iter().all(|r| r.len() == per), "{chroma:?}: recon size");
+            assert!(
+                e.reconstructions().iter().all(|r| r.len() == per),
+                "{chroma:?}: recon size"
+            );
         }
 
         // B pictures code too, in every chroma format: a group with two of
@@ -3881,8 +4743,12 @@ mod tests {
             (ChromaFormat::Yuv420, 64 * 64 * 3 / 2),
             (ChromaFormat::Yuv444, 64 * 64 * 3),
         ] {
-            let mut e =
-                H265Encoder::new(Config { gop: 8, bframes: 2, ..cfg(64, 64, chroma) }).unwrap();
+            let mut e = H265Encoder::new(Config {
+                gop: 8,
+                bframes: 2,
+                ..cfg(64, 64, chroma)
+            })
+            .unwrap();
             let frame = vec![64u8; per];
             let mut units = Vec::new();
             for _ in 0..6 {
@@ -3965,7 +4831,9 @@ mod tests {
                 // bframes=0 one.
                 if bframes > 0 {
                     assert!(
-                        units.iter().any(|u| u.encode_index as usize != (u.poc / 2) as usize),
+                        units
+                            .iter()
+                            .any(|u| u.encode_index as usize != (u.poc / 2) as usize),
                         "{chroma:?}: coding order never differed from display order, so no B picture was coded"
                     );
                 }
@@ -3980,7 +4848,8 @@ mod tests {
                     );
                     let rec = &e.reconstructions()[u.encode_index as usize];
                     assert_eq!(
-                        rec, &frames[(u.poc / 2) as usize],
+                        rec,
+                        &frames[(u.poc / 2) as usize],
                         "{chroma:?} bframes={bframes}: picture poc {} is not lossless",
                         u.poc
                     );
@@ -4024,7 +4893,16 @@ mod tests {
             // The unit's `split_cu_flag`, which the tree walk writes
             // ahead of every unit above the minimum coding block, at the
             // neutral neighbour context `Rate` prices it in.
-            write_split_cu_flag(&mut e, &mut cx, &SplitCuNb { left_depth: None, above_depth: None }, 0, false);
+            write_split_cu_flag(
+                &mut e,
+                &mut cx,
+                &SplitCuNb {
+                    left_depth: None,
+                    above_depth: None,
+                },
+                0,
+                false,
+            );
             write_cu_inter(&mut e, &mut cx, d, None, None, 1, false, None, 1, 0, false);
             e.fractional_bits() as f32
         };
@@ -4061,7 +4939,10 @@ mod tests {
                 for flag in [0u8, 1] {
                     let d = InterCuDecision {
                         log2_cu: log2,
-                        kind: InterCuKind::Amvp { mvp_flag: flag, mvd: Mv::new(x, y) },
+                        kind: InterCuKind::Amvp {
+                            mvp_flag: flag,
+                            mvd: Mv::new(x, y),
+                        },
                         rqt_root_cbf: false,
                         ..InterCuDecision::default()
                     };
@@ -4120,7 +5001,10 @@ mod tests {
                 units.extend(e.push(f).expect("lossless inter should code"));
             }
             units.extend(e.flush().unwrap());
-            assert!(units[1..].iter().any(|u| !u.keyframe), "{chroma:?}: no inter picture");
+            assert!(
+                units[1..].iter().any(|u| !u.keyframe),
+                "{chroma:?}: no inter picture"
+            );
 
             // Exact, and what a decoder rebuilds.
             for u in &units {
@@ -4137,8 +5021,14 @@ mod tests {
             }
             dec.flush().unwrap();
             for (i, want) in e.reconstructions().iter().enumerate() {
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{chroma:?}: picture {i} missing"));
-                assert_eq!(&got.into_packed(), want, "{chroma:?}: picture {i} differs from the reconstruction");
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{chroma:?}: picture {i} missing"));
+                assert_eq!(
+                    &got.into_packed(),
+                    want,
+                    "{chroma:?}: picture {i} differs from the reconstruction"
+                );
             }
         }
     }
@@ -4155,13 +5045,23 @@ mod tests {
         };
         let mono = chroma == ChromaFormat::Monochrome;
         let (cw, ch) = if mono { (0, 0) } else { (w / sw, h / sh) };
-        let config =
-            Config { rate: super::super::RateControl::Lossless, gop: 8, ..cfg(w as u32, h as u32, chroma) };
+        let config = Config {
+            rate: super::super::RateControl::Lossless,
+            gop: 8,
+            ..cfg(w as u32, h as u32, chroma)
+        };
         let g = syn::Geometry::new(&config);
-        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(&config, &g, LOG2_MAX_POC_LSB, None)))
-            .unwrap();
-        let mut pps =
-            crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(26, true, true))).unwrap();
+        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(
+            &config,
+            &g,
+            LOG2_MAX_POC_LSB,
+            None,
+        )))
+        .unwrap();
+        let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(
+            26, true, true,
+        )))
+        .unwrap();
         pps.resolve_tiles(&sps).unwrap();
 
         let cpu = Cpu::detect_honouring_env();
@@ -4178,7 +5078,8 @@ mod tests {
             qp: 26,
             bit_depth: 8,
             strong_smoothing: false,
-            bypass: true, free_to_trim: false,
+            bypass: true,
+            free_to_trim: false,
         };
         let split = |f: &[u8]| -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let (y, c) = f.split_at(w * h);
@@ -4232,7 +5133,11 @@ mod tests {
         let out = e.push(&frame).unwrap();
         assert_eq!(out.len(), 1);
         assert!(!out[0].data.is_empty());
-        assert_eq!(e.reconstructions()[0], frame, "bypass reconstruction differs from the source");
+        assert_eq!(
+            e.reconstructions()[0],
+            frame,
+            "bypass reconstruction differs from the source"
+        );
     }
 
     /// Inter pictures round-trip in every chroma format, in process:
@@ -4272,8 +5177,14 @@ mod tests {
             }
             units.extend(e.flush().unwrap());
             assert_eq!(units.len(), frames.len(), "{chroma:?}");
-            assert!(!units[1].keyframe, "{chroma:?}: the second picture should be a P picture");
-            assert!(e.reconstructions().iter().all(|r| r.len() == per), "{chroma:?}: recon size");
+            assert!(
+                !units[1].keyframe,
+                "{chroma:?}: the second picture should be a P picture"
+            );
+            assert!(
+                e.reconstructions().iter().all(|r| r.len() == per),
+                "{chroma:?}: recon size"
+            );
 
             // SELF: the production decoder rebuilds every picture exactly
             // as the encoder holds it.
@@ -4283,7 +5194,9 @@ mod tests {
             }
             dec.flush().unwrap();
             for (i, want) in e.reconstructions().iter().enumerate() {
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{chroma:?}: picture {i} missing"));
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{chroma:?}: picture {i} missing"));
                 assert_eq!(
                     &got.into_packed(),
                     want,
@@ -4316,21 +5229,40 @@ mod tests {
     #[test]
     fn every_gop_predicts_from_what_the_decoder_holds() {
         for bframes in 1u32..=3 {
-            let mut gops = vec![bframes + 1, bframes + 2, bframes + 3, bframes + 4, 2 * bframes + 3];
+            let mut gops = vec![
+                bframes + 1,
+                bframes + 2,
+                bframes + 3,
+                bframes + 4,
+                2 * bframes + 3,
+            ];
             gops.dedup();
             for gop in gops {
                 for max_refs in [1u32, 3] {
                     let tag = format!("gop {gop} bframes {bframes} refs {max_refs}");
-                    let frames = moving_frames_n(64, 64, ChromaFormat::Yuv420, 3 * gop as usize + 2);
-                    let mut e = H265Encoder::new(Config { gop, bframes, max_refs, ..cfg(64, 64, ChromaFormat::Yuv420) })
-                        .unwrap_or_else(|err| panic!("{tag}: {err}"));
+                    let frames =
+                        moving_frames_n(64, 64, ChromaFormat::Yuv420, 3 * gop as usize + 2);
+                    let mut e = H265Encoder::new(Config {
+                        gop,
+                        bframes,
+                        max_refs,
+                        ..cfg(64, 64, ChromaFormat::Yuv420)
+                    })
+                    .unwrap_or_else(|err| panic!("{tag}: {err}"));
                     let mut units = Vec::new();
                     for f in &frames {
                         units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
                     }
                     units.extend(e.flush().unwrap_or_else(|err| panic!("{tag}: {err}")));
-                    assert_eq!(units.len(), frames.len(), "{tag}: one access unit per picture");
-                    assert!(units.iter().filter(|u| u.keyframe).count() >= 3, "{tag}: fewer than three GOPs");
+                    assert_eq!(
+                        units.len(),
+                        frames.len(),
+                        "{tag}: one access unit per picture"
+                    );
+                    assert!(
+                        units.iter().filter(|u| u.keyframe).count() >= 3,
+                        "{tag}: fewer than three GOPs"
+                    );
                     let bs = e.census().by_kind[2].cus;
                     if gop == bframes + 1 {
                         assert_eq!(bs, 0, "{tag}: a B picture in a GOP the IDR ends first");
@@ -4339,18 +5271,31 @@ mod tests {
                     }
                     let mut dec = crate::hevc::HevcDecoder::new();
                     for u in &units {
-                        dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: decoder rejected the stream: {err}"));
+                        dec.push_annexb(&u.data).unwrap_or_else(|err| {
+                            panic!("{tag}: decoder rejected the stream: {err}")
+                        });
                     }
-                    dec.flush().unwrap_or_else(|err| panic!("{tag}: decoder failed to flush: {err}"));
-                    assert_eq!(dec.warnings(), 0, "{tag}: the decoder concealed something in the stream");
+                    dec.flush()
+                        .unwrap_or_else(|err| panic!("{tag}: decoder failed to flush: {err}"));
+                    assert_eq!(
+                        dec.warnings(),
+                        0,
+                        "{tag}: the decoder concealed something in the stream"
+                    );
                     let mut by_display = vec![None; units.len()];
                     for u in &units {
                         by_display[u.display as usize] = Some(u.encode_index as usize);
                     }
                     for (i, coded) in by_display.iter().enumerate() {
-                        let want = &e.reconstructions()[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                        let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                        assert!(got.into_packed() == *want, "{tag}: picture {i} decoded differently than the encoder reconstructed it");
+                        let want = &e.reconstructions()[coded
+                            .unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                        let got = dec
+                            .next_picture()
+                            .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                        assert!(
+                            got.into_packed() == *want,
+                            "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+                        );
                     }
                 }
             }
@@ -4414,14 +5359,23 @@ mod tests {
         };
         let mono = chroma == ChromaFormat::Monochrome;
         let (cw, ch) = if mono { (0, 0) } else { (w / sw, h / sh) };
-        let config =
-            Config { rate: super::super::RateControl::ConstantQp(30), gop: 8, ..cfg(w as u32, h as u32, chroma) };
+        let config = Config {
+            rate: super::super::RateControl::ConstantQp(30),
+            gop: 8,
+            ..cfg(w as u32, h as u32, chroma)
+        };
         let g = syn::Geometry::new(&config);
-        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(&config, &g, LOG2_MAX_POC_LSB, None,
+        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(
+            &config,
+            &g,
+            LOG2_MAX_POC_LSB,
+            None,
         )))
         .unwrap();
-        let mut pps =
-            crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(30, false, false))).unwrap();
+        let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(
+            30, false, false,
+        )))
+        .unwrap();
         pps.resolve_tiles(&sps).unwrap();
 
         let cpu = Cpu::detect_honouring_env();
@@ -4429,8 +5383,16 @@ mod tests {
         install_simd_u8(&mut dsp, cpu);
         let enc_dsp = HevcEncDsp::new(cpu);
         let dist = DistortionDsp::<u8>::new(cpu);
-        let ctx =
-            IntraCtx { dsp: &dsp, enc: &enc_dsp, dist: &dist, qp: 30, bit_depth: 8, strong_smoothing: false, bypass: false, free_to_trim: false };
+        let ctx = IntraCtx {
+            dsp: &dsp,
+            enc: &enc_dsp,
+            dist: &dist,
+            qp: 30,
+            bit_depth: 8,
+            strong_smoothing: false,
+            bypass: false,
+            free_to_trim: false,
+        };
         let split = |f: &[u8]| -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let (y, c) = f.split_at(w * h);
             let (cb, cr) = c.split_at(cw * ch);
@@ -4458,7 +5420,10 @@ mod tests {
             for cx in 0..wc {
                 let d = pic.code_ctu(&ctx, &[&refp], cx, cy, &py, w, &pcb, &pcr, cw);
                 luma |= d.cbf_luma && d.rqt_root_cbf;
-                chr |= d.cbf_chroma[0] || d.cbf_chroma[1] || d.cbf_chroma_bot[0] || d.cbf_chroma_bot[1];
+                chr |= d.cbf_chroma[0]
+                    || d.cbf_chroma[1]
+                    || d.cbf_chroma_bot[0]
+                    || d.cbf_chroma_bot[1];
             }
         }
         (luma, chr)
@@ -4507,7 +5472,8 @@ mod tests {
             qp: 30,
             bit_depth: 8,
             strong_smoothing: false,
-            bypass: false, free_to_trim: false,
+            bypass: false,
+            free_to_trim: false,
         };
         let mut pic = IntraPicture::<u8>::new(64, 64, 5, 8);
         pic.split_depth = 1;
@@ -4600,9 +5566,21 @@ mod tests {
         // reconstruction of the IDR, rebuilt as the reference frame the
         // P picture predicts from.
         let g = syn::Geometry::new(&config);
-        assert_eq!(g.log2_ctb, 5, "the guard assumes the writer's 32x32 CTB choice");
-        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(&config, &g, LOG2_MAX_POC_LSB, None))).unwrap();
-        let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(26, false, true))).unwrap();
+        assert_eq!(
+            g.log2_ctb, 5,
+            "the guard assumes the writer's 32x32 CTB choice"
+        );
+        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(
+            &config,
+            &g,
+            LOG2_MAX_POC_LSB,
+            None,
+        )))
+        .unwrap();
+        let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(
+            26, false, true,
+        )))
+        .unwrap();
         pps.resolve_tiles(&sps).unwrap();
         let mut refp = Frame::<u8>::new(w, h, ChromaFormat::Yuv420, 8);
         refp.poc = 0;
@@ -4614,7 +5592,8 @@ mod tests {
         ]) {
             let o = plane.origin();
             for y in 0..ph {
-                plane.data[o + y * plane.stride..o + y * plane.stride + pw].copy_from_slice(&src[y * pw..y * pw + pw]);
+                plane.data[o + y * plane.stride..o + y * plane.stride + pw]
+                    .copy_from_slice(&src[y * pw..y * pw + pw]);
             }
         }
         refp.extend_rows(0, h);
@@ -4624,7 +5603,16 @@ mod tests {
         install_simd_u8(&mut dsp, cpu);
         let enc_dsp = HevcEncDsp::new(cpu);
         let dist = DistortionDsp::<u8>::new(cpu);
-        let ctx = IntraCtx { dsp: &dsp, enc: &enc_dsp, dist: &dist, qp: 26, bit_depth: 8, strong_smoothing: false, bypass: false, free_to_trim: false };
+        let ctx = IntraCtx {
+            dsp: &dsp,
+            enc: &enc_dsp,
+            dist: &dist,
+            qp: 26,
+            bit_depth: 8,
+            strong_smoothing: false,
+            bypass: false,
+            free_to_trim: false,
+        };
         let mut pic = InterPicture::<u8>::new(&sps, &pps, 1);
         let (py, pc) = flat.split_at(w * h);
         let (pcb, pcr) = pc.split_at(w * h / 4);
@@ -4637,13 +5625,19 @@ mod tests {
                     // The marks `coding_unit` records before it parses any
                     // intra syntax, which every later derivation reads.
                     let i = pic.info.idx4(cx * 32, cy * 32);
-                    assert_eq!(pic.info.pred_mode[i], 1, "an intra CU must record pred_mode 1");
+                    assert_eq!(
+                        pic.info.pred_mode[i], 1,
+                        "an intra CU must record pred_mode 1"
+                    );
                     assert_eq!(pic.info.skip[i], 0, "an intra CU is never skipped");
                     let _ = pic.code_ctu_intra(&ctx, cx, cy, py, w, pcb, pcr, w / 2);
                 }
             }
         }
-        assert!(intra_cus > 0, "the construction was meant to make an intra CU win in the P slice; it did not, and the round trip below would be vacuous");
+        assert!(
+            intra_cus > 0,
+            "the construction was meant to make an intra CU win in the P slice; it did not, and the round trip below would be vacuous"
+        );
 
         // SELF, in process: both pictures decode to the reconstructions
         // the encoder holds.
@@ -4653,8 +5647,14 @@ mod tests {
         }
         dec.flush().unwrap();
         for i in 0..2 {
-            let decoded = dec.next_picture().unwrap_or_else(|| panic!("picture {i} missing"));
-            assert_eq!(decoded.into_packed(), e.reconstructions()[i], "picture {i}: decoded bytes differ from the encoder-held reconstruction");
+            let decoded = dec
+                .next_picture()
+                .unwrap_or_else(|| panic!("picture {i} missing"));
+            assert_eq!(
+                decoded.into_packed(),
+                e.reconstructions()[i],
+                "picture {i}: decoded bytes differ from the encoder-held reconstruction"
+            );
         }
     }
 
@@ -4720,8 +5720,17 @@ mod tests {
         // Decision-level guards on the real modules, against the
         // encoder's own reconstruction of the IDR.
         let g = syn::Geometry::new(&config);
-        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(&config, &g, LOG2_MAX_POC_LSB, None))).unwrap();
-        let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(30, false, true))).unwrap();
+        let sps = crate::hevc::sps::Sps::parse(&crate::nal::unescape_rbsp(&syn::write_sps(
+            &config,
+            &g,
+            LOG2_MAX_POC_LSB,
+            None,
+        )))
+        .unwrap();
+        let mut pps = crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&syn::write_pps(
+            30, false, true,
+        )))
+        .unwrap();
         pps.resolve_tiles(&sps).unwrap();
         let mut refp = Frame::<u8>::new(w, h, ChromaFormat::Yuv420, 8);
         refp.poc = 0;
@@ -4733,7 +5742,8 @@ mod tests {
         ]) {
             let o = plane.origin();
             for y in 0..ph {
-                plane.data[o + y * plane.stride..o + y * plane.stride + pw].copy_from_slice(&src[y * pw..y * pw + pw]);
+                plane.data[o + y * plane.stride..o + y * plane.stride + pw]
+                    .copy_from_slice(&src[y * pw..y * pw + pw]);
             }
         }
         refp.extend_rows(0, h);
@@ -4743,7 +5753,16 @@ mod tests {
         install_simd_u8(&mut dsp, cpu);
         let enc_dsp = HevcEncDsp::new(cpu);
         let dist = DistortionDsp::<u8>::new(cpu);
-        let ctx = IntraCtx { dsp: &dsp, enc: &enc_dsp, dist: &dist, qp: 30, bit_depth: 8, strong_smoothing: false, bypass: false, free_to_trim: false };
+        let ctx = IntraCtx {
+            dsp: &dsp,
+            enc: &enc_dsp,
+            dist: &dist,
+            qp: 30,
+            bit_depth: 8,
+            strong_smoothing: false,
+            bypass: false,
+            free_to_trim: false,
+        };
         let mut pic = InterPicture::<u8>::new(&sps, &pps, 1);
         let (py, pc) = split.split_at(w * h);
         let (pcb, pcr) = pc.split_at(w * h / 4);
@@ -4758,8 +5777,14 @@ mod tests {
                 }
             }
         }
-        assert!(intra_cus > 0, "no CU chose intra; the round trip below would be vacuous");
-        assert!(split_cus > 0, "the intra CU never split its transform, so the per-TB edge derivation stays untested");
+        assert!(
+            intra_cus > 0,
+            "no CU chose intra; the round trip below would be vacuous"
+        );
+        assert!(
+            split_cus > 0,
+            "the intra CU never split its transform, so the per-TB edge derivation stays untested"
+        );
 
         let mut dec = crate::hevc::HevcDecoder::new();
         for u in &units {
@@ -4767,8 +5792,14 @@ mod tests {
         }
         dec.flush().unwrap();
         for i in 0..2 {
-            let decoded = dec.next_picture().unwrap_or_else(|| panic!("picture {i} missing"));
-            assert_eq!(decoded.into_packed(), e.reconstructions()[i], "picture {i}: decoded bytes differ from the encoder-held reconstruction");
+            let decoded = dec
+                .next_picture()
+                .unwrap_or_else(|| panic!("picture {i} missing"));
+            assert_eq!(
+                decoded.into_packed(),
+                e.reconstructions()[i],
+                "picture {i}: decoded bytes differ from the encoder-held reconstruction"
+            );
         }
     }
 
@@ -4807,7 +5838,8 @@ mod tests {
             for c in 0..2 {
                 for y in 0..h / 2 {
                     for x in 0..w / 2 {
-                        fr[w * h + c * w * h / 4 + y * (w / 2) + x] = (100 + (x * 3 + y * 5 + c * 7) % 40) as u8;
+                        fr[w * h + c * w * h / 4 + y * (w / 2) + x] =
+                            (100 + (x * 3 + y * 5 + c * 7) % 40) as u8;
                     }
                 }
             }
@@ -4815,16 +5847,28 @@ mod tests {
         }
 
         for gop in [0u32, 8] {
-            let base = Config { rate: super::super::RateControl::ConstantQp(40), gop, ..cfg(w as u32, h as u32, ChromaFormat::Yuv420) };
+            let base = Config {
+                rate: super::super::RateControl::ConstantQp(40),
+                gop,
+                ..cfg(w as u32, h as u32, ChromaFormat::Yuv420)
+            };
             let mut recons = Vec::new();
             for sao in [false, true] {
-                let mut e = H265Encoder::new(Config { sao, ..base.clone() }).unwrap();
+                let mut e = H265Encoder::new(Config {
+                    sao,
+                    ..base.clone()
+                })
+                .unwrap();
                 let mut units = Vec::new();
                 for fr in &frames {
                     units.extend(e.push(fr).unwrap());
                 }
                 units.extend(e.flush().unwrap());
-                assert_eq!(units.len(), frames.len(), "gop={gop} sao={sao}: one access unit per picture");
+                assert_eq!(
+                    units.len(),
+                    frames.len(),
+                    "gop={gop} sao={sao}: one access unit per picture"
+                );
 
                 // SELF, in process, through the production decoder.
                 let mut dec = crate::hevc::HevcDecoder::new();
@@ -4833,7 +5877,9 @@ mod tests {
                 }
                 dec.flush().unwrap();
                 for i in 0..frames.len() {
-                    let got = dec.next_picture().unwrap_or_else(|| panic!("gop={gop} sao={sao}: picture {i} missing"));
+                    let got = dec
+                        .next_picture()
+                        .unwrap_or_else(|| panic!("gop={gop} sao={sao}: picture {i} missing"));
                     assert_eq!(
                         got.into_packed(),
                         e.reconstructions()[i],
@@ -4842,7 +5888,10 @@ mod tests {
                 }
                 recons.push(e.reconstructions().to_vec());
             }
-            assert_ne!(recons[0], recons[1], "gop={gop}: SAO changed nothing, so the round trip above proved nothing about it");
+            assert_ne!(
+                recons[0], recons[1],
+                "gop={gop}: SAO changed nothing, so the round trip above proved nothing about it"
+            );
         }
     }
 
@@ -4856,10 +5905,15 @@ mod tests {
             sao: true,
             ..cfg(64, 64, ChromaFormat::Yuv420)
         });
-        let Err(err) = r else { panic!("lossless + SAO must refuse") };
+        let Err(err) = r else {
+            panic!("lossless + SAO must refuse")
+        };
         let s = format!("{err}");
         assert!(s.contains("sample adaptive offset"), "{s}");
-        assert!(s.contains("filter-exempt"), "the refusal should say why: {s}");
+        assert!(
+            s.contains("filter-exempt"),
+            "the refusal should say why: {s}"
+        );
     }
 
     /// `count` pictures of detailed, moving content at `bit_depth`, packed
@@ -4867,7 +5921,13 @@ mod tests {
     /// bits. The texture uses the whole sample range and every low bit —
     /// an 8-bit picture shifted up by two would leave the low bits zero
     /// and a depth bug that only touched them invisible.
-    fn deep_frames(w: usize, h: usize, chroma: ChromaFormat, bit_depth: u32, count: usize) -> Vec<Vec<u8>> {
+    fn deep_frames(
+        w: usize,
+        h: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        count: usize,
+    ) -> Vec<Vec<u8>> {
         let (sw, sh) = match chroma {
             ChromaFormat::Yuv420 => (2usize, 2usize),
             ChromaFormat::Yuv422 => (2, 1),
@@ -4896,7 +5956,8 @@ mod tests {
                         for x in 0..cw {
                             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                             let (sx, sy) = (x + dx / sw, y + dy / sh);
-                            let r2 = ((sx as i32 % 17 - 8).abs() * (sy as i32 % 19 - 9).abs()) as u32;
+                            let r2 =
+                                ((sx as i32 % 17 - 8).abs() * (sy as i32 % 19 - 9).abs()) as u32;
                             let base = if c == 0 { max / 3 } else { max * 2 / 3 };
                             push(base + (r2.min(90) * max / 255) + (seed >> 30));
                         }
@@ -4920,31 +5981,71 @@ mod tests {
     #[test]
     fn deep_pictures_round_trip_through_the_decoder() {
         for bit_depth in [10u32, 12] {
-            for chroma in [ChromaFormat::Monochrome, ChromaFormat::Yuv420, ChromaFormat::Yuv422, ChromaFormat::Yuv444] {
+            for chroma in [
+                ChromaFormat::Monochrome,
+                ChromaFormat::Yuv420,
+                ChromaFormat::Yuv422,
+                ChromaFormat::Yuv444,
+            ] {
                 let frames = deep_frames(64, 64, chroma, bit_depth, 5);
                 let max = (1u32 << bit_depth) - 1;
-                let deep = |bytes: &[u8]| bytes.chunks_exact(2).any(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) > 255);
-                assert!(deep(&frames[0]), "{bit_depth}-bit {chroma:?}: the source never leaves 8 bits");
-                assert!(frames[0].chunks_exact(2).all(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) <= max));
+                let deep = |bytes: &[u8]| {
+                    bytes
+                        .chunks_exact(2)
+                        .any(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) > 255)
+                };
+                assert!(
+                    deep(&frames[0]),
+                    "{bit_depth}-bit {chroma:?}: the source never leaves 8 bits"
+                );
+                assert!(
+                    frames[0]
+                        .chunks_exact(2)
+                        .all(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) <= max)
+                );
 
                 for (rate, bframes, sao) in [
                     (super::super::RateControl::ConstantQp(26), 0u32, false),
                     (super::super::RateControl::ConstantQp(40), 2, true),
                     (super::super::RateControl::Lossless, 2, false),
                 ] {
-                    let tag = format!("{bit_depth}-bit {chroma:?} {rate:?} bframes={bframes} sao={sao}");
-                    let mut e = H265Encoder::new(Config { bit_depth, rate, gop: 8, bframes, sao, ..cfg(64, 64, chroma) })
-                        .unwrap_or_else(|err| panic!("{tag}: {err}"));
-                    assert_eq!(e.frame_bytes(), frames[0].len(), "{tag}: two bytes per sample");
+                    let tag =
+                        format!("{bit_depth}-bit {chroma:?} {rate:?} bframes={bframes} sao={sao}");
+                    let mut e = H265Encoder::new(Config {
+                        bit_depth,
+                        rate,
+                        gop: 8,
+                        bframes,
+                        sao,
+                        ..cfg(64, 64, chroma)
+                    })
+                    .unwrap_or_else(|err| panic!("{tag}: {err}"));
+                    assert_eq!(
+                        e.frame_bytes(),
+                        frames[0].len(),
+                        "{tag}: two bytes per sample"
+                    );
                     let mut units = Vec::new();
                     for f in &frames {
                         units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
                     }
                     units.extend(e.flush().unwrap());
-                    assert_eq!(units.len(), frames.len(), "{tag}: one access unit per picture");
-                    assert!(units[1..].iter().any(|u| !u.keyframe), "{tag}: no inter picture was coded");
+                    assert_eq!(
+                        units.len(),
+                        frames.len(),
+                        "{tag}: one access unit per picture"
+                    );
+                    assert!(
+                        units[1..].iter().any(|u| !u.keyframe),
+                        "{tag}: no inter picture was coded"
+                    );
                     if bframes > 0 {
-                        assert!(units.iter().any(|u| u.encode_index as usize != (u.poc / 2) as usize), "{tag}: no B picture was held back");
+                        assert!(
+                            units
+                                .iter()
+                                .any(|u| u.encode_index as usize != (u.poc / 2) as usize),
+                            "{tag}: no B picture was held back"
+                        );
                     }
 
                     // SELF, through the production decoder. It emits
@@ -4954,7 +6055,9 @@ mod tests {
                     // (display index `poc / 2`, as `gop.rs` counts it).
                     let mut dec = crate::hevc::HevcDecoder::new();
                     for u in &units {
-                        dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: decoder rejected the stream: {err}"));
+                        dec.push_annexb(&u.data).unwrap_or_else(|err| {
+                            panic!("{tag}: decoder rejected the stream: {err}")
+                        });
                     }
                     dec.flush().unwrap();
                     let mut by_display = vec![None; units.len()];
@@ -4962,16 +6065,26 @@ mod tests {
                         by_display[(u.poc / 2) as usize] = Some(u.encode_index as usize);
                     }
                     for (i, coded) in by_display.iter().enumerate() {
-                        let want = &e.reconstructions()[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                        let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                        let want = &e.reconstructions()[coded
+                            .unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                        let got = dec
+                            .next_picture()
+                            .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
                         assert_eq!(got.bit_depth, bit_depth, "{tag}: decoded depth");
-                        assert!(got.into_packed() == *want, "{tag}: picture {i} decoded differently than the encoder reconstructed it");
+                        assert!(
+                            got.into_packed() == *want,
+                            "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+                        );
                     }
-                    assert!(deep(&e.reconstructions()[0]), "{tag}: the reconstruction never leaves 8 bits");
+                    assert!(
+                        deep(&e.reconstructions()[0]),
+                        "{tag}: the reconstruction never leaves 8 bits"
+                    );
                     if rate == super::super::RateControl::Lossless {
                         for u in &units {
                             assert!(
-                                e.reconstructions()[u.encode_index as usize] == frames[(u.poc / 2) as usize],
+                                e.reconstructions()[u.encode_index as usize]
+                                    == frames[(u.poc / 2) as usize],
                                 "{tag}: picture poc {} is not lossless",
                                 u.poc
                             );
@@ -5002,13 +6115,23 @@ mod tests {
     /// sample per picture so inter pictures carry residual, and chroma
     /// follows luma's structure so the chroma trees vary too. At depth
     /// above 8 every low bit is used.
-    fn tree_frames(w: usize, h: usize, chroma: ChromaFormat, bit_depth: u32, count: usize) -> Vec<Vec<u8>> {
+    fn tree_frames(
+        w: usize,
+        h: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        count: usize,
+    ) -> Vec<Vec<u8>> {
         let (sw, sh) = match chroma {
             ChromaFormat::Yuv420 => (2usize, 2usize),
             ChromaFormat::Yuv422 => (2, 1),
             _ => (1, 1),
         };
-        let (cw, ch) = if chroma == ChromaFormat::Monochrome { (0, 0) } else { (w / sw, h / sh) };
+        let (cw, ch) = if chroma == ChromaFormat::Monochrome {
+            (0, 0)
+        } else {
+            (w / sw, h / sh)
+        };
         let shift = bit_depth - 8;
         let luma = |x: usize, y: usize, f: usize| -> u32 {
             let (lx, ly) = (x % 32, y % 32);
@@ -5026,7 +6149,9 @@ mod tests {
         (0..count)
             .map(|f| {
                 let mut samples: Vec<u32> = Vec::with_capacity(w * h + 2 * cw * ch);
-                let low = |x: usize, y: usize, c: u32| hash2(x as i32 + 7 * c as i32, y as i32 + f as i32) & ((1u32 << shift) - 1);
+                let low = |x: usize, y: usize, c: u32| {
+                    hash2(x as i32 + 7 * c as i32, y as i32 + f as i32) & ((1u32 << shift) - 1)
+                };
                 for y in 0..h {
                     for x in 0..w {
                         samples.push((luma(x, y, f) << shift) | low(x, y, 0));
@@ -5043,7 +6168,10 @@ mod tests {
                 if shift == 0 {
                     samples.iter().map(|&v| v as u8).collect()
                 } else {
-                    samples.iter().flat_map(|&v| (v as u16).to_le_bytes()).collect()
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect()
                 }
             })
             .collect()
@@ -5067,10 +6195,17 @@ mod tests {
             (80, 34, 0, 0, 2),
         ] {
             let tag = format!("{w}x{h} gop={gop} bframes={bframes}");
-            let config = Config { gop, bframes, ..cfg(w as u32, h as u32, ChromaFormat::Yuv420) };
+            let config = Config {
+                gop,
+                bframes,
+                ..cfg(w as u32, h as u32, ChromaFormat::Yuv420)
+            };
             let g = syn::Geometry::new(&config);
             assert_eq!(g.log2_ctb, 5, "{tag}");
-            assert!(!g.coded_width.is_multiple_of(32) || !g.coded_height.is_multiple_of(32), "{tag}: no partial CTB to test");
+            assert!(
+                !g.coded_width.is_multiple_of(32) || !g.coded_height.is_multiple_of(32),
+                "{tag}: no partial CTB to test"
+            );
             let frames = tree_frames(w, h, ChromaFormat::Yuv420, 8, frames);
             let mut e = H265Encoder::new(config).unwrap_or_else(|err| panic!("{tag}: {err}"));
             let mut units = Vec::new();
@@ -5080,7 +6215,8 @@ mod tests {
             units.extend(e.flush().unwrap());
             let mut dec = crate::hevc::HevcDecoder::new();
             for u in &units {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
             }
             dec.flush().unwrap();
             let mut by_display = vec![None; units.len()];
@@ -5088,9 +6224,15 @@ mod tests {
                 by_display[u.display as usize] = Some(u.encode_index as usize);
             }
             for (i, coded) in by_display.iter().enumerate() {
-                let want = &e.reconstructions()[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                assert!(got.into_packed() == *want, "{tag}: picture {i} decoded differently than the encoder reconstructed it");
+                let want = &e.reconstructions()
+                    [coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                assert!(
+                    got.into_packed() == *want,
+                    "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+                );
             }
         }
     }
@@ -5115,7 +6257,12 @@ mod tests {
         use crate::nal::HevcNalHeader;
         for (refs, bframes) in [(3u32, 2u32), (4, 3), (3, 1), (2, 2), (1, 2), (3, 0)] {
             let tag = format!("refs {refs} bframes {bframes}");
-            let config = Config { gop: 250, bframes, max_refs: refs, ..cfg(64, 64, ChromaFormat::Yuv420) };
+            let config = Config {
+                gop: 250,
+                bframes,
+                max_refs: refs,
+                ..cfg(64, 64, ChromaFormat::Yuv420)
+            };
             let frames = tree_frames(64, 64, ChromaFormat::Yuv420, 8, 13);
             let mut e = H265Encoder::new(config).unwrap_or_else(|err| panic!("{tag}: {err}"));
             let mut units = Vec::new();
@@ -5139,42 +6286,81 @@ mod tests {
                         let rbsp = crate::nal::unescape_rbsp(nal);
                         let hdr = HevcNalHeader::parse(&rbsp).unwrap();
                         let (sps, pps) = (sps.clone().unwrap(), pps.clone().unwrap());
-                        let (h, _, _) = ParsedHeader::parse(&rbsp, hdr, &|_| Some(pps.clone()), &|_| Some(sps.clone()), None).unwrap();
+                        let (h, _, _) = ParsedHeader::parse(
+                            &rbsp,
+                            hdr,
+                            &|_| Some(pps.clone()),
+                            &|_| Some(sps.clone()),
+                            None,
+                        )
+                        .unwrap();
                         let cur = u.poc;
                         if (16..=23).contains(&kind) {
                             dpb = vec![cur];
                             continue;
                         }
-                        let set: Vec<(i32, bool)> = h.st_rps.neg.iter().chain(h.st_rps.pos.iter()).map(|&(d, used)| (cur + d, used)).collect();
+                        let set: Vec<(i32, bool)> = h
+                            .st_rps
+                            .neg
+                            .iter()
+                            .chain(h.st_rps.pos.iter())
+                            .map(|&(d, used)| (cur + d, used))
+                            .collect();
                         for &(poc, _) in &set {
-                            assert!(dpb.contains(&poc), "{tag}: POC {cur} names POC {poc}, which an earlier set dropped (buffer {dpb:?})");
+                            assert!(
+                                dpb.contains(&poc),
+                                "{tag}: POC {cur} names POC {poc}, which an earlier set dropped (buffer {dpb:?})"
+                            );
                         }
                         kept_any |= set.iter().any(|&(_, used)| !used);
-                        let count = |list: &[(i32, bool)]| list.iter().filter(|e| e.1).count() as u32;
-                        assert_eq!(h.num_ref_idx[0], count(&h.st_rps.neg), "{tag}: POC {cur} list 0 is its used past entries");
+                        let count =
+                            |list: &[(i32, bool)]| list.iter().filter(|e| e.1).count() as u32;
+                        assert_eq!(
+                            h.num_ref_idx[0],
+                            count(&h.st_rps.neg),
+                            "{tag}: POC {cur} list 0 is its used past entries"
+                        );
                         if !h.st_rps.pos.is_empty() {
-                            assert_eq!(h.num_ref_idx[1], count(&h.st_rps.pos), "{tag}: POC {cur} list 1 is its used future entries");
+                            assert_eq!(
+                                h.num_ref_idx[1],
+                                count(&h.st_rps.pos),
+                                "{tag}: POC {cur} list 1 is its used future entries"
+                            );
                         }
                         dpb = set.iter().map(|e| e.0).chain([cur]).collect();
                     }
                 }
             }
             // Only a B picture below an older anchor it does not use keeps one.
-            assert_eq!(kept_any, refs >= 3 && bframes > 0, "{tag}: pictures kept unused");
+            assert_eq!(
+                kept_any,
+                refs >= 3 && bframes > 0,
+                "{tag}: pictures kept unused"
+            );
             let mut dec = crate::hevc::HevcDecoder::new();
             for u in &units {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
             }
             dec.flush().unwrap();
-            assert_eq!(dec.warnings(), 0, "{tag}: the decoder generated a missing reference");
+            assert_eq!(
+                dec.warnings(),
+                0,
+                "{tag}: the decoder generated a missing reference"
+            );
             let mut by_display = vec![None; units.len()];
             for u in &units {
                 by_display[u.display as usize] = Some(u.encode_index as usize);
             }
             for (i, coded) in by_display.iter().enumerate() {
                 let want = &e.reconstructions()[coded.unwrap()];
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                assert!(got.into_packed() == *want, "{tag}: picture {i} decoded differently than the encoder reconstructed it");
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                assert!(
+                    got.into_packed() == *want,
+                    "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+                );
             }
         }
     }
@@ -5185,18 +6371,32 @@ mod tests {
     /// eight left (two units one above the other, 2NxN), in the right half
     /// its left eight columns move down and its right eight up (side by
     /// side, Nx2N). Chroma follows luma at the format's subsampling.
-    fn split_motion_frames(w: usize, h: usize, chroma: ChromaFormat, bit_depth: u32, count: usize) -> Vec<Vec<u8>> {
+    fn split_motion_frames(
+        w: usize,
+        h: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        count: usize,
+    ) -> Vec<Vec<u8>> {
         let (sw, sh) = match chroma {
             ChromaFormat::Yuv420 => (2usize, 2usize),
             ChromaFormat::Yuv422 => (2, 1),
             _ => (1, 1),
         };
-        let (cw, ch) = if chroma == ChromaFormat::Monochrome { (0, 0) } else { (w / sw, h / sh) };
+        let (cw, ch) = if chroma == ChromaFormat::Monochrome {
+            (0, 0)
+        } else {
+            (w / sw, h / sh)
+        };
         let shift = bit_depth - 8;
         let luma = |x: usize, y: usize, f: usize| -> u32 {
             let (x, y, f) = (x as i32, y as i32, f as i32);
             let (sx, sy) = if (x as usize) < w / 2 {
-                if y % 16 < 8 { (x - 2 * f, y) } else { (x + 2 * f, y) }
+                if y % 16 < 8 {
+                    (x - 2 * f, y)
+                } else {
+                    (x + 2 * f, y)
+                }
             } else if x % 16 < 8 {
                 (x, y - 2 * f)
             } else {
@@ -5229,7 +6429,10 @@ mod tests {
                 if shift == 0 {
                     samples.iter().map(|&v| v as u8).collect()
                 } else {
-                    samples.iter().flat_map(|&v| (v as u16).to_le_bytes()).collect()
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect()
                 }
             })
             .collect()
@@ -5258,7 +6461,14 @@ mod tests {
             (88, 44, ChromaFormat::Yuv420, 8, 1, 3),
         ] {
             let tag = format!("{w}x{h} {chroma:?} {bit_depth}-bit bframes={bframes} refs={refs}");
-            let config = Config { gop: 8, bframes, max_refs: refs, bit_depth, inter_parts: crate::encode::InterParts::Symmetric, ..cfg(w as u32, h as u32, chroma) };
+            let config = Config {
+                gop: 8,
+                bframes,
+                max_refs: refs,
+                bit_depth,
+                inter_parts: crate::encode::InterParts::Symmetric,
+                ..cfg(w as u32, h as u32, chroma)
+            };
             let frames = split_motion_frames(w, h, chroma, bit_depth, 6);
             let mut e = H265Encoder::new(config).unwrap_or_else(|err| panic!("{tag}: {err}"));
             let mut units = Vec::new();
@@ -5268,18 +6478,29 @@ mod tests {
             units.extend(e.flush().unwrap());
             let mut dec = crate::hevc::HevcDecoder::new();
             for u in &units {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
             }
             dec.flush().unwrap();
-            assert_eq!(dec.warnings(), 0, "{tag}: the decoder generated a reference");
+            assert_eq!(
+                dec.warnings(),
+                0,
+                "{tag}: the decoder generated a reference"
+            );
             let mut by_display = vec![None; units.len()];
             for u in &units {
                 by_display[u.display as usize] = Some(u.encode_index as usize);
             }
             for (i, coded) in by_display.iter().enumerate() {
-                let want = &e.reconstructions()[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                assert!(got.into_packed() == *want, "{tag}: picture {i} decoded differently than the encoder reconstructed it");
+                let want = &e.reconstructions()
+                    [coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                assert!(
+                    got.into_packed() == *want,
+                    "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+                );
             }
             for (k, slot) in [(0usize, Census::slot(Kind::P)), (1, Census::slot(Kind::B))] {
                 let c = &e.census().by_kind[slot];
@@ -5287,22 +6508,37 @@ mod tests {
                 taken[k][1] += c.part_nx2n;
             }
         }
-        assert!(taken.iter().flatten().all(|&n| n > 0), "every shape in both picture kinds: [P, B] x [2NxN, Nx2N] = {taken:?}");
+        assert!(
+            taken.iter().flatten().all(|&n| n > 0),
+            "every shape in both picture kinds: [P, B] x [2NxN, Nx2N] = {taken:?}"
+        );
     }
 
     /// Without the switch no unit is partitioned: the census counts none
     /// on the same pictures, and the default configuration asks for none.
     #[test]
     fn inter_partitions_are_off_by_default() {
-        assert_eq!(Config::default().inter_parts, crate::encode::InterParts::None);
+        assert_eq!(
+            Config::default().inter_parts,
+            crate::encode::InterParts::None
+        );
         let frames = split_motion_frames(64, 64, ChromaFormat::Yuv420, 8, 6);
-        let mut e = H265Encoder::new(Config { gop: 8, bframes: 2, ..cfg(64, 64, ChromaFormat::Yuv420) }).unwrap();
+        let mut e = H265Encoder::new(Config {
+            gop: 8,
+            bframes: 2,
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        })
+        .unwrap();
         for f in &frames {
             e.push(f).unwrap();
         }
         e.flush().unwrap();
         for c in &e.census().by_kind {
-            assert_eq!((c.part_2nxn, c.part_nx2n), (0, 0), "a partition without the switch");
+            assert_eq!(
+                (c.part_2nxn, c.part_nx2n),
+                (0, 0),
+                "a partition without the switch"
+            );
         }
     }
 
@@ -5313,10 +6549,21 @@ mod tests {
     /// under each.
     #[test]
     fn adaptive_quantisation_groups_follow_the_stream() {
-        for (gop, max_cu_depth, want) in [(0u32, None, 0u32), (8, None, 1), (8, Some(1), 1), (0, Some(0), 0), (8, Some(0), 0)] {
+        for (gop, max_cu_depth, want) in [
+            (0u32, None, 0u32),
+            (8, None, 1),
+            (8, Some(1), 1),
+            (0, Some(0), 0),
+            (8, Some(0), 0),
+        ] {
             let tag = format!("gop {gop} max_cu_depth {max_cu_depth:?}");
             let frames = tree_frames(64, 64, ChromaFormat::Yuv420, 8, 3);
-            let config = Config { gop, aq_strength: 2.0, max_cu_depth, ..cfg(64, 64, ChromaFormat::Yuv420) };
+            let config = Config {
+                gop,
+                aq_strength: 2.0,
+                max_cu_depth,
+                ..cfg(64, 64, ChromaFormat::Yuv420)
+            };
             let mut e = H265Encoder::new(config).unwrap_or_else(|err| panic!("{tag}: {err}"));
             let mut units = Vec::new();
             for f in &frames {
@@ -5327,10 +6574,17 @@ mod tests {
                 .iter()
                 .flat_map(|u| crate::nal::annexb_nals(&u.data))
                 .filter(|nal| (nal[0] >> 1) & 0x3f == syn::NAL_PPS)
-                .map(|nal| crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&nal[2..])).unwrap().diff_cu_qp_delta_depth)
+                .map(|nal| {
+                    crate::hevc::pps::Pps::parse(&crate::nal::unescape_rbsp(&nal[2..]))
+                        .unwrap()
+                        .diff_cu_qp_delta_depth
+                })
                 .collect();
             assert!(!depths.is_empty(), "{tag}: no PPS in the stream");
-            assert!(depths.iter().all(|&d| d == want), "{tag}: diff_cu_qp_delta_depth {depths:?}, want {want}");
+            assert!(
+                depths.iter().all(|&d| d == want),
+                "{tag}: diff_cu_qp_delta_depth {depths:?}, want {want}"
+            );
             let moved: u64 = e.census().by_kind.iter().map(|k| k.qp_moved).sum();
             assert!(moved > 0, "{tag}: no unit left the picture quantiser");
         }
@@ -5353,24 +6607,155 @@ mod tests {
         // PART_NxN units per chroma format, by ChromaArrayType.
         let mut nxn_by_format = [0u64; 4];
         for (w, h, chroma, bit_depth, gop, bframes, rate, aq_strength, max_cu_depth) in [
-            (64usize, 64usize, ChromaFormat::Yuv420, 8u32, 0u32, 0u32, ConstantQp(30), 0.0f32, 2u32),
-            (64, 64, ChromaFormat::Yuv420, 8, 8, 2, ConstantQp(30), 0.0, 2),
-            (64, 64, ChromaFormat::Yuv420, 8, 8, 2, ConstantQp(30), 0.0, 1),
-            (64, 64, ChromaFormat::Yuv422, 8, 8, 0, ConstantQp(40), 0.0, 2),
-            (64, 64, ChromaFormat::Yuv422, 8, 0, 0, ConstantQp(26), 0.0, 2),
-            (64, 64, ChromaFormat::Yuv444, 8, 8, 2, ConstantQp(30), 0.0, 2),
-            (64, 64, ChromaFormat::Monochrome, 8, 8, 0, ConstantQp(30), 0.0, 2),
-            (64, 64, ChromaFormat::Yuv420, 10, 8, 2, ConstantQp(30), 0.0, 2),
-            (64, 64, ChromaFormat::Yuv420, 8, 8, 2, ConstantQp(30), 2.0, 2),
-            (64, 64, ChromaFormat::Yuv420, 8, 0, 0, ConstantQp(30), 2.0, 2),
-            (64, 64, ChromaFormat::Yuv444, 8, 8, 0, ConstantQp(26), 2.0, 1),
+            (
+                64usize,
+                64usize,
+                ChromaFormat::Yuv420,
+                8u32,
+                0u32,
+                0u32,
+                ConstantQp(30),
+                0.0f32,
+                2u32,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv420,
+                8,
+                8,
+                2,
+                ConstantQp(30),
+                0.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv420,
+                8,
+                8,
+                2,
+                ConstantQp(30),
+                0.0,
+                1,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv422,
+                8,
+                8,
+                0,
+                ConstantQp(40),
+                0.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv422,
+                8,
+                0,
+                0,
+                ConstantQp(26),
+                0.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv444,
+                8,
+                8,
+                2,
+                ConstantQp(30),
+                0.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Monochrome,
+                8,
+                8,
+                0,
+                ConstantQp(30),
+                0.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv420,
+                10,
+                8,
+                2,
+                ConstantQp(30),
+                0.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv420,
+                8,
+                8,
+                2,
+                ConstantQp(30),
+                2.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv420,
+                8,
+                0,
+                0,
+                ConstantQp(30),
+                2.0,
+                2,
+            ),
+            (
+                64,
+                64,
+                ChromaFormat::Yuv444,
+                8,
+                8,
+                0,
+                ConstantQp(26),
+                2.0,
+                1,
+            ),
             (64, 64, ChromaFormat::Yuv420, 8, 8, 2, Lossless, 0.0, 2),
-            (48, 40, ChromaFormat::Yuv420, 8, 8, 0, ConstantQp(30), 2.0, 2),
+            (
+                48,
+                40,
+                ChromaFormat::Yuv420,
+                8,
+                8,
+                0,
+                ConstantQp(30),
+                2.0,
+                2,
+            ),
         ] {
-            let tag = format!("{w}x{h} {chroma:?} {bit_depth}-bit gop={gop} bframes={bframes} {rate:?} aq={aq_strength} depth={max_cu_depth}");
+            let tag = format!(
+                "{w}x{h} {chroma:?} {bit_depth}-bit gop={gop} bframes={bframes} {rate:?} aq={aq_strength} depth={max_cu_depth}"
+            );
             let frames = tree_frames(w, h, chroma, bit_depth, 6);
-            let config = Config { gop, bframes, bit_depth, rate, aq_strength, max_cu_depth: Some(max_cu_depth), ..cfg(w as u32, h as u32, chroma) };
-            let mut e = H265Encoder::new(config.clone()).unwrap_or_else(|err| panic!("{tag}: {err}"));
+            let config = Config {
+                gop,
+                bframes,
+                bit_depth,
+                rate,
+                aq_strength,
+                max_cu_depth: Some(max_cu_depth),
+                ..cfg(w as u32, h as u32, chroma)
+            };
+            let mut e =
+                H265Encoder::new(config.clone()).unwrap_or_else(|err| panic!("{tag}: {err}"));
             let mut units = Vec::new();
             for f in &frames {
                 units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
@@ -5385,7 +6770,8 @@ mod tests {
             // every picture (each is an IDR at POC 0).
             let mut dec = crate::hevc::HevcDecoder::new();
             for u in &units {
-                dec.push_annexb(&u.data).unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
+                dec.push_annexb(&u.data)
+                    .unwrap_or_else(|err| panic!("{tag}: the decoder rejected the stream: {err}"));
             }
             dec.flush().unwrap();
             let mut by_display = vec![None; units.len()];
@@ -5393,22 +6779,40 @@ mod tests {
                 by_display[u.display as usize] = Some(u.encode_index as usize);
             }
             for (i, coded) in by_display.iter().enumerate() {
-                let want = &e.reconstructions()[coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
-                let got = dec.next_picture().unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
-                assert!(got.into_packed() == *want, "{tag}: picture {i} decoded differently than the encoder reconstructed it");
+                let want = &e.reconstructions()
+                    [coded.unwrap_or_else(|| panic!("{tag}: display index {i} never coded"))];
+                let got = dec
+                    .next_picture()
+                    .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                assert!(
+                    got.into_packed() == *want,
+                    "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+                );
                 if rate == Lossless {
                     assert!(*want == frames[i], "{tag}: picture {i} is not lossless");
                 }
             }
 
             if aq_strength > 0.0 {
-                assert!(census.by_kind.iter().map(|k| k.qp_delta).sum::<u64>() > 0, "{tag}: no unit coded a cu_qp_delta");
-                assert!(census.by_kind.iter().map(|k| k.qp_moved).sum::<u64>() > 0, "{tag}: no unit left the picture quantiser");
+                assert!(
+                    census.by_kind.iter().map(|k| k.qp_delta).sum::<u64>() > 0,
+                    "{tag}: no unit coded a cu_qp_delta"
+                );
+                assert!(
+                    census.by_kind.iter().map(|k| k.qp_moved).sum::<u64>() > 0,
+                    "{tag}: no unit left the picture quantiser"
+                );
             }
             let g = syn::Geometry::new(&config);
             if g.log2_ctb == 4 || max_cu_depth == 1 {
-                assert!(census.by_kind.iter().all(|k| k.depth2 == 0), "{tag}: split twice where one split reaches the limit: {census:?}");
-                assert!(census.by_kind.iter().any(|k| k.depth1 > 0), "{tag}: never split at all: {census:?}");
+                assert!(
+                    census.by_kind.iter().all(|k| k.depth2 == 0),
+                    "{tag}: split twice where one split reaches the limit: {census:?}"
+                );
+                assert!(
+                    census.by_kind.iter().any(|k| k.depth1 > 0),
+                    "{tag}: never split at all: {census:?}"
+                );
             }
             for (t, k) in total.iter_mut().zip(census.by_kind.iter()) {
                 t.add(k);
@@ -5421,19 +6825,36 @@ mod tests {
             };
             nxn_by_format[cat] += census.by_kind.iter().map(|k| k.nxn).sum::<u64>();
         }
-        assert!(nxn_by_format.iter().all(|&n| n > 0), "PART_NxN was not taken in every chroma format (by ChromaArrayType): {nxn_by_format:?}");
-        assert!(total[0].nxn > 0 && total[1].nxn + total[2].nxn > 0, "PART_NxN never taken in an I picture or never inside a P/B one: {total:?}");
+        assert!(
+            nxn_by_format.iter().all(|&n| n > 0),
+            "PART_NxN was not taken in every chroma format (by ChromaArrayType): {nxn_by_format:?}"
+        );
+        assert!(
+            total[0].nxn > 0 && total[1].nxn + total[2].nxn > 0,
+            "PART_NxN never taken in an I picture or never inside a P/B one: {total:?}"
+        );
         for (slot, name) in [(0usize, "I"), (1, "P"), (2, "B")] {
             let t = &total[slot];
-            assert!(t.depth1 > 0 && t.depth2 > 0, "{name} pictures never took both split depths: {t:?}");
+            assert!(
+                t.depth1 > 0 && t.depth2 > 0,
+                "{name} pictures never took both split depths: {t:?}"
+            );
             let (m, c) = (t.model_bits as f64, t.coded_bits as f64);
-            assert!(m > 0.5 * c && m < 2.0 * c, "{name} pictures: the split decisions priced {m} bits for {c} coded");
+            assert!(
+                m > 0.5 * c && m < 2.0 * c,
+                "{name} pictures: the split decisions priced {m} bits for {c} coded"
+            );
         }
 
         // A tree changes the stream, and the default is the depth-2 tree.
         let frames = tree_frames(64, 64, ChromaFormat::Yuv420, 8, 3);
         let encode = |max_cu_depth: Option<u32>| -> Vec<u8> {
-            let mut e = H265Encoder::new(Config { gop: 8, max_cu_depth, ..cfg(64, 64, ChromaFormat::Yuv420) }).unwrap();
+            let mut e = H265Encoder::new(Config {
+                gop: 8,
+                max_cu_depth,
+                ..cfg(64, 64, ChromaFormat::Yuv420)
+            })
+            .unwrap();
             let mut out = Vec::new();
             for f in &frames {
                 for u in e.push(f).unwrap() {
@@ -5445,14 +6866,31 @@ mod tests {
             }
             out
         };
-        assert_eq!(Config::default().max_cu_depth, None, "the default asks nothing, and the encoder's default answers");
-        assert_eq!(encode(None), encode(Some(DEFAULT_CU_DEPTH)), "an unset depth must code the default depth");
+        assert_eq!(
+            Config::default().max_cu_depth,
+            None,
+            "the default asks nothing, and the encoder's default answers"
+        );
+        assert_eq!(
+            encode(None),
+            encode(Some(DEFAULT_CU_DEPTH)),
+            "an unset depth must code the default depth"
+        );
         assert_eq!(DEFAULT_CU_DEPTH, 2);
-        assert_ne!(encode(Some(0)), encode(Some(2)), "a depth-2 tree changed nothing on content built to split");
+        assert_ne!(
+            encode(Some(0)),
+            encode(Some(2)),
+            "a depth-2 tree changed nothing on content built to split"
+        );
 
         // Deeper than the minimum coding block allows at any CTB is refused
         // by name rather than clamped.
-        let err = H265Encoder::new(Config { max_cu_depth: Some(3), ..cfg(64, 64, ChromaFormat::Yuv420) }).err().expect("depth 3 must refuse");
+        let err = H265Encoder::new(Config {
+            max_cu_depth: Some(3),
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        })
+        .err()
+        .expect("depth 3 must refuse");
         assert!(format!("{err}").contains("max_cu_depth"), "{err}");
     }
 
@@ -5464,14 +6902,27 @@ mod tests {
     #[test]
     fn the_h264_encoder_refuses_a_quadtree_depth_by_name() {
         for depth in [1u32, 2] {
-            let err = crate::encode::h264::H264Encoder::new(Config { max_cu_depth: Some(depth), ..cfg(64, 64, ChromaFormat::Yuv420) })
-                .err()
-                .unwrap_or_else(|| panic!("H.264 accepted max_cu_depth Some({depth})"));
+            let err = crate::encode::h264::H264Encoder::new(Config {
+                max_cu_depth: Some(depth),
+                ..cfg(64, 64, ChromaFormat::Yuv420)
+            })
+            .err()
+            .unwrap_or_else(|| panic!("H.264 accepted max_cu_depth Some({depth})"));
             let msg = format!("{err}");
-            assert!(msg.contains("max_cu_depth") && msg.contains("H.264"), "{msg}");
+            assert!(
+                msg.contains("max_cu_depth") && msg.contains("H.264"),
+                "{msg}"
+            );
         }
         for ok in [None, Some(0)] {
-            assert!(crate::encode::h264::H264Encoder::new(Config { max_cu_depth: ok, ..cfg(64, 64, ChromaFormat::Yuv420) }).is_ok(), "H.264 refused {ok:?}");
+            assert!(
+                crate::encode::h264::H264Encoder::new(Config {
+                    max_cu_depth: ok,
+                    ..cfg(64, 64, ChromaFormat::Yuv420)
+                })
+                .is_ok(),
+                "H.264 refused {ok:?}"
+            );
         }
     }
 
@@ -5479,11 +6930,17 @@ mod tests {
     /// quadtree depth is: H.264 partitions macroblocks through `subparts`.
     #[test]
     fn the_h264_encoder_refuses_inter_partitions_by_name() {
-        let err = crate::encode::h264::H264Encoder::new(Config { inter_parts: crate::encode::InterParts::Symmetric, ..cfg(64, 64, ChromaFormat::Yuv420) })
-            .err()
-            .expect("H.264 accepted inter_parts Symmetric");
+        let err = crate::encode::h264::H264Encoder::new(Config {
+            inter_parts: crate::encode::InterParts::Symmetric,
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        })
+        .err()
+        .expect("H.264 accepted inter_parts Symmetric");
         let msg = format!("{err}");
-        assert!(msg.contains("inter_parts") && msg.contains("H.264"), "{msg}");
+        assert!(
+            msg.contains("inter_parts") && msg.contains("H.264"),
+            "{msg}"
+        );
     }
 
     /// A source sample above the declared depth is refused by name, not
@@ -5491,20 +6948,34 @@ mod tests {
     /// would be a desync far from its cause.
     #[test]
     fn a_sample_above_the_declared_depth_refuses() {
-        let mut e = H265Encoder::new(Config { bit_depth: 10, gop: 0, ..cfg(64, 64, ChromaFormat::Yuv420) }).unwrap();
+        let mut e = H265Encoder::new(Config {
+            bit_depth: 10,
+            gop: 0,
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        })
+        .unwrap();
         let mut frame = vec![0u8; e.frame_bytes()];
         frame[..2].copy_from_slice(&1024u16.to_le_bytes());
         let err = e.push(&frame).expect_err("1024 does not fit 10 bits");
-        assert!(format!("{err}").contains("exceeds the declared 10-bit depth"), "{err}");
+        assert!(
+            format!("{err}").contains("exceeds the declared 10-bit depth"),
+            "{err}"
+        );
     }
 
     /// Fifteen bits and up stay refused: `Config::validate` bounds the
     /// depth to what the decoders and the 16-bit transform path admit.
     #[test]
     fn deeper_than_fourteen_bits_refuses() {
-        let Err(err) = H265Encoder::new(Config { bit_depth: 16, ..cfg(64, 64, ChromaFormat::Yuv420) }) else {
+        let Err(err) = H265Encoder::new(Config {
+            bit_depth: 16,
+            ..cfg(64, 64, ChromaFormat::Yuv420)
+        }) else {
             panic!("16-bit was accepted")
         };
-        assert!(format!("{err}").contains("bit depth outside 8..=14"), "{err}");
+        assert!(
+            format!("{err}").contains("bit depth outside 8..=14"),
+            "{err}"
+        );
     }
 }

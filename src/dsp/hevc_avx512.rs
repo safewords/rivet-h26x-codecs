@@ -72,13 +72,21 @@ unsafe fn finish<const MODE: u8>(out: &Out16, v: __m512i, other: *const i16, n: 
         let maxv = _mm512_set1_epi16(out.max as i16);
         let clip = |r: __m512i| _mm512_min_epi16(_mm512_max_epi16(r, _mm512_setzero_si512()), maxv);
         match MODE {
-            MODE_UNI => clip(_mm512_sra_epi16(_mm512_adds_epi16(v, _mm512_set1_epi16(1 << (out.shift - 1))), sh)),
+            MODE_UNI => clip(_mm512_sra_epi16(
+                _mm512_adds_epi16(v, _mm512_set1_epi16(1 << (out.shift - 1))),
+                sh,
+            )),
             MODE_BI => {
                 let o = w8::load_i16(other, n);
                 let ones = _mm512_set1_epi32(0x0001_0001);
                 let round = _mm512_set1_epi32(1 << (out.shift - 1));
-                let q = |u: __m512i| _mm512_sra_epi32(_mm512_add_epi32(_mm512_madd_epi16(u, ones), round), sh);
-                clip(_mm512_packs_epi32(q(_mm512_unpacklo_epi16(o, v)), q(_mm512_unpackhi_epi16(o, v))))
+                let q = |u: __m512i| {
+                    _mm512_sra_epi32(_mm512_add_epi32(_mm512_madd_epi16(u, ones), round), sh)
+                };
+                clip(_mm512_packs_epi32(
+                    q(_mm512_unpacklo_epi16(o, v)),
+                    q(_mm512_unpackhi_epi16(o, v)),
+                ))
             }
             _ => v,
         }
@@ -114,12 +122,20 @@ unsafe fn emit_block16<const MODE: u8>(out: &Out16, y0: usize, rows: usize, w: u
             16 => {
                 _mm256_storeu_si256(dst as *mut __m256i, _mm512_castsi512_si256(r));
                 if rows > 1 {
-                    _mm256_storeu_si256(dst.add(out.stride) as *mut __m256i, _mm512_extracti64x4_epi64::<1>(r));
+                    _mm256_storeu_si256(
+                        dst.add(out.stride) as *mut __m256i,
+                        _mm512_extracti64x4_epi64::<1>(r),
+                    );
                 }
             }
             8 => {
                 // One row a 128-bit lane, straight out of the register.
-                let lanes = [_mm512_castsi512_si128(r), _mm512_extracti32x4_epi32::<1>(r), _mm512_extracti32x4_epi32::<2>(r), _mm512_extracti32x4_epi32::<3>(r)];
+                let lanes = [
+                    _mm512_castsi512_si128(r),
+                    _mm512_extracti32x4_epi32::<1>(r),
+                    _mm512_extracti32x4_epi32::<2>(r),
+                    _mm512_extracti32x4_epi32::<3>(r),
+                ];
                 for (k, l) in lanes.iter().enumerate().take(rows) {
                     _mm_storeu_si128(dst.add(k * out.stride) as *mut __m128i, *l);
                 }
@@ -128,7 +144,11 @@ unsafe fn emit_block16<const MODE: u8>(out: &Out16, y0: usize, rows: usize, w: u
                 let mut t = [0u16; 32];
                 _mm512_storeu_si512(t.as_mut_ptr() as *mut __m512i, r);
                 for k in 0..rows {
-                    std::ptr::copy_nonoverlapping(t.as_ptr().add(k * w), dst.add(k * out.stride), w);
+                    std::ptr::copy_nonoverlapping(
+                        t.as_ptr().add(k * w),
+                        dst.add(k * out.stride),
+                        w,
+                    );
                 }
             }
         }
@@ -142,7 +162,16 @@ unsafe fn emit_block16<const MODE: u8>(out: &Out16, y0: usize, rows: usize, w: u
 /// 128-bit lane — puts back in order.
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn fir16<const TAPS: usize, const MODE: u8>(out: &Out16, src: *const u16, src_stride: usize, step: usize, w: usize, h: usize, taps: &[i8], shift: i32) {
+unsafe fn fir16<const TAPS: usize, const MODE: u8>(
+    out: &Out16,
+    src: *const u16,
+    src_stride: usize,
+    step: usize,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+    shift: i32,
+) {
     unsafe {
         let mut c = [_mm512_setzero_si512(); 4];
         for (k, ck) in c.iter_mut().enumerate().take(TAPS / 2) {
@@ -173,7 +202,13 @@ unsafe fn fir16<const TAPS: usize, const MODE: u8>(out: &Out16, src: *const u16,
 /// `w`-strided 14-bit rows (`super::hevc_avx512_u8`'s `fir_v2`, finished
 /// into u16 samples): at `w < 32` one 512-bit load is `32 / w` whole rows.
 #[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
-unsafe fn fir_v2_16<const TAPS: usize, const MODE: u8>(out: &Out16, src: *const i16, w: usize, h: usize, taps: &[i8]) {
+unsafe fn fir_v2_16<const TAPS: usize, const MODE: u8>(
+    out: &Out16,
+    src: *const i16,
+    w: usize,
+    h: usize,
+    taps: &[i8],
+) {
     unsafe {
         let mut c = [_mm512_setzero_si512(); 4];
         for (k, ck) in c.iter_mut().enumerate().take(TAPS / 2) {
@@ -208,25 +243,75 @@ unsafe fn fir_v2_16<const TAPS: usize, const MODE: u8>(out: &Out16, src: *const 
     }
 }
 
-fn qpel_h16(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn qpel_h16(
+    dst: &mut [i16],
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if w < 32 || dst.len() < w * h || !fits16(src.len(), src_stride, h, w, 8) {
         return w16::qpel_h_avx2(dst, src, src_stride, w, h, frac, shift);
     }
-    unsafe { fir16::<8, MODE_I16>(&Out16::i16(dst.as_mut_ptr(), w), src.as_ptr(), src_stride, 1, w, h, &QPEL_FILTERS[frac][..8], shift) }
+    unsafe {
+        fir16::<8, MODE_I16>(
+            &Out16::i16(dst.as_mut_ptr(), w),
+            src.as_ptr(),
+            src_stride,
+            1,
+            w,
+            h,
+            &QPEL_FILTERS[frac][..8],
+            shift,
+        )
+    }
 }
 
-fn qpel_v16(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
+fn qpel_v16(
+    dst: &mut [i16],
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    frac: usize,
+    shift: i32,
+) {
     if w < 32 || dst.len() < w * h || !fits16(src.len(), src_stride, h + 7, w, 0) {
         return w16::qpel_v_avx2(dst, src, src_stride, w, h, frac, shift);
     }
-    unsafe { fir16::<8, MODE_I16>(&Out16::i16(dst.as_mut_ptr(), w), src.as_ptr(), src_stride, src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
+    unsafe {
+        fir16::<8, MODE_I16>(
+            &Out16::i16(dst.as_mut_ptr(), w),
+            src.as_ptr(),
+            src_stride,
+            src_stride,
+            w,
+            h,
+            &QPEL_FILTERS[frac][..8],
+            shift,
+        )
+    }
 }
 
 /// The fused luma kernels, for the cases AVX-512 improves on; `false` hands
 /// the call back to AVX2. As at 8 bits, a narrow diagonal block takes the
 /// AVX2 first stage and this second one.
 #[allow(clippy::too_many_arguments)]
-fn fused16<const MODE: u8>(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) -> bool {
+fn fused16<const MODE: u8>(
+    dst: &mut [u16],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+) -> bool {
     const TAPS: usize = 8;
     let reach = TAPS / 2 - 1;
     let hh = h + TAPS - 1;
@@ -234,9 +319,19 @@ fn fused16<const MODE: u8>(dst: &mut [u16], dst_stride: usize, src: &[u16], src_
     let ok = h >= 1
         && match (fx, fy) {
             (0, 0) => false,
-            (_, 0) => wide && src.len() > reach * src_stride && fits16(src.len() - reach * src_stride, src_stride, h, w, TAPS),
+            (_, 0) => {
+                wide && src.len() > reach * src_stride
+                    && fits16(src.len() - reach * src_stride, src_stride, h, w, TAPS)
+            }
             (0, _) => wide && src.len() > reach && fits16(src.len() - reach, src_stride, hh, w, 0),
-            _ => w8::fits_i16(super::hevc::MC_TMP_LEN, w, hh) && if wide { fits16(src.len(), src_stride, hh, w, TAPS) } else { w16::fits(src.len(), src_stride, hh, w, TAPS) },
+            _ => {
+                w8::fits_i16(super::hevc::MC_TMP_LEN, w, hh)
+                    && if wide {
+                        fits16(src.len(), src_stride, hh, w, TAPS)
+                    } else {
+                        w16::fits(src.len(), src_stride, hh, w, TAPS)
+                    }
+            }
         }
         && (8..=12).contains(&bit_depth)
         && w >= 2
@@ -260,8 +355,26 @@ fn fused16<const MODE: u8>(dst: &mut [u16], dst_stride: usize, src: &[u16], src_
     };
     unsafe {
         match (fx, fy) {
-            (_, 0) => fir16::<TAPS, MODE>(&out, src.as_ptr().add(reach * src_stride), src_stride, 1, w, h, tx, shift1),
-            (0, _) => fir16::<TAPS, MODE>(&out, src.as_ptr().add(reach), src_stride, src_stride, w, h, ty, shift1),
+            (_, 0) => fir16::<TAPS, MODE>(
+                &out,
+                src.as_ptr().add(reach * src_stride),
+                src_stride,
+                1,
+                w,
+                h,
+                tx,
+                shift1,
+            ),
+            (0, _) => fir16::<TAPS, MODE>(
+                &out,
+                src.as_ptr().add(reach),
+                src_stride,
+                src_stride,
+                w,
+                h,
+                ty,
+                shift1,
+            ),
             _ => {
                 let mid = Out16::i16(tmp.as_mut_ptr(), w);
                 if wide {
@@ -277,16 +390,57 @@ fn fused16<const MODE: u8>(dst: &mut [u16], dst_stride: usize, src: &[u16], src_
 }
 
 #[allow(clippy::too_many_arguments)]
-fn qpel_uni16(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
-    if !fused16::<MODE_UNI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, &[], bit_depth) {
-        w16::qpel_uni_avx2(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, bit_depth);
+fn qpel_uni16(
+    dst: &mut [u16],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    bit_depth: u32,
+) {
+    if !fused16::<MODE_UNI>(
+        dst,
+        dst_stride,
+        src,
+        src_stride,
+        w,
+        h,
+        fx,
+        fy,
+        tmp,
+        &[],
+        bit_depth,
+    ) {
+        w16::qpel_uni_avx2(
+            dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, bit_depth,
+        );
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn qpel_bi16(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
-    if !fused16::<MODE_BI>(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, bit_depth) {
-        w16::qpel_bi_avx2(dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, bit_depth);
+fn qpel_bi16(
+    dst: &mut [u16],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fx: usize,
+    fy: usize,
+    tmp: &mut [i16],
+    other: &[i16],
+    bit_depth: u32,
+) {
+    if !fused16::<MODE_BI>(
+        dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, bit_depth,
+    ) {
+        w16::qpel_bi_avx2(
+            dst, dst_stride, src, src_stride, w, h, fx, fy, tmp, other, bit_depth,
+        );
     }
 }
 
@@ -319,7 +473,11 @@ unsafe fn idct32_impl(coeffs: &mut [i16], bd_shift: i32, max_x: usize, max_y: us
                 for p in 0..npairs {
                     let j = 2 * p;
                     let a = _mm512_loadu_si512(coeffs.as_ptr().add(j * N) as *const __m512i);
-                    let b = if j + 1 < nzy { _mm512_loadu_si512(coeffs.as_ptr().add((j + 1) * N) as *const __m512i) } else { _mm512_setzero_si512() };
+                    let b = if j + 1 < nzy {
+                        _mm512_loadu_si512(coeffs.as_ptr().add((j + 1) * N) as *const __m512i)
+                    } else {
+                        _mm512_setzero_si512()
+                    };
                     let c = _mm512_set1_epi32(w16::pair(TRANSFORM32[j][y], TRANSFORM32[j + 1][y]));
                     lo = _mm512_add_epi32(lo, _mm512_madd_epi16(_mm512_unpacklo_epi16(a, b), c));
                     hi = _mm512_add_epi32(hi, _mm512_madd_epi16(_mm512_unpackhi_epi16(a, b), c));
@@ -337,7 +495,11 @@ unsafe fn idct32_impl(coeffs: &mut [i16], bd_shift: i32, max_x: usize, max_y: us
                 for p in 0..npairs {
                     let j = 2 * p;
                     let a = w16::load_n(coeffs.as_ptr().add(j * N), N);
-                    let b = if j + 1 < nzy { w16::load_n(coeffs.as_ptr().add((j + 1) * N), N) } else { _mm256_setzero_si256() };
+                    let b = if j + 1 < nzy {
+                        w16::load_n(coeffs.as_ptr().add((j + 1) * N), N)
+                    } else {
+                        _mm256_setzero_si256()
+                    };
                     let c = _mm256_set1_epi32(w16::pair(TRANSFORM32[j][y], TRANSFORM32[j + 1][y]));
                     lo = _mm256_add_epi32(lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(a, b), c));
                     hi = _mm256_add_epi32(hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(a, b), c));
@@ -363,14 +525,30 @@ unsafe fn idct32_impl(coeffs: &mut [i16], bd_shift: i32, max_x: usize, max_y: us
             for p in 0..npairs {
                 let j = 2 * p;
                 let t0 = *row.add(j) as i32;
-                let t1 = if j + 1 < nzx { *row.add(j + 1) as i32 } else { 0 };
+                let t1 = if j + 1 < nzx {
+                    *row.add(j + 1) as i32
+                } else {
+                    0
+                };
                 let tv = _mm512_set1_epi32((t0 as u16 as i32) | ((t1 as u16 as i32) << 16));
                 let pr = w16::pair_row(N, p);
-                lo = _mm512_add_epi32(lo, _mm512_madd_epi16(_mm512_loadu_si512(pr.as_ptr() as *const __m512i), tv));
-                hi = _mm512_add_epi32(hi, _mm512_madd_epi16(_mm512_loadu_si512(pr.as_ptr().add(32) as *const __m512i), tv));
+                lo = _mm512_add_epi32(
+                    lo,
+                    _mm512_madd_epi16(_mm512_loadu_si512(pr.as_ptr() as *const __m512i), tv),
+                );
+                hi = _mm512_add_epi32(
+                    hi,
+                    _mm512_madd_epi16(
+                        _mm512_loadu_si512(pr.as_ptr().add(32) as *const __m512i),
+                        tv,
+                    ),
+                );
             }
             let r = _mm512_packs_epi32(_mm512_sra_epi32(lo, sh), _mm512_sra_epi32(hi, sh));
-            _mm512_storeu_si512(coeffs.as_mut_ptr().add(y * N) as *mut __m512i, _mm512_permutexvar_epi64(idx, r));
+            _mm512_storeu_si512(
+                coeffs.as_mut_ptr().add(y * N) as *mut __m512i,
+                _mm512_permutexvar_epi64(idx, r),
+            );
         }
     }
 }
@@ -388,12 +566,30 @@ mod tests {
         w16::install(&mut d);
         let before = d;
         install(&mut d);
-        assert!(d.qpel_uni as usize != before.qpel_uni as usize, "install left the AVX2 fused kernels in place");
+        assert!(
+            d.qpel_uni as usize != before.qpel_uni as usize,
+            "install left the AVX2 fused kernels in place"
+        );
         Some(d)
     }
 
     /// Every shape a luma prediction unit can have, and a few more.
-    const SHAPES: &[(usize, usize)] = &[(4, 8), (8, 4), (8, 8), (8, 16), (12, 16), (16, 4), (16, 16), (16, 64), (24, 32), (32, 8), (32, 32), (48, 64), (64, 16), (64, 64)];
+    const SHAPES: &[(usize, usize)] = &[
+        (4, 8),
+        (8, 4),
+        (8, 8),
+        (8, 16),
+        (12, 16),
+        (16, 4),
+        (16, 16),
+        (16, 64),
+        (24, 32),
+        (32, 8),
+        (32, 32),
+        (48, 64),
+        (64, 16),
+        (64, 64),
+    ];
 
     #[test]
     fn interpolation16_matches_scalar() {
@@ -408,9 +604,21 @@ mod tests {
             let max = (1u32 << bd) - 1;
             for rails in [false, true] {
                 let plane: Vec<u16> = (0..stride * 160)
-                    .map(|_| if rails { if lcg(&mut seed).is_multiple_of(2) { 0 } else { max as u16 } } else { (lcg(&mut seed) % (max + 1)) as u16 })
+                    .map(|_| {
+                        if rails {
+                            if lcg(&mut seed).is_multiple_of(2) {
+                                0
+                            } else {
+                                max as u16
+                            }
+                        } else {
+                            (lcg(&mut seed) % (max + 1)) as u16
+                        }
+                    })
                     .collect();
-                let other: Vec<i16> = (0..64 * 64).map(|_| (lcg(&mut seed) % 24000) as i16 - 2500).collect();
+                let other: Vec<i16> = (0..64 * 64)
+                    .map(|_| (lcg(&mut seed) % 24000) as i16 - 2500)
+                    .collect();
                 let shift1 = bd.min(12) as i32 - 8;
                 for &(w, h) in SHAPES {
                     for frac in 1..4 {
@@ -430,8 +638,12 @@ mod tests {
                             (s.qpel_uni)(&mut a, ds, &plane, stride, w, h, fx, fy, &mut t1, bd);
                             (d.qpel_uni)(&mut b, ds, &plane, stride, w, h, fx, fy, &mut t2, bd);
                             assert_eq!(a, b, "qpel_uni {w}x{h} {fx},{fy} {bd} bits rails {rails}");
-                            (s.qpel_bi)(&mut a, ds, &plane, stride, w, h, fx, fy, &mut t1, &other, bd);
-                            (d.qpel_bi)(&mut b, ds, &plane, stride, w, h, fx, fy, &mut t2, &other, bd);
+                            (s.qpel_bi)(
+                                &mut a, ds, &plane, stride, w, h, fx, fy, &mut t1, &other, bd,
+                            );
+                            (d.qpel_bi)(
+                                &mut b, ds, &plane, stride, w, h, fx, fy, &mut t2, &other, bd,
+                            );
                             assert_eq!(a, b, "qpel_bi {w}x{h} {fx},{fy} {bd} bits rails {rails}");
                         }
                     }
@@ -440,7 +652,9 @@ mod tests {
         }
         // The second stage over 14-bit rows, which the u16 table shares with
         // the u8 one: the whole i16 range an interpolation can produce.
-        let mid: Vec<i16> = (0..MC_TMP_LEN).map(|_| (lcg(&mut seed) % 32768) as i16 - 16384).collect();
+        let mid: Vec<i16> = (0..MC_TMP_LEN)
+            .map(|_| (lcg(&mut seed) % 32768) as i16 - 16384)
+            .collect();
         for &(w, h) in SHAPES {
             for frac in 1..8 {
                 let mut a = vec![0i16; w * h];
@@ -458,7 +672,9 @@ mod tests {
     }
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -480,20 +696,27 @@ mod tests {
                 2 => (31, 15),
                 3 => (0, 7),
                 4 => (16, 1),
-                _ => ((lcg(&mut seed) % 32) as usize, (lcg(&mut seed) % 32) as usize),
+                _ => (
+                    (lcg(&mut seed) % 32) as usize,
+                    (lcg(&mut seed) % 32) as usize,
+                ),
             };
             let range = if trial % 3 == 0 { 32767 } else { 900 };
             let mut a = [0i16; N * N];
             for y in 0..=max_y {
                 for x in 0..=max_x {
-                    a[y * N + x] = ((lcg(&mut seed) % (2 * range + 1)) as i32 - range as i32) as i16;
+                    a[y * N + x] =
+                        ((lcg(&mut seed) % (2 * range + 1)) as i32 - range as i32) as i16;
                 }
             }
             let mut b = a;
             let bd_shift = 20 - [8, 10, 12][trial % 3];
             (s.idct[3])(&mut a, bd_shift, max_x, max_y);
             idct32_avx512(&mut b, bd_shift, max_x, max_y);
-            assert_eq!(a, b, "idct32 trial {trial} max {max_x},{max_y} shift {bd_shift}");
+            assert_eq!(
+                a, b,
+                "idct32 trial {trial} max {max_x},{max_y} shift {bd_shift}"
+            );
         }
     }
 }

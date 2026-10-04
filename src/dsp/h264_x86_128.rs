@@ -85,8 +85,14 @@ macro_rules! codec_compat {
             unsafe {
                 let ld = |p: *const u8| zx8(_mm_loadl_epi64(p as *const __m128i));
                 _mm_add_epi16(
-                    _mm_add_epi16(_mm_mullo_epi16(ld(r0), w.0[0]), _mm_mullo_epi16(ld(r0.add(1)), w.0[1])),
-                    _mm_add_epi16(_mm_mullo_epi16(ld(r1), w.0[2]), _mm_mullo_epi16(ld(r1.add(1)), w.0[3])),
+                    _mm_add_epi16(
+                        _mm_mullo_epi16(ld(r0), w.0[0]),
+                        _mm_mullo_epi16(ld(r0.add(1)), w.0[1]),
+                    ),
+                    _mm_add_epi16(
+                        _mm_mullo_epi16(ld(r1), w.0[2]),
+                        _mm_mullo_epi16(ld(r1.add(1)), w.0[3]),
+                    ),
                 )
             }
         }
@@ -142,9 +148,15 @@ macro_rules! codec_compat {
         unsafe fn chroma_row(w: &ChromaW, r0: *const u8, r1: *const u8) -> __m128i {
             unsafe {
                 let pr = |p: *const u8| {
-                    _mm_unpacklo_epi8(_mm_loadl_epi64(p as *const __m128i), _mm_loadl_epi64(p.add(1) as *const __m128i))
+                    _mm_unpacklo_epi8(
+                        _mm_loadl_epi64(p as *const __m128i),
+                        _mm_loadl_epi64(p.add(1) as *const __m128i),
+                    )
                 };
-                _mm_add_epi16(_mm_maddubs_epi16(pr(r0), w.0[0]), _mm_maddubs_epi16(pr(r1), w.0[1]))
+                _mm_add_epi16(
+                    _mm_maddubs_epi16(pr(r0), w.0[0]),
+                    _mm_maddubs_epi16(pr(r1), w.0[1]),
+                )
             }
         }
     };
@@ -319,11 +331,17 @@ macro_rules! kernels {
             let c45 = _mm_set1_epi32(pair(-5, 1));
             let round = _mm_set1_epi32(512);
             let lo = _mm_add_epi32(
-                _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(r0, r1), c01), _mm_madd_epi16(_mm_unpacklo_epi16(r2, r3), c23)),
+                _mm_add_epi32(
+                    _mm_madd_epi16(_mm_unpacklo_epi16(r0, r1), c01),
+                    _mm_madd_epi16(_mm_unpacklo_epi16(r2, r3), c23),
+                ),
                 _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(r4, r5), c45), round),
             );
             let hi = _mm_add_epi32(
-                _mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(r0, r1), c01), _mm_madd_epi16(_mm_unpackhi_epi16(r2, r3), c23)),
+                _mm_add_epi32(
+                    _mm_madd_epi16(_mm_unpackhi_epi16(r0, r1), c01),
+                    _mm_madd_epi16(_mm_unpackhi_epi16(r2, r3), c23),
+                ),
                 _mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(r4, r5), c45), round),
             );
             // At 128 bits `packs` already lands lanes 0..7 in order — the
@@ -339,7 +357,14 @@ macro_rules! kernels {
             unsafe { _mm_loadl_epi64(src.add((y + 2) * stride + 2 + dx + x) as *const __m128i) }
         }
 
-        fn qpel<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, _max: i32) {
+        fn qpel<const XF: usize, const YF: usize>(
+            dst: &mut [u8],
+            src: &[u8],
+            stride: usize,
+            w: usize,
+            h: usize,
+            _max: i32,
+        ) {
             // The window is (w + 5) x (h + 5); an 8-lane load from column
             // x <= 8 reads x + 7 (+5 for taps), so the guard the 16-lane
             // kernel needs covers this one too.
@@ -351,7 +376,13 @@ macro_rules! kernels {
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn qpel_impl<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize) {
+        unsafe fn qpel_impl<const XF: usize, const YF: usize>(
+            dst: &mut [u8],
+            src: &[u8],
+            stride: usize,
+            w: usize,
+            h: usize,
+        ) {
             // The five positions whose vertical filter runs over the
             // *horizontal* intermediates rather than over samples. Their row
             // y needs `b1` of window rows y..y+5 and their row y+1 needs
@@ -379,7 +410,10 @@ macro_rules! kernels {
                             (3, 0) => _mm_avg_epu8(g_row(s, stride, y, 1, x), b()),
                             (0, 1) => _mm_avg_epu8(g_row(s, stride, y, 0, x), hh()),
                             (0, 2) => hh(),
-                            (0, 3) => _mm_avg_epu8(_mm_loadl_epi64(s.add((y + 3) * stride + 2 + x) as *const __m128i), hh()),
+                            (0, 3) => _mm_avg_epu8(
+                                _mm_loadl_epi64(s.add((y + 3) * stride + 2 + x) as *const __m128i),
+                                hh(),
+                            ),
                             (1, 1) => _mm_avg_epu8(b(), hh()),
                             (3, 1) => _mm_avg_epu8(b(), hh_right()),
                             (1, 3) => _mm_avg_epu8(hh(), b_below()),
@@ -402,7 +436,13 @@ macro_rules! kernels {
         /// rows y+2 and y+3 of that same window, so they cost a pack rather
         /// than a filter.
         #[target_feature(enable = $feat)]
-        unsafe fn qpel_centre_impl<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize) {
+        unsafe fn qpel_centre_impl<const XF: usize, const YF: usize>(
+            dst: &mut [u8],
+            src: &[u8],
+            stride: usize,
+            w: usize,
+            h: usize,
+        ) {
             unsafe {
                 let s = src.as_ptr();
                 for c in 0..w.div_ceil(8) {
@@ -425,12 +465,22 @@ macro_rules! kernels {
                             (3, 2) => _mm_avg_epu8(j, round5_pack(h1_row(s, stride, 3 + x, y))),
                             _ => unreachable!(),
                         };
-                        _mm_storel_epi64(dst.as_mut_ptr().add(y * PRED_STRIDE + x) as *mut __m128i, v);
+                        _mm_storel_epi64(
+                            dst.as_mut_ptr().add(y * PRED_STRIDE + x) as *mut __m128i,
+                            v,
+                        );
                         // Not on the last row: the caller's bounds check
                         // covers window rows up to h + 4, and row h + 5 would
                         // read past the block.
                         if y + 1 < h {
-                            win = [win[1], win[2], win[3], win[4], win[5], b1_row(s, stride, y + 6, x)];
+                            win = [
+                                win[1],
+                                win[2],
+                                win[3],
+                                win[4],
+                                win[5],
+                                b1_row(s, stride, y + 6, x),
+                            ];
                         }
                     }
                 }
@@ -449,7 +499,15 @@ macro_rules! kernels {
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn chroma_impl(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
+        unsafe fn chroma_impl(
+            dst: &mut [u8],
+            src: &[u8],
+            stride: usize,
+            w: usize,
+            h: usize,
+            xf: i32,
+            yf: i32,
+        ) {
             unsafe {
                 // Chroma blocks are at most 8 wide: eight i16 lanes.
                 let _ = w;
@@ -459,7 +517,10 @@ macro_rules! kernels {
                 for y in 0..h {
                     let v = chroma_row(&cw, s.add(y * stride), s.add((y + 1) * stride));
                     let v = _mm_srli_epi16(_mm_add_epi16(v, round), 6);
-                    _mm_storel_epi64(dst.as_mut_ptr().add(y * PRED_STRIDE) as *mut __m128i, _mm_packus_epi16(v, v));
+                    _mm_storel_epi64(
+                        dst.as_mut_ptr().add(y * PRED_STRIDE) as *mut __m128i,
+                        _mm_packus_epi16(v, v),
+                    );
                 }
             }
         }
@@ -476,9 +537,18 @@ macro_rules! kernels {
                     let s = src.add(y * PRED_STRIDE);
                     let d = dst.add(y * stride);
                     match w {
-                        16 => _mm_storeu_si128(d as *mut __m128i, _mm_loadu_si128(s as *const __m128i)),
-                        8 => std::ptr::write_unaligned(d as *mut u64, std::ptr::read_unaligned(s as *const u64)),
-                        4 => std::ptr::write_unaligned(d as *mut u32, std::ptr::read_unaligned(s as *const u32)),
+                        16 => _mm_storeu_si128(
+                            d as *mut __m128i,
+                            _mm_loadu_si128(s as *const __m128i),
+                        ),
+                        8 => std::ptr::write_unaligned(
+                            d as *mut u64,
+                            std::ptr::read_unaligned(s as *const u64),
+                        ),
+                        4 => std::ptr::write_unaligned(
+                            d as *mut u32,
+                            std::ptr::read_unaligned(s as *const u32),
+                        ),
                         _ => std::ptr::copy_nonoverlapping(s, d, w),
                     }
                 }
@@ -502,36 +572,89 @@ macro_rules! kernels {
             }
         }
 
-        fn weighted_uni(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, _max: i32) {
+        fn weighted_uni(
+            dst: &mut [u8],
+            stride: usize,
+            src: &[u8],
+            w: usize,
+            h: usize,
+            log_wd: i32,
+            wt: i32,
+            o: i32,
+            _max: i32,
+        ) {
             unsafe { weighted_uni_impl(dst, stride, src, w, h, log_wd, wt, o) }
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32) {
+        unsafe fn weighted_uni_impl(
+            dst: &mut [u8],
+            stride: usize,
+            src: &[u8],
+            w: usize,
+            h: usize,
+            log_wd: i32,
+            wt: i32,
+            o: i32,
+        ) {
             unsafe {
                 // src * wt + round fits i16 only for |wt| <= 128 (spec: -128..127) ✓.
                 let wv = _mm_set1_epi16(wt as i16);
                 let ov = _mm_set1_epi16(o as i16);
                 let round = _mm_set1_epi16(if log_wd >= 1 { 1 << (log_wd - 1) } else { 0 });
                 let sh = _mm_cvtsi32_si128(log_wd.max(0));
-                let scale = |s: __m128i| _mm_add_epi16(_mm_sra_epi16(_mm_add_epi16(_mm_mullo_epi16(s, wv), round), sh), ov);
+                let scale = |s: __m128i| {
+                    _mm_add_epi16(
+                        _mm_sra_epi16(_mm_add_epi16(_mm_mullo_epi16(s, wv), round), sh),
+                        ov,
+                    )
+                };
                 for y in 0..h {
                     let p = src.as_ptr().add(y * PRED_STRIDE);
                     let v0 = scale(load8(p));
                     let v1 = if w > 8 { scale(load8(p.add(8))) } else { v0 };
-                    store_u8_n(dst.as_mut_ptr().add(y * stride), _mm_packus_epi16(v0, v1), w);
+                    store_u8_n(
+                        dst.as_mut_ptr().add(y * stride),
+                        _mm_packus_epi16(v0, v1),
+                        w,
+                    );
                 }
             }
         }
 
         #[allow(clippy::too_many_arguments)]
-        fn weighted_bi(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, _max: i32) {
+        fn weighted_bi(
+            dst: &mut [u8],
+            stride: usize,
+            a: &[u8],
+            b: &[u8],
+            w: usize,
+            h: usize,
+            log_wd: i32,
+            w0: i32,
+            w1: i32,
+            o0: i32,
+            o1: i32,
+            _max: i32,
+        ) {
             unsafe { weighted_bi_impl(dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1) }
         }
 
         #[target_feature(enable = $feat)]
         #[allow(clippy::too_many_arguments)]
-        unsafe fn weighted_bi_impl(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32) {
+        unsafe fn weighted_bi_impl(
+            dst: &mut [u8],
+            stride: usize,
+            a: &[u8],
+            b: &[u8],
+            w: usize,
+            h: usize,
+            log_wd: i32,
+            w0: i32,
+            w1: i32,
+            o0: i32,
+            o1: i32,
+        ) {
             unsafe {
                 // a * w0 + b * w1 reaches 2 * 255 * 128 = 65280, so it needs
                 // 32-bit lanes — but `pmaddwd` on the two predictions
@@ -548,14 +671,23 @@ macro_rules! kernels {
                     let eight = |x: usize| -> __m128i {
                         let va = load8(pa.add(x));
                         let vb = load8(pb.add(x));
-                        let quad = |v: __m128i| _mm_add_epi32(_mm_sra_epi32(_mm_add_epi32(_mm_madd_epi16(v, wv), round), sh), off);
+                        let quad = |v: __m128i| {
+                            _mm_add_epi32(
+                                _mm_sra_epi32(_mm_add_epi32(_mm_madd_epi16(v, wv), round), sh),
+                                off,
+                            )
+                        };
                         let lo = quad(_mm_unpacklo_epi16(va, vb));
                         let hi = quad(_mm_unpackhi_epi16(va, vb));
                         _mm_packs_epi32(lo, hi)
                     };
                     let v0 = eight(0);
                     let v1 = if w > 8 { eight(8) } else { v0 };
-                    store_u8_n(dst.as_mut_ptr().add(y * stride), _mm_packus_epi16(v0, v1), w);
+                    store_u8_n(
+                        dst.as_mut_ptr().add(y * stride),
+                        _mm_packus_epi16(v0, v1),
+                        w,
+                    );
                 }
             }
         }
@@ -591,26 +723,42 @@ macro_rules! kernels {
                 let beta = _mm_set1_epi16(beta as i16);
                 let zero = _mm_setzero_si128();
                 let bs_on = _mm_cmpgt_epi16(tc0v, _mm_set1_epi16(-1));
-                let mask = _mm_and_si128(_mm_and_si128(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), _mm_and_si128(diff_lt(q1, q0, beta), bs_on));
+                let mask = _mm_and_si128(
+                    _mm_and_si128(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+                    _mm_and_si128(diff_lt(q1, q0, beta), bs_on),
+                );
                 let ap = diff_lt(p2, p0, beta);
                 let aq = diff_lt(q2, q0, beta);
                 // tc = tc0 + (ap < beta) + (aq < beta); masks are -1.
                 let tc = _mm_sub_epi16(_mm_sub_epi16(tc0v, ap), aq);
                 // delta = clip3(-tc, tc, ((q0 - p0) * 4 + (p1 - q1) + 4) >> 3)
                 let d = _mm_srai_epi16(
-                    _mm_add_epi16(_mm_add_epi16(_mm_slli_epi16(_mm_sub_epi16(q0, p0), 2), _mm_sub_epi16(p1, q1)), _mm_set1_epi16(4)),
+                    _mm_add_epi16(
+                        _mm_add_epi16(
+                            _mm_slli_epi16(_mm_sub_epi16(q0, p0), 2),
+                            _mm_sub_epi16(p1, q1),
+                        ),
+                        _mm_set1_epi16(4),
+                    ),
                     3,
                 );
                 let d = _mm_min_epi16(_mm_max_epi16(d, _mm_sub_epi16(zero, tc)), tc);
                 let np0 = _mm_add_epi16(p0, d);
                 let nq0 = _mm_sub_epi16(q0, d);
                 // p1' = p1 + clip3(-tc0, tc0, (p2 + ((p0 + q0 + 1) >> 1) - 2 p1) >> 1), when ap
-                let avg = _mm_srai_epi16(_mm_add_epi16(_mm_add_epi16(p0, q0), _mm_set1_epi16(1)), 1);
+                let avg =
+                    _mm_srai_epi16(_mm_add_epi16(_mm_add_epi16(p0, q0), _mm_set1_epi16(1)), 1);
                 let ntc0 = _mm_sub_epi16(zero, tc0v);
-                let dp1 = _mm_srai_epi16(_mm_sub_epi16(_mm_add_epi16(p2, avg), _mm_slli_epi16(p1, 1)), 1);
+                let dp1 = _mm_srai_epi16(
+                    _mm_sub_epi16(_mm_add_epi16(p2, avg), _mm_slli_epi16(p1, 1)),
+                    1,
+                );
                 let dp1 = _mm_min_epi16(_mm_max_epi16(dp1, ntc0), tc0v);
                 let np1 = _mm_add_epi16(p1, _mm_and_si128(dp1, ap));
-                let dq1 = _mm_srai_epi16(_mm_sub_epi16(_mm_add_epi16(q2, avg), _mm_slli_epi16(q1, 1)), 1);
+                let dq1 = _mm_srai_epi16(
+                    _mm_sub_epi16(_mm_add_epi16(q2, avg), _mm_slli_epi16(q1, 1)),
+                    1,
+                );
                 let dq1 = _mm_min_epi16(_mm_max_epi16(dq1, ntc0), tc0v);
                 let nq1 = _mm_add_epi16(q1, _mm_and_si128(dq1, aq));
                 // Clip to 8 bits (p1'/q1' cannot leave the range; p0'/q0' can).
@@ -630,7 +778,10 @@ macro_rules! kernels {
                 let [p3, p2, p1, p0, q0, q1, q2, q3] = *v;
                 let alphav = _mm_set1_epi16(alpha as i16);
                 let beta = _mm_set1_epi16(beta as i16);
-                let mask = _mm_and_si128(_mm_and_si128(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)), diff_lt(q1, q0, beta));
+                let mask = _mm_and_si128(
+                    _mm_and_si128(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)),
+                    diff_lt(q1, q0, beta),
+                );
                 let strong = diff_lt(p0, q0, _mm_set1_epi16(((alpha >> 2) + 2) as i16));
                 let ap = _mm_and_si128(diff_lt(p2, p0, beta), strong);
                 let aq = _mm_and_si128(diff_lt(q2, q0, beta), strong);
@@ -645,11 +796,17 @@ macro_rules! kernels {
                 let p0q0 = add(p0, q0);
                 let sp0 = _mm_srai_epi16(add(add(p2, dbl(add(p1, p0q0))), add(q1, four)), 3);
                 let sp1 = _mm_srai_epi16(add(add(p2, p1), add(p0q0, two)), 2);
-                let sp2 = _mm_srai_epi16(add(add(dbl(p3), add(p2, dbl(p2))), add(add(p1, p0q0), four)), 3);
+                let sp2 = _mm_srai_epi16(
+                    add(add(dbl(p3), add(p2, dbl(p2))), add(add(p1, p0q0), four)),
+                    3,
+                );
                 // Strong q side.
                 let sq0 = _mm_srai_epi16(add(add(p1, dbl(add(p0q0, q1))), add(q2, four)), 3);
                 let sq1 = _mm_srai_epi16(add(add(p0q0, q1), add(q2, two)), 2);
-                let sq2 = _mm_srai_epi16(add(add(dbl(q3), add(q2, dbl(q2))), add(add(q1, p0q0), four)), 3);
+                let sq2 = _mm_srai_epi16(
+                    add(add(dbl(q3), add(q2, dbl(q2))), add(add(q1, p0q0), four)),
+                    3,
+                );
                 let np0 = sel(wp0, sp0, ap);
                 let np1 = sel(p1, sp1, ap);
                 let np2 = sel(p2, sp2, ap);
@@ -698,7 +855,16 @@ macro_rules! kernels {
                 let c1 = _mm_unpackhi_epi32(b0, b2); // col2 | col3
                 let c2 = _mm_unpacklo_epi32(b1, b3); // col4 | col5
                 let c3 = _mm_unpackhi_epi32(b1, b3); // col6 | col7
-                [zx8(c0), zx8h(c0), zx8(c1), zx8h(c1), zx8(c2), zx8h(c2), zx8(c3), zx8h(c3)]
+                [
+                    zx8(c0),
+                    zx8h(c0),
+                    zx8(c1),
+                    zx8h(c1),
+                    zx8(c2),
+                    zx8h(c2),
+                    zx8(c3),
+                    zx8h(c3),
+                ]
             }
         }
 
@@ -729,12 +895,23 @@ macro_rules! kernels {
                 ];
                 for (k, pair) in rows.iter().enumerate() {
                     _mm_storel_epi64(data.add(2 * k * stride).sub(4) as *mut __m128i, *pair);
-                    _mm_storel_epi64(data.add((2 * k + 1) * stride).sub(4) as *mut __m128i, _mm_srli_si128(*pair, 8));
+                    _mm_storel_epi64(
+                        data.add((2 * k + 1) * stride).sub(4) as *mut __m128i,
+                        _mm_srli_si128(*pair, 8),
+                    );
                 }
             }
         }
 
-        fn deblock_luma_v(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+        fn deblock_luma_v(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+            _max: i32,
+        ) {
             if tc0.iter().all(|&t| t < 0) {
                 return;
             }
@@ -743,7 +920,13 @@ macro_rules! kernels {
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn deblock_luma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
+        unsafe fn deblock_luma_v_impl(
+            data: *mut u8,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+        ) {
             unsafe {
                 for half in 0..2 {
                     let d = data.add(half * 8 * stride);
@@ -764,7 +947,15 @@ macro_rules! kernels {
             _mm_setr_epi16(t(0), t(0), t(1), t(1), t(2), t(2), t(3), t(3))
         }
 
-        fn deblock_luma8_v(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+        fn deblock_luma8_v(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+            _max: i32,
+        ) {
             if tc0.iter().all(|&t| t < 0) {
                 return;
             }
@@ -775,7 +966,13 @@ macro_rules! kernels {
         /// Eight lines is exactly one half of the sixteen-line kernel's
         /// loop; only the tC0 lanes differ.
         #[target_feature(enable = $feat)]
-        unsafe fn deblock_luma8_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
+        unsafe fn deblock_luma8_v_impl(
+            data: *mut u8,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+        ) {
             unsafe {
                 let mut v = load_transposed_8x8(data, stride);
                 luma_filter_normal(&mut v, alpha, beta, tc0_luma8(tc0));
@@ -783,7 +980,14 @@ macro_rules! kernels {
             }
         }
 
-        fn deblock_luma8_v_intra(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+        fn deblock_luma8_v_intra(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            _max: i32,
+        ) {
             assert!(off >= 4 && off + 7 * stride + 4 <= data.len());
             unsafe { deblock_luma8_v_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
         }
@@ -797,7 +1001,14 @@ macro_rules! kernels {
             }
         }
 
-        fn deblock_luma_v_intra(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+        fn deblock_luma_v_intra(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            _max: i32,
+        ) {
             assert!(off >= 4 && off + 15 * stride + 4 <= data.len());
             unsafe { deblock_luma_v_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
         }
@@ -814,7 +1025,15 @@ macro_rules! kernels {
             }
         }
 
-        fn deblock_luma_h(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+        fn deblock_luma_h(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+            _max: i32,
+        ) {
             if tc0.iter().all(|&t| t < 0) {
                 return;
             }
@@ -823,13 +1042,20 @@ macro_rules! kernels {
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn deblock_luma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
+        unsafe fn deblock_luma_h_impl(
+            data: *mut u8,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+        ) {
             unsafe {
                 let zero = _mm_setzero_si128();
                 for half in 0..2 {
                     let d = data.add(half * 8);
                     let ld = |k: isize| load8(d.offset(k * stride as isize));
-                    let mut v: LumaLines = [zero, ld(-3), ld(-2), ld(-1), ld(0), ld(1), ld(2), zero];
+                    let mut v: LumaLines =
+                        [zero, ld(-3), ld(-2), ld(-1), ld(0), ld(1), ld(2), zero];
                     luma_filter_normal(&mut v, alpha, beta, tc0_luma(tc0, half));
                     store8(d.offset(-2 * stride as isize), v[2]);
                     store8(d.offset(-(stride as isize)), v[3]);
@@ -839,7 +1065,14 @@ macro_rules! kernels {
             }
         }
 
-        fn deblock_luma_h_intra(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+        fn deblock_luma_h_intra(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            _max: i32,
+        ) {
             assert!(off >= 4 * stride && off + 3 * stride + 16 <= data.len());
             unsafe { deblock_luma_h_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
         }
@@ -850,7 +1083,8 @@ macro_rules! kernels {
                 for half in 0..2 {
                     let d = data.add(half * 8);
                     let ld = |k: isize| load8(d.offset(k * stride as isize));
-                    let mut v: LumaLines = [ld(-4), ld(-3), ld(-2), ld(-1), ld(0), ld(1), ld(2), ld(3)];
+                    let mut v: LumaLines =
+                        [ld(-4), ld(-3), ld(-2), ld(-1), ld(0), ld(1), ld(2), ld(3)];
                     luma_filter_intra(&mut v, alpha, beta);
                     for k in 1..7 {
                         store8(d.offset((k as isize - 4) * stride as isize), v[k]);
@@ -871,9 +1105,21 @@ macro_rules! kernels {
                 let beta = _mm_set1_epi16(beta as i16);
                 let zero = _mm_setzero_si128();
                 let bs_on = _mm_cmpgt_epi16(tc0v, _mm_set1_epi16(-1));
-                let mask = _mm_and_si128(_mm_and_si128(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), _mm_and_si128(diff_lt(q1, q0, beta), bs_on));
+                let mask = _mm_and_si128(
+                    _mm_and_si128(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+                    _mm_and_si128(diff_lt(q1, q0, beta), bs_on),
+                );
                 let tc = _mm_add_epi16(tc0v, _mm_set1_epi16(1));
-                let d = _mm_srai_epi16(_mm_add_epi16(_mm_add_epi16(_mm_slli_epi16(_mm_sub_epi16(q0, p0), 2), _mm_sub_epi16(p1, q1)), _mm_set1_epi16(4)), 3);
+                let d = _mm_srai_epi16(
+                    _mm_add_epi16(
+                        _mm_add_epi16(
+                            _mm_slli_epi16(_mm_sub_epi16(q0, p0), 2),
+                            _mm_sub_epi16(p1, q1),
+                        ),
+                        _mm_set1_epi16(4),
+                    ),
+                    3,
+                );
                 let d = _mm_min_epi16(_mm_max_epi16(d, _mm_sub_epi16(zero, tc)), tc);
                 let clip = |x: __m128i| _mm_min_epi16(_mm_max_epi16(x, zero), _mm_set1_epi16(255));
                 v[1] = sel(p0, clip(_mm_add_epi16(p0, d)), mask);
@@ -888,10 +1134,25 @@ macro_rules! kernels {
                 let [p1, p0, q0, q1] = *v;
                 let alpha = _mm_set1_epi16(alpha as i16);
                 let beta = _mm_set1_epi16(beta as i16);
-                let mask = _mm_and_si128(_mm_and_si128(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), diff_lt(q1, q0, beta));
+                let mask = _mm_and_si128(
+                    _mm_and_si128(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+                    diff_lt(q1, q0, beta),
+                );
                 let two = _mm_set1_epi16(2);
-                let np0 = _mm_srai_epi16(_mm_add_epi16(_mm_add_epi16(_mm_slli_epi16(p1, 1), p0), _mm_add_epi16(q1, two)), 2);
-                let nq0 = _mm_srai_epi16(_mm_add_epi16(_mm_add_epi16(_mm_slli_epi16(q1, 1), q0), _mm_add_epi16(p1, two)), 2);
+                let np0 = _mm_srai_epi16(
+                    _mm_add_epi16(
+                        _mm_add_epi16(_mm_slli_epi16(p1, 1), p0),
+                        _mm_add_epi16(q1, two),
+                    ),
+                    2,
+                );
+                let nq0 = _mm_srai_epi16(
+                    _mm_add_epi16(
+                        _mm_add_epi16(_mm_slli_epi16(q1, 1), q0),
+                        _mm_add_epi16(p1, two),
+                    ),
+                    2,
+                );
                 v[1] = sel(p0, np0, mask);
                 v[2] = sel(q0, nq0, mask);
             }
@@ -913,7 +1174,9 @@ macro_rules! kernels {
             unsafe {
                 let mut r = [_mm_setzero_si128(); 8];
                 for i in 0..8 {
-                    r[i] = _mm_cvtsi32_si128(std::ptr::read_unaligned(data.add(i * stride).sub(2) as *const i32));
+                    r[i] = _mm_cvtsi32_si128(std::ptr::read_unaligned(
+                        data.add(i * stride).sub(2) as *const i32
+                    ));
                 }
                 let a0 = _mm_unpacklo_epi8(r[0], r[1]); // p1r0 p1r1 p0r0 p0r1 q0r0 q0r1 q1r0 q1r1
                 let a1 = _mm_unpacklo_epi8(r[2], r[3]);
@@ -946,7 +1209,15 @@ macro_rules! kernels {
             }
         }
 
-        fn deblock_chroma_v(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+        fn deblock_chroma_v(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+            _max: i32,
+        ) {
             if tc0.iter().all(|&t| t < 0) {
                 return;
             }
@@ -955,7 +1226,13 @@ macro_rules! kernels {
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn deblock_chroma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
+        unsafe fn deblock_chroma_v_impl(
+            data: *mut u8,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+        ) {
             unsafe {
                 let mut v = load_transposed_8x4(data, stride);
                 chroma_filter_normal(&mut v, alpha, beta, tc0_chroma(tc0));
@@ -963,7 +1240,14 @@ macro_rules! kernels {
             }
         }
 
-        fn deblock_chroma_v_intra(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+        fn deblock_chroma_v_intra(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            _max: i32,
+        ) {
             assert!(off >= 2 && off + 7 * stride + 2 <= data.len());
             unsafe { deblock_chroma_v_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
         }
@@ -977,7 +1261,15 @@ macro_rules! kernels {
             }
         }
 
-        fn deblock_chroma_h(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
+        fn deblock_chroma_h(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+            _max: i32,
+        ) {
             if tc0.iter().all(|&t| t < 0) {
                 return;
             }
@@ -986,16 +1278,34 @@ macro_rules! kernels {
         }
 
         #[target_feature(enable = $feat)]
-        unsafe fn deblock_chroma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
+        unsafe fn deblock_chroma_h_impl(
+            data: *mut u8,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            tc0: &[i16; 4],
+        ) {
             unsafe {
-                let mut v: ChromaLines = [load8(data.sub(2 * stride)), load8(data.sub(stride)), load8(data), load8(data.add(stride))];
+                let mut v: ChromaLines = [
+                    load8(data.sub(2 * stride)),
+                    load8(data.sub(stride)),
+                    load8(data),
+                    load8(data.add(stride)),
+                ];
                 chroma_filter_normal(&mut v, alpha, beta, tc0_chroma(tc0));
                 store8(data.sub(stride), v[1]);
                 store8(data, v[2]);
             }
         }
 
-        fn deblock_chroma_h_intra(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
+        fn deblock_chroma_h_intra(
+            data: &mut [u8],
+            off: usize,
+            stride: usize,
+            alpha: i32,
+            beta: i32,
+            _max: i32,
+        ) {
             assert!(off >= 2 * stride && off + stride + 8 <= data.len());
             unsafe { deblock_chroma_h_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
         }
@@ -1003,7 +1313,12 @@ macro_rules! kernels {
         #[target_feature(enable = $feat)]
         unsafe fn deblock_chroma_h_intra_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32) {
             unsafe {
-                let mut v: ChromaLines = [load8(data.sub(2 * stride)), load8(data.sub(stride)), load8(data), load8(data.add(stride))];
+                let mut v: ChromaLines = [
+                    load8(data.sub(2 * stride)),
+                    load8(data.sub(stride)),
+                    load8(data),
+                    load8(data.add(stride)),
+                ];
                 chroma_filter_intra(&mut v, alpha, beta);
                 store8(data.sub(stride), v[1]);
                 store8(data, v[2]);
@@ -1025,7 +1340,9 @@ macro_rules! kernels {
             unsafe {
                 let r = _mm_srai_epi16(_mm_add_epi16(v, _mm_set1_epi16(32)), 6);
                 if n == 4 {
-                    let p = zx8(_mm_cvtsi32_si128(std::ptr::read_unaligned(dst as *const i32)));
+                    let p = zx8(_mm_cvtsi32_si128(std::ptr::read_unaligned(
+                        dst as *const i32,
+                    )));
                     let s = _mm_packus_epi16(_mm_add_epi16(p, r), _mm_setzero_si128());
                     std::ptr::write_unaligned(dst as *mut i32, _mm_cvtsi128_si32(s));
                 } else {
@@ -1068,7 +1385,8 @@ macro_rules! kernels {
                 let u1 = _mm_unpacklo_epi16(f2, f3);
                 let r01 = _mm_unpacklo_epi32(u0, u1);
                 let r23 = _mm_unpackhi_epi32(u0, u1);
-                let (row0, row1, row2, row3) = (r01, _mm_srli_si128(r01, 8), r23, _mm_srli_si128(r23, 8));
+                let (row0, row1, row2, row3) =
+                    (r01, _mm_srli_si128(r01, 8), r23, _mm_srli_si128(r23, 8));
                 // Column pass.
                 let g0 = _mm_add_epi16(row0, row2);
                 let g1 = _mm_sub_epi16(row0, row2);
@@ -1139,7 +1457,16 @@ macro_rules! kernels {
             let b7 = sub(a7, sh2(a1));
             let b3 = add(a3, sh2(a5));
             let b5 = sub(sh2(a3), a5);
-            [add(b0, b7), add(b2, b5), add(b4, b3), add(b6, b1), sub(b6, b1), sub(b4, b3), sub(b2, b5), sub(b0, b7)]
+            [
+                add(b0, b7),
+                add(b2, b5),
+                add(b4, b3),
+                add(b6, b1),
+                sub(b6, b1),
+                sub(b4, b3),
+                sub(b2, b5),
+                sub(b0, b7),
+            ]
         }
 
         fn idct8_add(dst: &mut [u8], stride: usize, coeffs: &[i16; 64], _max: i32) {
@@ -1189,7 +1516,12 @@ macro_rules! kernels {
         #[target_feature(enable = $feat)]
         #[inline]
         unsafe fn coefs16(coefs: *const i32) -> __m128i {
-            unsafe { _mm_packs_epi32(_mm_loadu_si128(coefs as *const __m128i), _mm_loadu_si128(coefs.add(4) as *const __m128i)) }
+            unsafe {
+                _mm_packs_epi32(
+                    _mm_loadu_si128(coefs as *const __m128i),
+                    _mm_loadu_si128(coefs.add(4) as *const __m128i),
+                )
+            }
         }
 
         fn residual4(dst: &mut [u8], stride: usize, coefs: &[i32; 16], dc: i32, _max: i32) {
@@ -1206,7 +1538,10 @@ macro_rules! kernels {
                     c0 = _mm_insert_epi16(c0, dc as i16 as i32, 0);
                 }
                 // Any AC nonzero? Zero lane 0, compare the rest with zero.
-                let ac = _mm_or_si128(_mm_andnot_si128(_mm_setr_epi16(-1, 0, 0, 0, 0, 0, 0, 0), c0), c1);
+                let ac = _mm_or_si128(
+                    _mm_andnot_si128(_mm_setr_epi16(-1, 0, 0, 0, 0, 0, 0, 0), c0),
+                    c1,
+                );
                 if is_zero(ac) {
                     let d = _mm_extract_epi16(c0, 0) as i16 as i32;
                     if d != 0 {
@@ -1234,7 +1569,11 @@ macro_rules! kernels {
                 for k in 0..8 {
                     let c = coefs16(coefs.as_ptr().add(8 * k));
                     _mm_storeu_si128(coeffs.as_mut_ptr().add(8 * k) as *mut __m128i, c);
-                    let masked = if k == 0 { _mm_andnot_si128(_mm_setr_epi16(-1, 0, 0, 0, 0, 0, 0, 0), c) } else { c };
+                    let masked = if k == 0 {
+                        _mm_andnot_si128(_mm_setr_epi16(-1, 0, 0, 0, 0, 0, 0, 0), c)
+                    } else {
+                        c
+                    };
                     ac = _mm_or_si128(ac, masked);
                 }
                 if is_zero(ac) {
@@ -1314,7 +1653,9 @@ mod tests {
     use crate::dsp::h264::PRED_STRIDE;
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -1326,9 +1667,33 @@ mod tests {
         let base = Cpu::SCALAR;
         for (name, cpu) in [
             ("sse2", Cpu { sse2: true, ..base }),
-            ("ssse3", Cpu { sse2: true, ssse3: true, ..base }),
-            ("sse4.1", Cpu { sse2: true, ssse3: true, sse41: true, ..base }),
-            ("avx", Cpu { sse2: true, ssse3: true, sse41: true, avx: true, ..base }),
+            (
+                "ssse3",
+                Cpu {
+                    sse2: true,
+                    ssse3: true,
+                    ..base
+                },
+            ),
+            (
+                "sse4.1",
+                Cpu {
+                    sse2: true,
+                    ssse3: true,
+                    sse41: true,
+                    ..base
+                },
+            ),
+            (
+                "avx",
+                Cpu {
+                    sse2: true,
+                    ssse3: true,
+                    sse41: true,
+                    avx: true,
+                    ..base
+                },
+            ),
         ] {
             // Skip rungs this host cannot execute.
             let have = match name {
@@ -1354,10 +1719,22 @@ mod tests {
             let mut seed = 5u64;
             let stride = 64;
             let src: Vec<u8> = (0..stride * 64).map(|_| lcg(&mut seed) as u8).collect();
-            for &(w, h) in &[(4usize, 4usize), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16)] {
+            for &(w, h) in &[
+                (4usize, 4usize),
+                (4, 8),
+                (8, 4),
+                (8, 8),
+                (8, 16),
+                (16, 8),
+                (16, 16),
+            ] {
                 // Only the w x h block of the stride-16 scratch is compared:
                 // the SIMD kernels may write the rest of each row.
-                let block = |v: &[u8]| -> Vec<u8> { (0..h).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec()).collect() };
+                let block = |v: &[u8]| -> Vec<u8> {
+                    (0..h)
+                        .flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec())
+                        .collect()
+                };
                 for pos in 0..16 {
                     let mut a = vec![0u8; 16 * PRED_STRIDE];
                     let mut b = vec![0u8; 16 * PRED_STRIDE];
@@ -1372,12 +1749,20 @@ mod tests {
                         let mut b = vec![0u8; 16 * PRED_STRIDE];
                         (s.chroma)(&mut a, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
                         (d.chroma)(&mut b, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
-                        let cb = |v: &[u8]| -> Vec<u8> { (0..ch).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec()).collect() };
+                        let cb = |v: &[u8]| -> Vec<u8> {
+                            (0..ch)
+                                .flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec())
+                                .collect()
+                        };
                         assert_eq!(cb(&a), cb(&b), "{name} chroma {xf},{yf} {cw}x{ch}");
                     }
                 }
-                let a: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
-                let b: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
+                let a: Vec<u8> = (0..16 * PRED_STRIDE)
+                    .map(|_| lcg(&mut seed) as u8)
+                    .collect();
+                let b: Vec<u8> = (0..16 * PRED_STRIDE)
+                    .map(|_| lcg(&mut seed) as u8)
+                    .collect();
                 let ds = w + 3;
                 let mut d1 = vec![0u8; ds * h];
                 let mut d2 = vec![0u8; ds * h];
@@ -1387,7 +1772,13 @@ mod tests {
                 (s.copy)(&mut d1, ds, &a, w, h);
                 (d.copy)(&mut d2, ds, &a, w, h);
                 assert_eq!(d1, d2, "{name} copy {w}x{h}");
-                for &(lwd, wt, o) in &[(6, 64, 0), (0, 1, 3), (5, -20, -7), (7, 127, 127), (2, 33, -128)] {
+                for &(lwd, wt, o) in &[
+                    (6, 64, 0),
+                    (0, 1, 3),
+                    (5, -20, -7),
+                    (7, 127, 127),
+                    (2, 33, -128),
+                ] {
                     (s.weighted_uni)(&mut d1, ds, &a, w, h, lwd, wt, o, 255);
                     (d.weighted_uni)(&mut d2, ds, &a, w, h, lwd, wt, o, 255);
                     assert_eq!(d1, d2, "{name} wuni {w}x{h} {lwd} {wt} {o}");
@@ -1409,7 +1800,9 @@ mod tests {
                 // Smooth-ish content so the alpha/beta tests pass often.
                 let base = lcg(&mut seed) % 256;
                 let spread = 1 + lcg(&mut seed) % 64;
-                let plane: Vec<u8> = (0..stride * 40).map(|_| (base + lcg(&mut seed) % spread).min(255) as u8).collect();
+                let plane: Vec<u8> = (0..stride * 40)
+                    .map(|_| (base + lcg(&mut seed) % spread).min(255) as u8)
+                    .collect();
                 let alpha = (lcg(&mut seed) % 256) as i32;
                 let beta = (lcg(&mut seed) % 20) as i32;
                 let mut tc0 = [0i16; 4];
@@ -1461,7 +1854,12 @@ mod tests {
                         (d.deblock_chroma_h_intra)(&mut b, off, stride, alpha, beta, 255);
                     }
                 }
-                assert_eq!(a, b, "{name} deblock kind {} trial {trial} alpha {alpha} beta {beta} tc0 {tc0:?}", trial % 8);
+                assert_eq!(
+                    a,
+                    b,
+                    "{name} deblock kind {} trial {trial} alpha {alpha} beta {beta} tc0 {tc0:?}",
+                    trial % 8
+                );
             }
         }
     }
@@ -1479,7 +1877,11 @@ mod tests {
                 let mut c32 = [0i32; 64];
                 let nz = 1 + lcg(&mut seed) % 64;
                 for k in 0..64 {
-                    let v = if k < nz as usize { (lcg(&mut seed) % 512) as i32 - 256 } else { 0 };
+                    let v = if k < nz as usize {
+                        (lcg(&mut seed) % 512) as i32 - 256
+                    } else {
+                        0
+                    };
                     c16[k] = v as i16;
                     c32[k] = v;
                 }
@@ -1507,7 +1909,11 @@ mod tests {
                     }
                     4 => {
                         let c: [i32; 16] = c32[0..16].try_into().unwrap();
-                        let dc = if trial % 12 == 4 { crate::dsp::h264::NO_DC } else { c32[17] };
+                        let dc = if trial % 12 == 4 {
+                            crate::dsp::h264::NO_DC
+                        } else {
+                            c32[17]
+                        };
                         (s.residual4)(&mut a, stride, &c, dc, 255);
                         (d.residual4)(&mut b, stride, &c, dc, 255);
                     }

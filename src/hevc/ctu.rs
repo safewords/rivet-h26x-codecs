@@ -9,19 +9,20 @@ use crate::picture::ChromaFormat;
 use crate::{Error, Result};
 
 use super::ctx::*;
-use super::frame::{Frame, MotionInfo, Mv, SharedFrame, Sample, fill_motion};
+use super::frame::{Frame, MotionInfo, Mv, Sample, SharedFrame, fill_motion};
 use super::inter::{McScratch, Weighting, predict_block, predict_block_wide};
 use super::intra::{IntraScratch, predict as intra_predict};
 use super::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate};
 use super::pic::{AvailCtx, PicInfo, SaoParams};
 use super::pps::Pps;
 use super::residual::{
-    ResidualParams, ResidualRange, ScalingSource, parse_residual, rdpcm_residual, residual_scan_idx, rotate_residual4, scale_coefficients, scale_coefficients_i32,
+    ResidualParams, ResidualRange, ScalingSource, parse_residual, rdpcm_residual,
+    residual_scan_idx, rotate_residual4, scale_coefficients, scale_coefficients_i32,
     transform_skip_residual, transform_skip_residual_i32,
 };
-use crate::dsp::hevc::{HevcDsp, add_residual_wide, idct_wide, idst4_wide};
 use super::slice::{PredWeightTable, SliceHeader, SliceType};
 use super::sps::{ScalingList, Sps};
+use crate::dsp::hevc::{HevcDsp, add_residual_wide, idct_wide, idst4_wide};
 
 /// Partition modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,14 +53,43 @@ impl PartMode {
     pub(crate) fn pus(self, n: i32) -> Pus {
         let z = (0, 0, 0, 0);
         match self {
-            PartMode::P2Nx2N => Pus { list: [(0, 0, n, n), z, z, z], count: 1 },
-            PartMode::P2NxN => Pus { list: [(0, 0, n, n / 2), (0, n / 2, n, n / 2), z, z], count: 2 },
-            PartMode::PNx2N => Pus { list: [(0, 0, n / 2, n), (n / 2, 0, n / 2, n), z, z], count: 2 },
-            PartMode::PNxN => Pus { list: [(0, 0, n / 2, n / 2), (n / 2, 0, n / 2, n / 2), (0, n / 2, n / 2, n / 2), (n / 2, n / 2, n / 2, n / 2)], count: 4 },
-            PartMode::P2NxnU => Pus { list: [(0, 0, n, n / 4), (0, n / 4, n, n * 3 / 4), z, z], count: 2 },
-            PartMode::P2NxnD => Pus { list: [(0, 0, n, n * 3 / 4), (0, n * 3 / 4, n, n / 4), z, z], count: 2 },
-            PartMode::PnLx2N => Pus { list: [(0, 0, n / 4, n), (n / 4, 0, n * 3 / 4, n), z, z], count: 2 },
-            PartMode::PnRx2N => Pus { list: [(0, 0, n * 3 / 4, n), (n * 3 / 4, 0, n / 4, n), z, z], count: 2 },
+            PartMode::P2Nx2N => Pus {
+                list: [(0, 0, n, n), z, z, z],
+                count: 1,
+            },
+            PartMode::P2NxN => Pus {
+                list: [(0, 0, n, n / 2), (0, n / 2, n, n / 2), z, z],
+                count: 2,
+            },
+            PartMode::PNx2N => Pus {
+                list: [(0, 0, n / 2, n), (n / 2, 0, n / 2, n), z, z],
+                count: 2,
+            },
+            PartMode::PNxN => Pus {
+                list: [
+                    (0, 0, n / 2, n / 2),
+                    (n / 2, 0, n / 2, n / 2),
+                    (0, n / 2, n / 2, n / 2),
+                    (n / 2, n / 2, n / 2, n / 2),
+                ],
+                count: 4,
+            },
+            PartMode::P2NxnU => Pus {
+                list: [(0, 0, n, n / 4), (0, n / 4, n, n * 3 / 4), z, z],
+                count: 2,
+            },
+            PartMode::P2NxnD => Pus {
+                list: [(0, 0, n, n * 3 / 4), (0, n * 3 / 4, n, n / 4), z, z],
+                count: 2,
+            },
+            PartMode::PnLx2N => Pus {
+                list: [(0, 0, n / 4, n), (n / 4, 0, n * 3 / 4, n), z, z],
+                count: 2,
+            },
+            PartMode::PnRx2N => Pus {
+                list: [(0, 0, n * 3 / 4, n), (n * 3 / 4, 0, n / 4, n), z, z],
+                count: 2,
+            },
         }
     }
 }
@@ -182,8 +212,12 @@ impl TraceCfg {
         TraceCfg {
             cu: std::env::var_os("H26X_TRACE_CU").is_some(),
             ctb: std::env::var_os("H26X_TRACE_CTB").is_some(),
-            pu: pair("H26X_TRACE_PU").filter(|p| p.len() == 2).map(|p| (p[0] as i32, p[1] as i32)),
-            tb: pair("H26X_TRACE_TB").filter(|p| p.len() == 3).map(|p| (p[0] as usize, p[1] as usize, p[2] as usize)),
+            pu: pair("H26X_TRACE_PU")
+                .filter(|p| p.len() == 2)
+                .map(|p| (p[0] as i32, p[1] as i32)),
+            tb: pair("H26X_TRACE_TB")
+                .filter(|p| p.len() == 3)
+                .map(|p| (p[0] as usize, p[1] as usize, p[2] as usize)),
         }
     }
     fn tb_hit(&self, c_idx: usize, x: usize, y: usize, n: usize) -> bool {
@@ -200,7 +234,8 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     /// The current block's side of the z-scan availability test (6.4.1),
     /// for a block about to ask after several neighbours.
     fn avail_ctx(&self, xc: i32, yc: i32) -> AvailCtx {
-        self.info.avail_ctx(xc, yc, self.frame.width as i32, self.frame.height as i32)
+        self.info
+            .avail_ctx(xc, yc, self.frame.width as i32, self.frame.height as i32)
     }
 
     // ------------------------------------------------------------------
@@ -234,14 +269,22 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             return Ok(());
         }
         let mut params = [SaoParams::default(); 3];
-        let ncomp = if self.sps.chroma_format_idc != 0 { 3 } else { 1 };
+        let ncomp = if self.sps.chroma_format_idc != 0 {
+            3
+        } else {
+            1
+        };
         for c_idx in 0..ncomp {
             if !((self.hdr.sao_luma && c_idx == 0) || (self.hdr.sao_chroma && c_idx > 0)) {
                 continue;
             }
             // sao_offset_abs: cMax = (1 << (Min(bitDepth, 10) - 5)) - 1 with
             // the component's own depth (7.4.9.3.2).
-            let bd = if c_idx == 0 { self.sps.bit_depth_luma } else { self.sps.bit_depth_chroma };
+            let bd = if c_idx == 0 {
+                self.sps.bit_depth_luma
+            } else {
+                self.sps.bit_depth_chroma
+            };
             let cmax = (1u32 << (bd.min(10) - 5)) - 1;
             if c_idx == 0 || c_idx == 1 {
                 // sao_type_idx: TR cMax 2, first bin ctx, second bypass.
@@ -262,7 +305,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             }
             // SaoOffsetVal = sign * abs << log2OffsetScale (7-72); the scale
             // comes from the PPS range extension (0 without it).
-            let shift = if c_idx == 0 { self.pps.log2_sao_offset_scale.0 } else { self.pps.log2_sao_offset_scale.1 };
+            let shift = if c_idx == 0 {
+                self.pps.log2_sao_offset_scale.0
+            } else {
+                self.pps.log2_sao_offset_scale.1
+            };
             let mut abs = [0i32; 4];
             for a in abs.iter_mut() {
                 let mut v = 0u32;
@@ -283,7 +330,12 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 }
             } else {
                 // Edge: offsets 0,1 positive, 2,3 negative.
-                params[c_idx].offsets = [(abs[0] << shift) as i16, (abs[1] << shift) as i16, (-(abs[2] << shift)) as i16, (-(abs[3] << shift)) as i16];
+                params[c_idx].offsets = [
+                    (abs[0] << shift) as i16,
+                    (abs[1] << shift) as i16,
+                    (-(abs[2] << shift)) as i16,
+                    (-(abs[3] << shift)) as i16,
+                ];
                 if c_idx == 0 {
                     params[0].band_or_class = self.cabac.bypass_bits(2) as u8;
                 } else if c_idx == 1 {
@@ -329,26 +381,42 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             // split_cu_flag with context from the neighbours' depth.
             let mut inc = 0usize;
             let ac = self.avail_ctx(x0, y0);
-            if self.info.available_at(&ac, x0 - 1, y0) && self.info.ct_depth[self.info.idx4((x0 - 1) as usize, y0 as usize)] as u32 > depth {
+            if self.info.available_at(&ac, x0 - 1, y0)
+                && self.info.ct_depth[self.info.idx4((x0 - 1) as usize, y0 as usize)] as u32 > depth
+            {
                 inc += 1;
             }
-            if self.info.available_at(&ac, x0, y0 - 1) && self.info.ct_depth[self.info.idx4(x0 as usize, (y0 - 1) as usize)] as u32 > depth {
+            if self.info.available_at(&ac, x0, y0 - 1)
+                && self.info.ct_depth[self.info.idx4(x0 as usize, (y0 - 1) as usize)] as u32 > depth
+            {
                 inc += 1;
             }
-            bin(&mut self.cabac, &mut self.cx, SPLIT_CODING_UNIT_FLAG_OFFSET + inc) != 0
+            bin(
+                &mut self.cabac,
+                &mut self.cx,
+                SPLIT_CODING_UNIT_FLAG_OFFSET + inc,
+            ) != 0
         } else {
             log2_cb > self.sps.log2_min_cb_size
         };
-        if self.hdr.cu_chroma_qp_offset_enabled && log2_cb >= self.sps.log2_ctb_size - self.pps.diff_cu_chroma_qp_offset_depth {
+        if self.hdr.cu_chroma_qp_offset_enabled
+            && log2_cb >= self.sps.log2_ctb_size - self.pps.diff_cu_chroma_qp_offset_depth
+        {
             self.is_cu_chroma_qp_offset_coded = false;
         }
-        if self.pps.cu_qp_delta_enabled && log2_cb >= self.sps.log2_ctb_size - self.pps.diff_cu_qp_delta_depth {
+        if self.pps.cu_qp_delta_enabled
+            && log2_cb >= self.sps.log2_ctb_size - self.pps.diff_cu_qp_delta_depth
+        {
             self.is_cu_qp_delta_coded = false;
             self.cu_qp_delta_val = 0;
             self.qg = (x0, y0);
             // qPY_PREV: SliceQpY for the first QG of a slice / tile / WPP row,
             // else the QpY of the last CU of the previous QG.
-            self.qg_qp_prev = if self.first_qg { self.hdr.slice_qp } else { self.qp_y_prev };
+            self.qg_qp_prev = if self.first_qg {
+                self.hdr.slice_qp
+            } else {
+                self.qp_y_prev
+            };
             self.first_qg = false;
         }
         if split {
@@ -390,9 +458,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let prev = self.qg_qp_prev;
         let ctb_cur = self.info.ctb_of(x_cb as usize, y_cb as usize);
         let ac = self.avail_ctx(x_cb, y_cb);
-        let qa = (self.info.available_at(&ac, xq - 1, yq) && self.info.ctb_of((xq - 1) as usize, yq as usize) == ctb_cur)
+        let qa = (self.info.available_at(&ac, xq - 1, yq)
+            && self.info.ctb_of((xq - 1) as usize, yq as usize) == ctb_cur)
             .then(|| self.info.qp_y[self.info.idx4((xq - 1) as usize, yq as usize)] as i32);
-        let qb = (self.info.available_at(&ac, xq, yq - 1) && self.info.ctb_of(xq as usize, (yq - 1) as usize) == ctb_cur)
+        let qb = (self.info.available_at(&ac, xq, yq - 1)
+            && self.info.ctb_of(xq as usize, (yq - 1) as usize) == ctb_cur)
             .then(|| self.info.qp_y[self.info.idx4(xq as usize, (yq - 1) as usize)] as i32);
         qp_y_pred_from(qa, qb, prev)
     }
@@ -410,24 +480,48 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let ch = (n.min(ph - y0)) as usize;
         let mut bypass = false;
         if self.pps.transquant_bypass_enabled {
-            bypass = bin(&mut self.cabac, &mut self.cx, CU_TRANSQUANT_BYPASS_FLAG_OFFSET) != 0;
+            bypass = bin(
+                &mut self.cabac,
+                &mut self.cx,
+                CU_TRANSQUANT_BYPASS_FLAG_OFFSET,
+            ) != 0;
         }
         let mut skip = false;
         if self.hdr.slice_type != SliceType::I {
             let mut inc = 0usize;
             let ac = self.avail_ctx(x0, y0);
-            if self.info.available_at(&ac, x0 - 1, y0) && self.info.skip[self.info.idx4((x0 - 1) as usize, y0 as usize)] != 0 {
+            if self.info.available_at(&ac, x0 - 1, y0)
+                && self.info.skip[self.info.idx4((x0 - 1) as usize, y0 as usize)] != 0
+            {
                 inc += 1;
             }
-            if self.info.available_at(&ac, x0, y0 - 1) && self.info.skip[self.info.idx4(x0 as usize, (y0 - 1) as usize)] != 0 {
+            if self.info.available_at(&ac, x0, y0 - 1)
+                && self.info.skip[self.info.idx4(x0 as usize, (y0 - 1) as usize)] != 0
+            {
                 inc += 1;
             }
             skip = bin(&mut self.cabac, &mut self.cx, SKIP_FLAG_OFFSET + inc) != 0;
         }
         // Record depth / skip / pred mode for the CU area now (neighbours in
         // this CU need them; availability uses pred_mode != 2).
-        PicInfo::fill4(&mut self.info.ct_depth, w4, x0 as usize, y0 as usize, cw, ch, depth as u8);
-        PicInfo::fill4(&mut self.info.skip, w4, x0 as usize, y0 as usize, cw, ch, skip as u8);
+        PicInfo::fill4(
+            &mut self.info.ct_depth,
+            w4,
+            x0 as usize,
+            y0 as usize,
+            cw,
+            ch,
+            depth as u8,
+        );
+        PicInfo::fill4(
+            &mut self.info.skip,
+            w4,
+            x0 as usize,
+            y0 as usize,
+            cw,
+            ch,
+            skip as u8,
+        );
 
         // QP for this CU (delta may still arrive in a TU; recomputed then).
         self.set_qp(x0, y0);
@@ -447,12 +541,28 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 part_mode = self.parse_part_mode(intra, log2_cb)?;
             }
         }
-        PicInfo::fill4(&mut self.info.pred_mode, w4, x0 as usize, y0 as usize, cw, ch, intra as u8);
+        PicInfo::fill4(
+            &mut self.info.pred_mode,
+            w4,
+            x0 as usize,
+            y0 as usize,
+            cw,
+            ch,
+            intra as u8,
+        );
         // Motion of an intra CU: none (TMVP treats it as unavailable). An
         // inter CU's prediction units cover it entirely and write their own.
         if intra {
             let w4 = self.frame.w4;
-            fill_motion(&mut self.frame.motion, w4, x0 as usize, y0 as usize, cw, ch, MotionInfo::INTRA);
+            fill_motion(
+                &mut self.frame.motion,
+                w4,
+                x0 as usize,
+                y0 as usize,
+                cw,
+                ch,
+                MotionInfo::INTRA,
+            );
         }
 
         let mut intra_modes = [1u32; 4];
@@ -470,10 +580,18 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 self.decode_pcm(x0, y0, log2_cb)?;
             } else {
                 let npu = if part_mode == PartMode::PNxN { 4 } else { 1 };
-                let pb = if part_mode == PartMode::PNxN { n / 2 } else { n };
+                let pb = if part_mode == PartMode::PNxN {
+                    n / 2
+                } else {
+                    n
+                };
                 let mut prev_flags = [false; 4];
                 for i in 0..npu {
-                    prev_flags[i] = bin(&mut self.cabac, &mut self.cx, PREV_INTRA_LUMA_PRED_FLAG_OFFSET) != 0;
+                    prev_flags[i] = bin(
+                        &mut self.cabac,
+                        &mut self.cx,
+                        PREV_INTRA_LUMA_PRED_FLAG_OFFSET,
+                    ) != 0;
                 }
                 for i in 0..npu {
                     let xp = x0 + (i as i32 % 2) * pb;
@@ -499,14 +617,28 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                         m
                     };
                     intra_modes[i] = mode;
-                    PicInfo::fill4(&mut self.info.intra_mode, w4, xp as usize, yp as usize, pb as usize, pb as usize, mode as u8);
+                    PicInfo::fill4(
+                        &mut self.info.intra_mode,
+                        w4,
+                        xp as usize,
+                        yp as usize,
+                        pb as usize,
+                        pb as usize,
+                        mode as u8,
+                    );
                 }
                 if cat != 0 {
                     // intra_chroma_pred_mode: bin0 ctx; 0 -> 4, else 2 bypass
                     // bits. One per CU, or one per PB in 4:4:4 NxN.
                     let nc = if cat == 3 { npu } else { 1 };
                     for cm in chroma_mode_syntax.iter_mut().take(nc) {
-                        *cm = if bin(&mut self.cabac, &mut self.cx, INTRA_CHROMA_PRED_MODE_OFFSET) == 0 { 4 } else { self.cabac.bypass_bits(2) };
+                        *cm = if bin(&mut self.cabac, &mut self.cx, INTRA_CHROMA_PRED_MODE_OFFSET)
+                            == 0
+                        {
+                            4
+                        } else {
+                            self.cabac.bypass_bits(2)
+                        };
                     }
                 }
             }
@@ -514,7 +646,17 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             // Inter: prediction units.
             let pus = part_mode.pus(n);
             for (part_idx, &(px, py, pwid, phei)) in pus.iter().enumerate() {
-                self.prediction_unit(x0, y0, n, x0 + px, y0 + py, pwid, phei, part_idx as u32, skip)?;
+                self.prediction_unit(
+                    x0,
+                    y0,
+                    n,
+                    x0 + px,
+                    y0 + py,
+                    pwid,
+                    phei,
+                    part_idx as u32,
+                    skip,
+                )?;
             }
         }
 
@@ -522,7 +664,8 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let mut rqt_root_cbf = true;
         if !pcm {
             if !intra && !(part_mode == PartMode::P2Nx2N && self.last_pu_merged) && !skip {
-                rqt_root_cbf = bin(&mut self.cabac, &mut self.cx, NO_RESIDUAL_DATA_FLAG_OFFSET) != 0;
+                rqt_root_cbf =
+                    bin(&mut self.cabac, &mut self.cx, NO_RESIDUAL_DATA_FLAG_OFFSET) != 0;
             } else if skip {
                 rqt_root_cbf = false;
             }
@@ -543,7 +686,18 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 } else {
                     self.sps.max_th_depth_inter
                 };
-                let cu = CuCtx { x0, y0, log2_cb, intra, part_mode, intra_split, max_depth, chroma_modes, chroma_syntax: chroma_mode_syntax, bypass };
+                let cu = CuCtx {
+                    x0,
+                    y0,
+                    log2_cb,
+                    intra,
+                    part_mode,
+                    intra_split,
+                    max_depth,
+                    chroma_modes,
+                    chroma_syntax: chroma_mode_syntax,
+                    bypass,
+                };
                 self.transform_tree(&cu, x0, y0, x0, y0, log2_cb, 0, 0, [[true; 2]; 2])?;
             } else if intra {
                 // Intra CU with no residual still needs its prediction.
@@ -553,13 +707,43 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         }
 
         if self.trace.cu {
-            eprintln!("cu poc={} x={} y={} n={} intra={} skip={} pcm={} bypass={} qp={} part={:?} modes={:?} csyn={:?}", self.refs.cur_poc, x0, y0, n, intra, skip, pcm, bypass, self.qp_y, part_mode, intra_modes, chroma_mode_syntax);
+            eprintln!(
+                "cu poc={} x={} y={} n={} intra={} skip={} pcm={} bypass={} qp={} part={:?} modes={:?} csyn={:?}",
+                self.refs.cur_poc,
+                x0,
+                y0,
+                n,
+                intra,
+                skip,
+                pcm,
+                bypass,
+                self.qp_y,
+                part_mode,
+                intra_modes,
+                chroma_mode_syntax
+            );
         }
         // Bookkeeping: QP over the CU, filter exemption, PU edges.
-        PicInfo::fill4(&mut self.info.qp_y, w4, x0 as usize, y0 as usize, cw, ch, self.qp_y as i8);
+        PicInfo::fill4(
+            &mut self.info.qp_y,
+            w4,
+            x0 as usize,
+            y0 as usize,
+            cw,
+            ch,
+            self.qp_y as i8,
+        );
         let exempt = ((pcm && self.sps.pcm.4) as u8) | ((bypass as u8) << 1) | (bypass as u8);
         if exempt != 0 {
-            PicInfo::fill4(&mut self.info.filter_exempt, w4, x0 as usize, y0 as usize, cw, ch, exempt);
+            PicInfo::fill4(
+                &mut self.info.filter_exempt,
+                w4,
+                x0 as usize,
+                y0 as usize,
+                cw,
+                ch,
+                exempt,
+            );
         }
         // Prediction block edges (for deblocking): left/top edge of every PU.
         let pus = part_mode.pus(n);
@@ -618,12 +802,20 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             if bin(&mut self.cabac, &mut self.cx, PART_MODE_OFFSET + 3) != 0 {
                 return Ok(PartMode::P2NxN);
             }
-            return Ok(if self.cabac.bypass() != 0 { PartMode::P2NxnD } else { PartMode::P2NxnU });
+            return Ok(if self.cabac.bypass() != 0 {
+                PartMode::P2NxnD
+            } else {
+                PartMode::P2NxnU
+            });
         }
         if bin(&mut self.cabac, &mut self.cx, PART_MODE_OFFSET + 3) != 0 {
             return Ok(PartMode::PNx2N);
         }
-        Ok(if self.cabac.bypass() != 0 { PartMode::PnRx2N } else { PartMode::PnLx2N })
+        Ok(if self.cabac.bypass() != 0 {
+            PartMode::PnRx2N
+        } else {
+            PartMode::PnLx2N
+        })
     }
 
     /// The three MPM candidates (8.4.2) for the PU at `(xp, yp)`.
@@ -680,7 +872,10 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         if self.frame.chroma != ChromaFormat::Monochrome {
             let (sw, sh) = self.sps.sub_wh();
             let cs = self.frame.cb.stride;
-            let coff = self.frame.cb.offset((x0 as usize / sw) as isize, (y0 as usize / sh) as isize);
+            let coff = self
+                .frame
+                .cb
+                .offset((x0 as usize / sw) as isize, (y0 as usize / sh) as isize);
             for y in 0..n / sh {
                 for x in 0..n / sw {
                     let v = r.bits(bdc) << shift_c;
@@ -700,7 +895,15 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         self.cabac.reinit();
         // PCM CUs report intra mode DC for their neighbours.
         let w4 = self.info.w4;
-        PicInfo::fill4(&mut self.info.intra_mode, w4, x0 as usize, y0 as usize, n, n, 1);
+        PicInfo::fill4(
+            &mut self.info.intra_mode,
+            w4,
+            x0 as usize,
+            y0 as usize,
+            n,
+            n,
+            1,
+        );
         Ok(())
     }
 
@@ -709,12 +912,33 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     // ------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
-    fn prediction_unit(&mut self, x_cb: i32, y_cb: i32, n_cb: i32, x_pb: i32, y_pb: i32, w: i32, h: i32, part_idx: u32, skip: bool) -> Result<()> {
-        let pu = PuPos { x_cb, y_cb, n_cb, x_pb, y_pb, w, h, part_idx };
+    fn prediction_unit(
+        &mut self,
+        x_cb: i32,
+        y_cb: i32,
+        n_cb: i32,
+        x_pb: i32,
+        y_pb: i32,
+        w: i32,
+        h: i32,
+        part_idx: u32,
+        skip: bool,
+    ) -> Result<()> {
+        let pu = PuPos {
+            x_cb,
+            y_cb,
+            n_cb,
+            x_pb,
+            y_pb,
+            w,
+            h,
+            part_idx,
+        };
         // TMVP reads the collocated picture's motion within this CTB row.
         if let Some(col) = self.col_shared {
             let row_end = ((y_cb >> self.sps.log2_ctb_size) + 1) << self.sps.log2_ctb_size;
-            col.progress.wait_decoded(row_end.min(self.frame.height as i32));
+            col.progress
+                .wait_decoded(row_end.min(self.frame.height as i32));
         }
         let cand: Cand;
         let mut merged = false;
@@ -733,17 +957,22 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 let mut pred_idc = 0u32; // 0 L0, 1 L1, 2 BI
                 if self.hdr.slice_type == SliceType::B {
                     if w + h != 12 {
-                        let depth = self.info.ct_depth[self.info.idx4(x_cb as usize, y_cb as usize)] as usize;
+                        let depth = self.info.ct_depth[self.info.idx4(x_cb as usize, y_cb as usize)]
+                            as usize;
                         if bin(&mut self.cabac, &mut self.cx, INTER_PRED_IDC_OFFSET + depth) != 0 {
                             pred_idc = 2;
                         } else {
-                            pred_idc = bin(&mut self.cabac, &mut self.cx, INTER_PRED_IDC_OFFSET + 4);
+                            pred_idc =
+                                bin(&mut self.cabac, &mut self.cx, INTER_PRED_IDC_OFFSET + 4);
                         }
                     } else {
                         pred_idc = bin(&mut self.cabac, &mut self.cx, INTER_PRED_IDC_OFFSET + 4);
                     }
                 }
-                let mut c = Cand { mv: [Mv::ZERO; 2], ref_idx: [-1; 2] };
+                let mut c = Cand {
+                    mv: [Mv::ZERO; 2],
+                    ref_idx: [-1; 2],
+                };
                 let mut mvds = [Mv::ZERO; 2];
                 let mut mvp_flags = [0u32; 2];
                 for list in 0..2 {
@@ -756,7 +985,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                         continue;
                     }
                     let nref = self.hdr.num_ref_idx[list];
-                    let ri = if nref > 1 { self.parse_ref_idx(nref) } else { 0 };
+                    let ri = if nref > 1 {
+                        self.parse_ref_idx(nref)
+                    } else {
+                        0
+                    };
                     c.ref_idx[list] = ri as i8;
                     if list == 1 && self.hdr.mvd_l1_zero && pred_idc == 2 {
                         mvds[1] = Mv::ZERO;
@@ -772,23 +1005,44 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                     if c.ref_idx[list] as usize >= self.ref_frames[list].len() {
                         return Err(Error::bitstream("ref_idx beyond the reference list"));
                     }
-                    let mvp = amvp(self.info, self.frame, &self.refs, &pu, list, c.ref_idx[list], mvp_flags[list]);
+                    let mvp = amvp(
+                        self.info,
+                        self.frame,
+                        &self.refs,
+                        &pu,
+                        list,
+                        c.ref_idx[list],
+                        mvp_flags[list],
+                    );
                     // uLX = (mvpLX + mvdLX + 2^16) % 2^16 -> wrapping i16 add.
-                    c.mv[list] = Mv::new(mvp.x.wrapping_add(mvds[list].x), mvp.y.wrapping_add(mvds[list].y));
+                    c.mv[list] = Mv::new(
+                        mvp.x.wrapping_add(mvds[list].x),
+                        mvp.y.wrapping_add(mvds[list].y),
+                    );
                 }
                 cand = c;
             }
         }
         self.last_pu_merged = merged;
         // Store motion.
-        let mut mi = MotionInfo { mv: cand.mv, ref_delta: [0; 2], ref_idx: cand.ref_idx, flags: 0, pad: 0 };
+        let mut mi = MotionInfo {
+            mv: cand.mv,
+            ref_delta: [0; 2],
+            ref_idx: cand.ref_idx,
+            flags: 0,
+            pad: 0,
+        };
         for list in 0..2 {
             if cand.ref_idx[list] >= 0 {
                 let ri = cand.ref_idx[list] as usize;
                 if ri >= self.refs.pocs[list].len() {
-                    return Err(Error::bitstream("merge candidate references beyond the list"));
+                    return Err(Error::bitstream(
+                        "merge candidate references beyond the list",
+                    ));
                 }
-                mi.ref_delta[list] = (self.refs.cur_poc - self.refs.pocs[list][ri]).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                mi.ref_delta[list] = (self.refs.cur_poc - self.refs.pocs[list][ri])
+                    .clamp(i16::MIN as i32, i16::MAX as i32)
+                    as i16;
                 mi.flags |= (self.refs.long_term[list][ri] as u8) << list;
             }
         }
@@ -797,7 +1051,15 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let ch = h.min(ph - y_pb) as usize;
         {
             let w4 = self.frame.w4;
-            fill_motion(&mut self.frame.motion, w4, x_pb as usize, y_pb as usize, cw, ch, mi);
+            fill_motion(
+                &mut self.frame.motion,
+                w4,
+                x_pb as usize,
+                y_pb as usize,
+                cw,
+                ch,
+                mi,
+            );
         }
         // Motion compensation: wait for the reference rows the filters reach
         // (8-tap luma: 3 above / 4 below; 4-tap chroma: 1 / 2, in luma rows).
@@ -811,13 +1073,19 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             let need_l = yi + h + 4;
             // Chroma: eighth-sample vertical vector in chroma rows.
             let sh = self.sps.sub_wh().1 as i32;
-            let mvcy = if sh == 2 { mv.y as i32 } else { mv.y as i32 * 2 };
+            let mvcy = if sh == 2 {
+                mv.y as i32
+            } else {
+                mv.y as i32 * 2
+            };
             let yci = (y_pb / sh) + (mvcy >> 3);
             let need_c = sh * (yci + h / sh + 2);
             // Reads above the picture clamp to (or pad from) row 0, which is
             // only ready once row 0 is published; reads below need it all.
             let need = need_l.max(need_c).clamp(1, pic_h);
-            self.ref_shared[list][cand.ref_idx[list] as usize].progress.wait_done(need);
+            self.ref_shared[list][cand.ref_idx[list] as usize]
+                .progress
+                .wait_done(need);
         }
         let weighting = self.weighting_for(cand.ref_idx);
         if let Some((tx, ty)) = self.trace.pu {
@@ -828,14 +1096,43 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 );
             }
         }
-        let f0 = if cand.ref_idx[0] >= 0 { Some((self.ref_frames[0][cand.ref_idx[0] as usize], cand.mv[0])) } else { None };
-        let f1 = if cand.ref_idx[1] >= 0 { Some((self.ref_frames[1][cand.ref_idx[1] as usize], cand.mv[1])) } else { None };
+        let f0 = if cand.ref_idx[0] >= 0 {
+            Some((self.ref_frames[0][cand.ref_idx[0] as usize], cand.mv[0]))
+        } else {
+            None
+        };
+        let f1 = if cand.ref_idx[1] >= 0 {
+            Some((self.ref_frames[1][cand.ref_idx[1] as usize], cand.mv[1]))
+        } else {
+            None
+        };
         // Blocks may extend past the picture edge (the last CTB row/col);
         // predict the whole PB — the border absorbs it.
         if self.wide {
-            predict_block_wide(&mut self.mc, self.frame, x_pb as usize, y_pb as usize, w as usize, h as usize, f0, f1, weighting);
+            predict_block_wide(
+                &mut self.mc,
+                self.frame,
+                x_pb as usize,
+                y_pb as usize,
+                w as usize,
+                h as usize,
+                f0,
+                f1,
+                weighting,
+            );
         } else {
-            predict_block(&self.dsp, &mut self.mc, self.frame, x_pb as usize, y_pb as usize, w as usize, h as usize, f0, f1, weighting);
+            predict_block(
+                &self.dsp,
+                &mut self.mc,
+                self.frame,
+                x_pb as usize,
+                y_pb as usize,
+                w as usize,
+                h as usize,
+                f0,
+                f1,
+                weighting,
+            );
         }
         Ok(())
     }
@@ -846,10 +1143,19 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             SliceType::B => self.pps.weighted_bipred,
             SliceType::I => false,
         };
-        let Some(t) = (if explicit { self.hdr.pred_weights.as_ref() } else { None }) else {
+        let Some(t) = (if explicit {
+            self.hdr.pred_weights.as_ref()
+        } else {
+            None
+        }) else {
             return [Weighting::Default; 3];
         };
-        explicit_weighting(t, self.sps.bit_depth_luma, self.sps.bit_depth_chroma, ref_idx)
+        explicit_weighting(
+            t,
+            self.sps.bit_depth_luma,
+            self.sps.bit_depth_chroma,
+            ref_idx,
+        )
     }
 }
 
@@ -863,13 +1169,26 @@ impl<'a, S: Sample> SliceDec<'a, S> {
 /// function, so the encoder hands its own motion compensation exactly
 /// what a decoder will derive from the table it wrote rather than a
 /// second reading of the same clause.
-pub(crate) fn explicit_weighting(t: &PredWeightTable, bit_depth_luma: u32, bit_depth_chroma: u32, ref_idx: [i8; 2]) -> [Weighting; 3] {
+pub(crate) fn explicit_weighting(
+    t: &PredWeightTable,
+    bit_depth_luma: u32,
+    bit_depth_chroma: u32,
+    ref_idx: [i8; 2],
+) -> [Weighting; 3] {
     let mut out = [Weighting::Default; 3];
     for (c, slot) in out.iter_mut().enumerate() {
         // shift1 = Max(2, 14 - bitDepth) of the component (8.5.3.3.4.3).
-        let bd = if c == 0 { bit_depth_luma } else { bit_depth_chroma };
+        let bd = if c == 0 {
+            bit_depth_luma
+        } else {
+            bit_depth_chroma
+        };
         let shift1 = (14 - bd as i32).max(2);
-        let log2_wd = if c == 0 { t.luma_log2_denom as i32 } else { t.chroma_log2_denom as i32 } + shift1;
+        let log2_wd = if c == 0 {
+            t.luma_log2_denom as i32
+        } else {
+            t.chroma_log2_denom as i32
+        } + shift1;
         let mut w = [1i32; 2];
         let mut o = [0i32; 2];
         for list in 0..2 {
@@ -891,7 +1210,6 @@ pub(crate) fn explicit_weighting(t: &PredWeightTable, bit_depth_luma: u32, bit_d
 }
 
 impl<'a, S: Sample> SliceDec<'a, S> {
-
     fn parse_merge_idx(&mut self) -> usize {
         let max = self.hdr.max_num_merge_cand as usize;
         if max <= 1 {
@@ -911,7 +1229,15 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let cmax = nref - 1;
         let mut v = 0u32;
         while v < cmax {
-            let b = if v < 2 { bin(&mut self.cabac, &mut self.cx, REF_IDX_L0_OFFSET + v as usize) } else { self.cabac.bypass() };
+            let b = if v < 2 {
+                bin(
+                    &mut self.cabac,
+                    &mut self.cx,
+                    REF_IDX_L0_OFFSET + v as usize,
+                )
+            } else {
+                self.cabac.bypass()
+            };
             if b == 0 {
                 break;
             }
@@ -924,8 +1250,24 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let g0x = bin(&mut self.cabac, &mut self.cx, ABS_MVD_GREATER0_FLAG_OFFSET) != 0;
         let g0y = bin(&mut self.cabac, &mut self.cx, ABS_MVD_GREATER0_FLAG_OFFSET) != 0;
         // The generated table (FFmpeg element order) keeps greater1 at slot +1.
-        let g1x = if g0x { bin(&mut self.cabac, &mut self.cx, ABS_MVD_GREATER1_FLAG_OFFSET + 1) != 0 } else { false };
-        let g1y = if g0y { bin(&mut self.cabac, &mut self.cx, ABS_MVD_GREATER1_FLAG_OFFSET + 1) != 0 } else { false };
+        let g1x = if g0x {
+            bin(
+                &mut self.cabac,
+                &mut self.cx,
+                ABS_MVD_GREATER1_FLAG_OFFSET + 1,
+            ) != 0
+        } else {
+            false
+        };
+        let g1y = if g0y {
+            bin(
+                &mut self.cabac,
+                &mut self.cx,
+                ABS_MVD_GREATER1_FLAG_OFFSET + 1,
+            ) != 0
+        } else {
+            false
+        };
         let mut out = [0i32; 2];
         for (i, (g0, g1)) in [(g0x, g1x), (g0y, g1y)].iter().enumerate() {
             if !g0 {
@@ -981,9 +1323,16 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             && depth < cu.max_depth
             && !(cu.intra_split && depth == 0)
         {
-            bin(&mut self.cabac, &mut self.cx, SPLIT_TRANSFORM_FLAG_OFFSET + (5 - log2) as usize) != 0
+            bin(
+                &mut self.cabac,
+                &mut self.cx,
+                SPLIT_TRANSFORM_FLAG_OFFSET + (5 - log2) as usize,
+            ) != 0
         } else {
-            let inter_split = self.sps.max_th_depth_inter == 0 && !cu.intra && cu.part_mode != PartMode::P2Nx2N && depth == 0;
+            let inter_split = self.sps.max_th_depth_inter == 0
+                && !cu.intra
+                && cu.part_mode != PartMode::P2Nx2N
+                && depth == 0;
             log2 > self.sps.log2_max_tb_size || (cu.intra_split && depth == 0) || inter_split
         };
         // cbf_cb / cbf_cr, per component and (4:2:2) per vertical half.
@@ -992,9 +1341,17 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         if cat != 0 && (log2 > 2 || cat == 3) {
             for c in 0..2 {
                 if depth == 0 || parent_cbf_c[c][0] {
-                    cbf_c[c][0] = bin(&mut self.cabac, &mut self.cx, CBF_CB_CR_OFFSET + depth as usize) != 0;
+                    cbf_c[c][0] = bin(
+                        &mut self.cabac,
+                        &mut self.cx,
+                        CBF_CB_CR_OFFSET + depth as usize,
+                    ) != 0;
                     if cat == 2 && (!split || log2 == 3) {
-                        cbf_c[c][1] = bin(&mut self.cabac, &mut self.cx, CBF_CB_CR_OFFSET + depth as usize) != 0;
+                        cbf_c[c][1] = bin(
+                            &mut self.cabac,
+                            &mut self.cx,
+                            CBF_CB_CR_OFFSET + depth as usize,
+                        ) != 0;
                     }
                 }
             }
@@ -1007,15 +1364,32 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             self.transform_tree(cu, x0, y0, x0, y0, log2 - 1, depth + 1, 0, cbf_c)?;
             self.transform_tree(cu, x0 + half, y0, x0, y0, log2 - 1, depth + 1, 1, cbf_c)?;
             self.transform_tree(cu, x0, y0 + half, x0, y0, log2 - 1, depth + 1, 2, cbf_c)?;
-            self.transform_tree(cu, x0 + half, y0 + half, x0, y0, log2 - 1, depth + 1, 3, cbf_c)?;
+            self.transform_tree(
+                cu,
+                x0 + half,
+                y0 + half,
+                x0,
+                y0,
+                log2 - 1,
+                depth + 1,
+                3,
+                cbf_c,
+            )?;
             return Ok(());
         }
-        let cbf_luma = if cu.intra || depth != 0 || cbf_c[0][0] || cbf_c[1][0] || cbf_c[0][1] || cbf_c[1][1] {
-            bin(&mut self.cabac, &mut self.cx, CBF_LUMA_OFFSET + (depth == 0) as usize) != 0
-        } else {
-            true
-        };
-        self.transform_unit(cu, x0, y0, x_base, y_base, log2, depth, blk_idx, cbf_luma, cbf_c)
+        let cbf_luma =
+            if cu.intra || depth != 0 || cbf_c[0][0] || cbf_c[1][0] || cbf_c[0][1] || cbf_c[1][1] {
+                bin(
+                    &mut self.cabac,
+                    &mut self.cx,
+                    CBF_LUMA_OFFSET + (depth == 0) as usize,
+                ) != 0
+            } else {
+                true
+            };
+        self.transform_unit(
+            cu, x0, y0, x_base, y_base, log2, depth, blk_idx, cbf_luma, cbf_c,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1048,7 +1422,15 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             }
             if cbf_luma {
                 let w4 = self.info.w4;
-                PicInfo::fill4(&mut self.info.cbf_luma, w4, x0 as usize, y0 as usize, n.min(pw - x0 as usize), n.min(ph - y0 as usize), 1);
+                PicInfo::fill4(
+                    &mut self.info.cbf_luma,
+                    w4,
+                    x0 as usize,
+                    y0 as usize,
+                    n.min(pw - x0 as usize),
+                    n.min(ph - y0 as usize),
+                    1,
+                );
             }
         }
         let cbf_chroma = cbf_c[0][0] || cbf_c[1][0] || cbf_c[0][1] || cbf_c[1][1];
@@ -1090,17 +1472,38 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             self.set_qp(cu.x0, cu.y0);
         }
         // cu_chroma_qp_offset_flag / _idx (range extension chroma QP offset lists).
-        if self.hdr.cu_chroma_qp_offset_enabled && cbf_chroma && !cu.bypass && !self.is_cu_chroma_qp_offset_coded {
-            let flag = bin(&mut self.cabac, &mut self.cx, CU_CHROMA_QP_OFFSET_FLAG_OFFSET) != 0;
+        if self.hdr.cu_chroma_qp_offset_enabled
+            && cbf_chroma
+            && !cu.bypass
+            && !self.is_cu_chroma_qp_offset_coded
+        {
+            let flag = bin(
+                &mut self.cabac,
+                &mut self.cx,
+                CU_CHROMA_QP_OFFSET_FLAG_OFFSET,
+            ) != 0;
             let mut idx = 0usize;
             let len = self.pps.chroma_qp_offset_lists.len();
             if flag && len > 1 {
                 // TR, cMax = len - 1, all bins one context.
-                while idx + 1 < len && bin(&mut self.cabac, &mut self.cx, CU_CHROMA_QP_OFFSET_IDX_OFFSET) != 0 {
+                while idx + 1 < len
+                    && bin(
+                        &mut self.cabac,
+                        &mut self.cx,
+                        CU_CHROMA_QP_OFFSET_IDX_OFFSET,
+                    ) != 0
+                {
                     idx += 1;
                 }
             }
-            self.cu_qp_offset_c = if flag { [self.pps.chroma_qp_offset_lists[idx].0, self.pps.chroma_qp_offset_lists[idx].1] } else { [0, 0] };
+            self.cu_qp_offset_c = if flag {
+                [
+                    self.pps.chroma_qp_offset_lists[idx].0,
+                    self.pps.chroma_qp_offset_lists[idx].1,
+                ]
+            } else {
+                [0, 0]
+            };
             self.is_cu_chroma_qp_offset_coded = true;
         }
 
@@ -1114,7 +1517,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let ccp = self.pps.cross_component_prediction && cbf_luma;
         self.luma_res_valid = false;
         if cbf_luma {
-            let mode = if cu.intra { self.info.intra_mode[self.info.idx4(x0 as usize, y0 as usize)] as u32 } else { 0 };
+            let mode = if cu.intra {
+                self.info.intra_mode[self.info.idx4(x0 as usize, y0 as usize)] as u32
+            } else {
+                0
+            };
             self.residual_block(cu, x0 as usize, y0 as usize, log2, 0, mode, ccp, 0)?;
         }
         // Chroma: at this TU when the chroma block is at least 4x4 (always
@@ -1124,7 +1531,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         if cat != 0 {
             let (sw, sh) = self.sps.sub_wh();
             let here = if log2 > 2 || cat == 3 {
-                Some((x0 as usize / sw, y0 as usize / sh, if cat == 3 { log2 } else { log2 - 1 }))
+                Some((
+                    x0 as usize / sw,
+                    y0 as usize / sh,
+                    if cat == 3 { log2 } else { log2 - 1 },
+                ))
             } else if blk_idx == 3 {
                 Some((x_base as usize / sw, y_base as usize / sh, 2))
             } else {
@@ -1135,7 +1546,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 // The prediction block this TU lies in (4:4:4 NxN has four
                 // chroma modes).
                 let half = 1i32 << (cu.log2_cb - 1);
-                let pb = if cu.intra_split && cat == 3 { ((y0 - cu.y0 >= half) as usize) * 2 + (x0 - cu.x0 >= half) as usize } else { 0 };
+                let pb = if cu.intra_split && cat == 3 {
+                    ((y0 - cu.y0 >= half) as usize) * 2 + (x0 - cu.x0 >= half) as usize
+                } else {
+                    0
+                };
                 let mode = cu.chroma_modes[pb];
                 for c in 0..2usize {
                     // cross_comp_pred(): the residual scale for this component.
@@ -1143,11 +1558,21 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                     if ccp && (!cu.intra || cu.chroma_syntax[pb] == 4) {
                         // log2_res_scale_abs_plus1: TR cMax 4, one context per bin.
                         let mut v = 0usize;
-                        while v < 4 && bin(&mut self.cabac, &mut self.cx, LOG2_RES_SCALE_ABS_OFFSET + 4 * c + v) != 0 {
+                        while v < 4
+                            && bin(
+                                &mut self.cabac,
+                                &mut self.cx,
+                                LOG2_RES_SCALE_ABS_OFFSET + 4 * c + v,
+                            ) != 0
+                        {
                             v += 1;
                         }
                         if v > 0 {
-                            let sign = bin(&mut self.cabac, &mut self.cx, RES_SCALE_SIGN_FLAG_OFFSET + c) != 0;
+                            let sign = bin(
+                                &mut self.cabac,
+                                &mut self.cx,
+                                RES_SCALE_SIGN_FLAG_OFFSET + c,
+                            ) != 0;
                             res_scale = (1 << (v - 1)) * if sign { -1 } else { 1 };
                         }
                     }
@@ -1171,18 +1596,35 @@ impl<'a, S: Sample> SliceDec<'a, S> {
 
     /// Intra prediction of one transform block of component `c_idx` at
     /// component coordinates `(x, y)`, size `n`.
-    fn intra_predict_block(&mut self, c_idx: usize, x: usize, y: usize, n: usize, mode: u32, bypass: bool) {
+    fn intra_predict_block(
+        &mut self,
+        c_idx: usize,
+        x: usize,
+        y: usize,
+        n: usize,
+        mode: u32,
+        bypass: bool,
+    ) {
         // Availability of the neighbouring samples in luma coordinates.
-        let (sw, sh) = if c_idx == 0 { (1, 1) } else { self.sps.sub_wh() };
+        let (sw, sh) = if c_idx == 0 {
+            (1, 1)
+        } else {
+            self.sps.sub_wh()
+        };
         let xl = (x * sw) as i32;
         let yl = (y * sh) as i32;
         let cip = self.pps.constrained_intra_pred;
         // Every reference sample is a neighbour of this one transform block.
         let ac = self.avail_ctx(xl, yl);
         let (pw, ph) = (self.frame.width as i32, self.frame.height as i32);
-        let bd = if c_idx == 0 { self.sps.bit_depth_luma } else { self.sps.bit_depth_chroma };
+        let bd = if c_idx == 0 {
+            self.sps.bit_depth_luma
+        } else {
+            self.sps.bit_depth_chroma
+        };
         let strong = self.sps.strong_intra_smoothing;
-        let filter = (c_idx == 0 || self.sps.chroma_array_type() == 3) && !self.sps.intra_smoothing_disabled();
+        let filter = (c_idx == 0 || self.sps.chroma_array_type() == 3)
+            && !self.sps.intra_smoothing_disabled();
         let boundary_filter = c_idx == 0 && !(self.sps.implicit_rdpcm() && bypass);
         // Borrow the side data on its own so the scratch, which lives beside
         // it, stays reachable.
@@ -1205,8 +1647,16 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             let span = (n * scale) as i32;
             for half in 0..2 {
                 let start = half * n; // in component samples
-                let (nx, ny) = if vertical { (xl - 1, yl + half as i32 * span) } else { (xl + half as i32 * span, yl - 1) };
-                let inside = if vertical { ny + span <= ph } else { nx + span <= pw };
+                let (nx, ny) = if vertical {
+                    (xl - 1, yl + half as i32 * span)
+                } else {
+                    (xl + half as i32 * span, yl - 1)
+                };
+                let inside = if vertical {
+                    ny + span <= ph
+                } else {
+                    nx + span <= pw
+                };
                 if !cip && inside {
                     let a = check(nx, ny);
                     for k in 0..n {
@@ -1217,7 +1667,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 } else {
                     let mut i = 0;
                     while i < n {
-                        let (cx, cy) = if vertical { (nx, ny + (i * scale) as i32) } else { (nx + (i * scale) as i32, ny) };
+                        let (cx, cy) = if vertical {
+                            (nx, ny + (i * scale) as i32)
+                        } else {
+                            (nx + (i * scale) as i32, ny)
+                        };
                         let a = check(cx, cy);
                         for k in 0..unit {
                             if start + i + k < 64 {
@@ -1239,12 +1693,32 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             1 => &mut self.frame.cb,
             _ => &mut self.frame.cr,
         };
-        intra_predict(&self.dsp, plane, sc, x, y, n, mode, c_idx, filter, boundary_filter, bd, strong);
+        intra_predict(
+            &self.dsp,
+            plane,
+            sc,
+            x,
+            y,
+            n,
+            mode,
+            c_idx,
+            filter,
+            boundary_filter,
+            bd,
+            strong,
+        );
     }
 
     /// Cross-component prediction for a chroma block without a residual of
     /// its own: add the scaled luma residual of the TU.
-    fn add_scaled_luma_residual(&mut self, x: usize, y: usize, log2: u32, c_idx: usize, res_scale: i32) {
+    fn add_scaled_luma_residual(
+        &mut self,
+        x: usize,
+        y: usize,
+        log2: u32,
+        c_idx: usize,
+        res_scale: i32,
+    ) {
         let n = 1usize << log2;
         if self.wide {
             if !self.luma_res_valid || self.luma_res_wide.len() != n * n {
@@ -1255,9 +1729,19 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             for (r, &l) in coeffs[..n * n].iter_mut().zip(&self.luma_res_wide) {
                 *r = ((res_scale as i64 * (((l as i64) << bdc) >> bdy)) >> 3) as i32;
             }
-            let plane = if c_idx == 1 { &mut self.frame.cb } else { &mut self.frame.cr };
+            let plane = if c_idx == 1 {
+                &mut self.frame.cb
+            } else {
+                &mut self.frame.cr
+            };
             let (stride, off) = (plane.stride, plane.offset(x as isize, y as isize));
-            add_residual_wide(&mut plane.data[off..], stride, &coeffs, n, (1i32 << bdc) - 1);
+            add_residual_wide(
+                &mut plane.data[off..],
+                stride,
+                &coeffs,
+                n,
+                (1i32 << bdc) - 1,
+            );
             self.coeffs_wide = coeffs;
             return;
         }
@@ -1274,7 +1758,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         }
         let bd = bdc;
         let max = (1i32 << bd) - 1;
-        let plane = if c_idx == 1 { &mut self.frame.cb } else { &mut self.frame.cr };
+        let plane = if c_idx == 1 {
+            &mut self.frame.cb
+        } else {
+            &mut self.frame.cr
+        };
         let stride = plane.stride;
         let off = plane.offset(x as isize, y as isize);
         (self.dsp.add_residual)(&mut plane.data[off..], stride, &coeffs, n, max);
@@ -1284,16 +1772,33 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     /// Parse and add the residual of one transform block of component
     /// `c_idx` at component coordinates `(x, y)`.
     #[allow(clippy::too_many_arguments)]
-    fn residual_block(&mut self, cu: &CuCtx, x: usize, y: usize, log2: u32, c_idx: usize, pred_mode: u32, keep_luma: bool, res_scale: i32) -> Result<()> {
+    fn residual_block(
+        &mut self,
+        cu: &CuCtx,
+        x: usize,
+        y: usize,
+        log2: u32,
+        c_idx: usize,
+        pred_mode: u32,
+        keep_luma: bool,
+        res_scale: i32,
+    ) -> Result<()> {
         let n = 1usize << log2;
         // scanIdx (7.4.9.11).
-        let scan_idx = residual_scan_idx(cu.intra, log2, c_idx, self.sps.chroma_array_type(), pred_mode);
+        let scan_idx = residual_scan_idx(
+            cu.intra,
+            log2,
+            c_idx,
+            self.sps.chroma_array_type(),
+            pred_mode,
+        );
         let params = ResidualParams {
             log2_size: log2,
             c_idx,
             scan_idx,
             bypass: cu.bypass,
-            transform_skip_allowed: self.pps.transform_skip_enabled && log2 <= self.pps.log2_max_transform_skip_size,
+            transform_skip_allowed: self.pps.transform_skip_enabled
+                && log2 <= self.pps.log2_max_transform_skip_size,
             sign_hiding: self.pps.sign_data_hiding,
             intra: cu.intra,
             pred_mode_intra: pred_mode,
@@ -1308,22 +1813,43 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             self.qp_y + 6 * (self.sps.bit_depth_luma as i32 - 8)
         } else {
             let bd_off_c = 6 * (self.sps.bit_depth_chroma as i32 - 8);
-            let off = if c_idx == 1 { self.pps.cb_qp_offset + self.hdr.cb_qp_offset } else { self.pps.cr_qp_offset + self.hdr.cr_qp_offset };
+            let off = if c_idx == 1 {
+                self.pps.cb_qp_offset + self.hdr.cb_qp_offset
+            } else {
+                self.pps.cr_qp_offset + self.hdr.cr_qp_offset
+            };
             let qpi = (self.qp_y + off + self.cu_qp_offset_c[c_idx - 1]).clamp(-bd_off_c, 57);
             chroma_qp(self.sps.chroma_array_type(), qpi) + bd_off_c
         };
-        let bd = if c_idx == 0 { self.sps.bit_depth_luma } else { self.sps.bit_depth_chroma };
+        let bd = if c_idx == 0 {
+            self.sps.bit_depth_luma
+        } else {
+            self.sps.bit_depth_chroma
+        };
         if self.wide {
-            return self.residual_block_wide(cu, x, y, log2, c_idx, &params, keep_luma, res_scale, qp, bd);
+            return self
+                .residual_block_wide(cu, x, y, log2, c_idx, &params, keep_luma, res_scale, qp, bd);
         }
         let mut coeffs = std::mem::take(&mut self.coeffs);
         if coeffs.len() < n * n {
             coeffs.resize(1024, 0);
         }
         let ri = if self.sps.cabac_bypass_alignment() {
-            parse_residual::<i16, true>(&mut self.cabac, &mut self.cx, &params, &ResidualRange::PLAIN, &mut coeffs)?
+            parse_residual::<i16, true>(
+                &mut self.cabac,
+                &mut self.cx,
+                &params,
+                &ResidualRange::PLAIN,
+                &mut coeffs,
+            )?
         } else {
-            parse_residual::<i16, false>(&mut self.cabac, &mut self.cx, &params, &ResidualRange::PLAIN, &mut coeffs)?
+            parse_residual::<i16, false>(
+                &mut self.cabac,
+                &mut self.cx,
+                &params,
+                &ResidualRange::PLAIN,
+                &mut coeffs,
+            )?
         };
         let ts = ri.transform_skip;
         // 4x4 intra transform-skipped / bypassed blocks may be coded rotated.
@@ -1343,7 +1869,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                     let size_id = (log2 - 2) as usize;
                     let matrix_id = if cu.intra { c_idx } else { 3 + c_idx };
                     let list = &sl.lists[size_id][matrix_id];
-                    let dc = if size_id >= 2 { sl.dc[size_id - 2][matrix_id] } else { 16 };
+                    let dc = if size_id >= 2 {
+                        sl.dc[size_id - 2][matrix_id]
+                    } else {
+                        16
+                    };
                     ScalingSource::List(&list[..if size_id == 0 { 16 } else { 64 }], dc)
                 }
             };
@@ -1373,7 +1903,8 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             // brought to the chroma depth first, `(rY << BitDepthC) >> BitDepthY`.
             let (bdy, bdc) = (self.sps.bit_depth_luma, self.sps.bit_depth_chroma);
             for (r, &l) in coeffs[..n * n].iter_mut().zip(&self.luma_res) {
-                *r = (*r as i32 + ((res_scale * (((l as i32) << bdc) >> bdy)) >> 3)).clamp(-32768, 32767) as i16;
+                *r = (*r as i32 + ((res_scale * (((l as i32) << bdc) >> bdy)) >> 3))
+                    .clamp(-32768, 32767) as i16;
             }
         }
         // Add to the prediction.
@@ -1386,9 +1917,14 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let stride = plane.stride;
         let off = plane.offset(x as isize, y as isize);
         if params.trace {
-            eprintln!("tb c={c_idx} x={x} y={y} n={n} bypass={} ts={ts} qp={qp} scan={scan_idx}", cu.bypass);
+            eprintln!(
+                "tb c={c_idx} x={x} y={y} n={n} bypass={} ts={ts} qp={qp} scan={scan_idx}",
+                cu.bypass
+            );
             for yy in 0..n {
-                let pred: Vec<i32> = (0..n).map(|xx| plane.data[off + yy * stride + xx].to_i32()).collect();
+                let pred: Vec<i32> = (0..n)
+                    .map(|xx| plane.data[off + yy * stride + xx].to_i32())
+                    .collect();
                 let res: Vec<i16> = (0..n).map(|xx| coeffs[yy * n + xx]).collect();
                 eprintln!("  pred {pred:?} res {res:?}");
             }
@@ -1405,11 +1941,26 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     /// (a 16-bit stream's lossless difference, a left-shifting transform
     /// skip) — through the scalar `*_wide` kernels.
     #[allow(clippy::too_many_arguments)]
-    fn residual_block_wide(&mut self, cu: &CuCtx, x: usize, y: usize, log2: u32, c_idx: usize, params: &ResidualParams, keep_luma: bool, res_scale: i32, qp: i32, bd: u32) -> Result<()> {
+    fn residual_block_wide(
+        &mut self,
+        cu: &CuCtx,
+        x: usize,
+        y: usize,
+        log2: u32,
+        c_idx: usize,
+        params: &ResidualParams,
+        keep_luma: bool,
+        res_scale: i32,
+        qp: i32,
+        bd: u32,
+    ) -> Result<()> {
         let n = 1usize << log2;
         let ext = self.sps.extended_precision();
         let log2_range = self.sps.log2_transform_range(bd);
-        let range = ResidualRange { log2_range, extended_precision: ext };
+        let range = ResidualRange {
+            log2_range,
+            extended_precision: ext,
+        };
         let mut coeffs = std::mem::take(&mut self.coeffs_wide);
         if coeffs.len() < n * n {
             coeffs.resize(1024, 0);
@@ -1417,7 +1968,13 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let ri = if self.sps.cabac_bypass_alignment() {
             parse_residual::<i32, true>(&mut self.cabac, &mut self.cx, params, &range, &mut coeffs)?
         } else {
-            parse_residual::<i32, false>(&mut self.cabac, &mut self.cx, params, &range, &mut coeffs)?
+            parse_residual::<i32, false>(
+                &mut self.cabac,
+                &mut self.cx,
+                params,
+                &range,
+                &mut coeffs,
+            )?
         };
         let ts = ri.transform_skip;
         let rotate = self.sps.ts_rotation() && log2 == 2 && cu.intra && (ts || cu.bypass);
@@ -1435,11 +1992,25 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                     let size_id = (log2 - 2) as usize;
                     let matrix_id = if cu.intra { c_idx } else { 3 + c_idx };
                     let list = &sl.lists[size_id][matrix_id];
-                    let dc = if size_id >= 2 { sl.dc[size_id - 2][matrix_id] } else { 16 };
+                    let dc = if size_id >= 2 {
+                        sl.dc[size_id - 2][matrix_id]
+                    } else {
+                        16
+                    };
                     ScalingSource::List(&list[..if size_id == 0 { 16 } else { 64 }], dc)
                 }
             };
-            scale_coefficients_i32(&mut coeffs, log2, qp, bd, log2_range, scaling, ts, ri.max_x, ri.max_y);
+            scale_coefficients_i32(
+                &mut coeffs,
+                log2,
+                qp,
+                bd,
+                log2_range,
+                scaling,
+                ts,
+                ri.max_x,
+                ri.max_y,
+            );
             // bdShift = Max(20 - BitDepth, extended_precision ? 11 : 0).
             let bd_shift = (20 - bd as i32).max(if ext { 11 } else { 0 });
             if ts {
@@ -1476,9 +2047,14 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let stride = plane.stride;
         let off = plane.offset(x as isize, y as isize);
         if params.trace {
-            eprintln!("tb c={c_idx} x={x} y={y} n={n} bypass={} ts={ts} qp={qp} scan={} wide", cu.bypass, params.scan_idx);
+            eprintln!(
+                "tb c={c_idx} x={x} y={y} n={n} bypass={} ts={ts} qp={qp} scan={} wide",
+                cu.bypass, params.scan_idx
+            );
             for yy in 0..n {
-                let pred: Vec<i32> = (0..n).map(|xx| plane.data[off + yy * stride + xx].to_i32()).collect();
+                let pred: Vec<i32> = (0..n)
+                    .map(|xx| plane.data[off + yy * stride + xx].to_i32())
+                    .collect();
                 let res: Vec<i32> = (0..n).map(|xx| coeffs[yy * n + xx]).collect();
                 eprintln!("  pred {pred:?} res {res:?}");
             }
@@ -1531,7 +2107,13 @@ pub(crate) struct SplitCuNb {
 /// desyncs the stream. `depth` is the current coding-tree depth the
 /// neighbour depths are compared against.
 #[allow(dead_code)]
-pub(crate) fn write_split_cu_flag(e: &mut CabacEncoder, cx: &mut Contexts, nb: &SplitCuNb, depth: u32, split: bool) {
+pub(crate) fn write_split_cu_flag(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    nb: &SplitCuNb,
+    depth: u32,
+    split: bool,
+) {
     let mut inc = 0usize;
     if nb.left_depth.is_some_and(|d| d as u32 > depth) {
         inc += 1;
@@ -1550,7 +2132,11 @@ pub(crate) fn write_split_cu_flag(e: &mut CabacEncoder, cx: &mut Contexts, nb: &
 /// residuals are raw spatial differences — see `write_residual` for what
 /// that does and does not change in the spelling.
 #[allow(dead_code)]
-pub(crate) fn write_cu_transquant_bypass_flag(e: &mut CabacEncoder, cx: &mut Contexts, bypass: bool) {
+pub(crate) fn write_cu_transquant_bypass_flag(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    bypass: bool,
+) {
     e.encode_decision(&mut cx.c[CU_TRANSQUANT_BYPASS_FLAG_OFFSET], bypass as u32);
 }
 
@@ -1631,8 +2217,16 @@ pub(crate) fn write_intra_chroma_pred_mode(e: &mut CabacEncoder, cx: &mut Contex
 /// level — otherwise the split is inferred from those same conditions.
 /// The context depends only on the TB size.
 #[allow(dead_code)]
-pub(crate) fn write_split_transform_flag(e: &mut CabacEncoder, cx: &mut Contexts, log2: u32, split: bool) {
-    e.encode_decision(&mut cx.c[SPLIT_TRANSFORM_FLAG_OFFSET + (5 - log2) as usize], split as u32);
+pub(crate) fn write_split_transform_flag(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    log2: u32,
+    split: bool,
+) {
+    e.encode_decision(
+        &mut cx.c[SPLIT_TRANSFORM_FLAG_OFFSET + (5 - log2) as usize],
+        split as u32,
+    );
 }
 
 /// Write `cbf_cb` or `cbf_cr` (they share contexts): the context is the
@@ -1644,8 +2238,16 @@ pub(crate) fn write_split_transform_flag(e: &mut CabacEncoder, cx: &mut Contexts
 /// own flag at the same context; the caller writes it right after the
 /// first, mirroring the reader's order (cb both halves, then cr).
 #[allow(dead_code)]
-pub(crate) fn write_cbf_chroma(e: &mut CabacEncoder, cx: &mut Contexts, trafo_depth: u32, cbf: bool) {
-    e.encode_decision(&mut cx.c[CBF_CB_CR_OFFSET + trafo_depth as usize], cbf as u32);
+pub(crate) fn write_cbf_chroma(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    trafo_depth: u32,
+    cbf: bool,
+) {
+    e.encode_decision(
+        &mut cx.c[CBF_CB_CR_OFFSET + trafo_depth as usize],
+        cbf as u32,
+    );
 }
 
 /// Write `cbf_luma`: context 1 at transform-tree depth 0, else 0. Read at
@@ -1658,9 +2260,11 @@ pub(crate) fn write_cbf_chroma(e: &mut CabacEncoder, cx: &mut Contexts, trafo_de
 /// `cu.intra || depth != 0 || any chroma cbf of this leaf`.
 #[allow(dead_code)]
 pub(crate) fn write_cbf_luma(e: &mut CabacEncoder, cx: &mut Contexts, trafo_depth: u32, cbf: bool) {
-    e.encode_decision(&mut cx.c[CBF_LUMA_OFFSET + (trafo_depth == 0) as usize], cbf as u32);
+    e.encode_decision(
+        &mut cx.c[CBF_LUMA_OFFSET + (trafo_depth == 0) as usize],
+        cbf as u32,
+    );
 }
-
 
 /// Write `cu_skip_flag`: the inverse of the read in `coding_unit`. Present
 /// for every CU of a P (or B) slice; an I slice never reads one. The
@@ -1699,7 +2303,10 @@ pub(crate) fn write_pred_mode_flag(e: &mut CabacEncoder, cx: &mut Contexts, intr
 /// needs neither.
 #[allow(dead_code)]
 pub(crate) fn write_part_mode_inter(e: &mut CabacEncoder, cx: &mut Contexts, mode: PartMode) {
-    debug_assert!(mode == PartMode::P2Nx2N, "a shape other than PART_2Nx2N needs the CB size: write_part_mode_inter_at");
+    debug_assert!(
+        mode == PartMode::P2Nx2N,
+        "a shape other than PART_2Nx2N needs the CB size: write_part_mode_inter_at"
+    );
     e.encode_decision(&mut cx.c[PART_MODE_OFFSET], 1);
 }
 
@@ -1721,31 +2328,59 @@ pub(crate) fn write_part_mode_inter(e: &mut CabacEncoder, cx: &mut Contexts, mod
 /// every CB above the minimum, whether or not any AMP shape is chosen.
 /// The AMP shapes above the minimum only; the reader has no spelling for
 /// them at it, and none for inter NxN at 8x8.
-pub(crate) fn write_part_mode_inter_at(e: &mut CabacEncoder, cx: &mut Contexts, mode: PartMode, log2_cb: u32, log2_min_cb: u32, amp: bool) {
-    e.encode_decision(&mut cx.c[PART_MODE_OFFSET], u32::from(mode == PartMode::P2Nx2N));
+pub(crate) fn write_part_mode_inter_at(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    mode: PartMode,
+    log2_cb: u32,
+    log2_min_cb: u32,
+    amp: bool,
+) {
+    e.encode_decision(
+        &mut cx.c[PART_MODE_OFFSET],
+        u32::from(mode == PartMode::P2Nx2N),
+    );
     if mode == PartMode::P2Nx2N {
         return;
     }
     let horizontal = matches!(mode, PartMode::P2NxN | PartMode::P2NxnU | PartMode::P2NxnD);
     if log2_cb == log2_min_cb {
-        debug_assert!(matches!(mode, PartMode::P2NxN | PartMode::PNx2N | PartMode::PNxN), "{mode:?} at the minimum coding block");
+        debug_assert!(
+            matches!(mode, PartMode::P2NxN | PartMode::PNx2N | PartMode::PNxN),
+            "{mode:?} at the minimum coding block"
+        );
         debug_assert!(mode != PartMode::PNxN || log2_cb > 3, "inter NxN at 8x8");
-        e.encode_decision(&mut cx.c[PART_MODE_OFFSET + 1], u32::from(mode == PartMode::P2NxN));
+        e.encode_decision(
+            &mut cx.c[PART_MODE_OFFSET + 1],
+            u32::from(mode == PartMode::P2NxN),
+        );
         if mode != PartMode::P2NxN && log2_cb > 3 {
-            e.encode_decision(&mut cx.c[PART_MODE_OFFSET + 2], u32::from(mode == PartMode::PNx2N));
+            e.encode_decision(
+                &mut cx.c[PART_MODE_OFFSET + 2],
+                u32::from(mode == PartMode::PNx2N),
+            );
         }
         return;
     }
-    debug_assert!(mode != PartMode::PNxN, "inter NxN above the minimum coding block");
+    debug_assert!(
+        mode != PartMode::PNxN,
+        "inter NxN above the minimum coding block"
+    );
     e.encode_decision(&mut cx.c[PART_MODE_OFFSET + 1], u32::from(horizontal));
     if !amp {
-        debug_assert!(matches!(mode, PartMode::P2NxN | PartMode::PNx2N), "{mode:?} without amp_enabled_flag");
+        debug_assert!(
+            matches!(mode, PartMode::P2NxN | PartMode::PNx2N),
+            "{mode:?} without amp_enabled_flag"
+        );
         return;
     }
     let equal = matches!(mode, PartMode::P2NxN | PartMode::PNx2N);
     e.encode_decision(&mut cx.c[PART_MODE_OFFSET + 3], u32::from(equal));
     if !equal {
-        e.encode_bypass(u32::from(matches!(mode, PartMode::P2NxnD | PartMode::PnRx2N)));
+        e.encode_bypass(u32::from(matches!(
+            mode,
+            PartMode::P2NxnD | PartMode::PnRx2N
+        )));
     }
 }
 
@@ -1764,8 +2399,16 @@ pub(crate) fn write_merge_flag(e: &mut CabacEncoder, cx: &mut Contexts, merge: b
 /// `five_minus_max_num_merge_cand` contract: writer and header must agree
 /// or every bin after the first mismatched index desyncs.
 #[allow(dead_code)]
-pub(crate) fn write_merge_idx(e: &mut CabacEncoder, cx: &mut Contexts, max_num_merge_cand: u32, idx: u32) {
-    debug_assert!(idx < max_num_merge_cand.max(1), "merge_idx beyond the candidate count");
+pub(crate) fn write_merge_idx(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    max_num_merge_cand: u32,
+    idx: u32,
+) {
+    debug_assert!(
+        idx < max_num_merge_cand.max(1),
+        "merge_idx beyond the candidate count"
+    );
     if max_num_merge_cand <= 1 {
         return;
     }
@@ -1805,15 +2448,31 @@ pub(crate) fn write_merge_idx(e: &mut CabacEncoder, cx: &mut Contexts, max_num_m
 /// `info.ct_depth` at `(x_cb, y_cb)`, not at the prediction block, so a
 /// whole-CTU CU passes 0 whatever its partitioning.
 #[allow(dead_code)]
-pub(crate) fn write_inter_pred_idc(e: &mut CabacEncoder, cx: &mut Contexts, w: i32, h: i32, ct_depth: u32, idc: u32) {
-    debug_assert!(idc <= 2, "inter_pred_idc is 0 PRED_L0, 1 PRED_L1, 2 PRED_BI");
+pub(crate) fn write_inter_pred_idc(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    w: i32,
+    h: i32,
+    ct_depth: u32,
+    idc: u32,
+) {
+    debug_assert!(
+        idc <= 2,
+        "inter_pred_idc is 0 PRED_L0, 1 PRED_L1, 2 PRED_BI"
+    );
     debug_assert!(
         !(w + h == 12 && idc == 2),
         "PRED_BI is forbidden on an 8x4 / 4x8 prediction block (8.5.3.2.2)"
     );
     if w + h != 12 {
-        debug_assert!((ct_depth as usize) < 4, "CtDepth indexes the first four inter_pred_idc contexts");
-        e.encode_decision(&mut cx.c[INTER_PRED_IDC_OFFSET + ct_depth as usize], (idc == 2) as u32);
+        debug_assert!(
+            (ct_depth as usize) < 4,
+            "CtDepth indexes the first four inter_pred_idc contexts"
+        );
+        e.encode_decision(
+            &mut cx.c[INTER_PRED_IDC_OFFSET + ct_depth as usize],
+            (idc == 2) as u32,
+        );
         if idc == 2 {
             return;
         }
@@ -2062,17 +2721,29 @@ pub(crate) fn write_sao(
     merge: Option<SaoMerge>,
     params: &[SaoParams; 3],
 ) {
-    debug_assert!(merge != Some(SaoMerge::Left) || nb.left, "merging left where the reader reads no flag");
-    debug_assert!(merge != Some(SaoMerge::Up) || nb.up, "merging up where the reader reads no flag");
+    debug_assert!(
+        merge != Some(SaoMerge::Left) || nb.left,
+        "merging left where the reader reads no flag"
+    );
+    debug_assert!(
+        merge != Some(SaoMerge::Up) || nb.up,
+        "merging up where the reader reads no flag"
+    );
     if nb.left {
-        e.encode_decision(&mut cx.c[SAO_MERGE_FLAG_OFFSET], u32::from(merge == Some(SaoMerge::Left)));
+        e.encode_decision(
+            &mut cx.c[SAO_MERGE_FLAG_OFFSET],
+            u32::from(merge == Some(SaoMerge::Left)),
+        );
     }
     // A merge-left CTB codes nothing further — not even the up flag.
     if merge == Some(SaoMerge::Left) {
         return;
     }
     if nb.up {
-        e.encode_decision(&mut cx.c[SAO_MERGE_FLAG_OFFSET], u32::from(merge == Some(SaoMerge::Up)));
+        e.encode_decision(
+            &mut cx.c[SAO_MERGE_FLAG_OFFSET],
+            u32::from(merge == Some(SaoMerge::Up)),
+        );
     }
     if merge == Some(SaoMerge::Up) {
         return;
@@ -2092,20 +2763,35 @@ pub(crate) fn write_sao(
                 e.encode_bypass(u32::from(p.type_idx == 2));
             }
             if c_idx == 1 {
-                debug_assert_eq!(params[2].type_idx, p.type_idx, "Cr takes Cb's sao_type_idx; no bin carries its own");
+                debug_assert_eq!(
+                    params[2].type_idx, p.type_idx,
+                    "Cr takes Cb's sao_type_idx; no bin carries its own"
+                );
             }
         }
         if p.type_idx == 0 {
             continue;
         }
-        let shift = if c_idx == 0 { sctx.shift.0 } else { sctx.shift.1 };
+        let shift = if c_idx == 0 {
+            sctx.shift.0
+        } else {
+            sctx.shift.1
+        };
         let unit = 1i16 << shift;
         let mut abs = [0u32; 4];
         for (i, a) in abs.iter_mut().enumerate() {
             let v = p.offsets[i];
-            debug_assert_eq!(v % unit, 0, "offset {v} is not a multiple of the SAO offset scale");
+            debug_assert_eq!(
+                v % unit,
+                0,
+                "offset {v} is not a multiple of the SAO offset scale"
+            );
             *a = (v / unit).unsigned_abs() as u32;
-            debug_assert!(*a <= sctx.cmax, "sao_offset_abs {a} above cMax {}", sctx.cmax);
+            debug_assert!(
+                *a <= sctx.cmax,
+                "sao_offset_abs {a} above cMax {}",
+                sctx.cmax
+            );
         }
         for a in abs {
             write_sao_offset_abs(e, sctx.cmax, a);
@@ -2120,8 +2806,14 @@ pub(crate) fn write_sao(
             debug_assert!(p.band_or_class < 32, "sao_band_position is five bits");
             e.encode_bypass_bits(5, u32::from(p.band_or_class));
         } else {
-            debug_assert!(p.offsets[0] >= 0 && p.offsets[1] >= 0, "edge offsets 0 and 1 are positive by construction");
-            debug_assert!(p.offsets[2] <= 0 && p.offsets[3] <= 0, "edge offsets 2 and 3 are negative by construction");
+            debug_assert!(
+                p.offsets[0] >= 0 && p.offsets[1] >= 0,
+                "edge offsets 0 and 1 are positive by construction"
+            );
+            debug_assert!(
+                p.offsets[2] <= 0 && p.offsets[3] <= 0,
+                "edge offsets 2 and 3 are negative by construction"
+            );
             // sao_eo_class: two bypass bits, for luma and for Cb. Cr shares
             // Cb's and codes nothing.
             if c_idx == 0 || c_idx == 1 {
@@ -2129,7 +2821,10 @@ pub(crate) fn write_sao(
                 e.encode_bypass_bits(2, u32::from(p.band_or_class));
             }
             if c_idx == 1 {
-                debug_assert_eq!(params[2].band_or_class, p.band_or_class, "Cr takes Cb's sao_eo_class; no bin carries its own");
+                debug_assert_eq!(
+                    params[2].band_or_class, p.band_or_class,
+                    "Cr takes Cb's sao_eo_class; no bin carries its own"
+                );
             }
         }
     }
@@ -2162,7 +2857,11 @@ pub(crate) fn intra_chroma_mode(chroma_array_type: u32, luma: u32, syn: u32) -> 
         _ => luma,
     };
     let m = if syn < 4 && m == luma { 34 } else { m };
-    if chroma_array_type == 2 { MODE_422[m as usize] } else { m }
+    if chroma_array_type == 2 {
+        MODE_422[m as usize]
+    } else {
+        m
+    }
 }
 
 /// `QpC` as a function of `qPi` (8.6.1): Table 8-10 for 4:2:0, otherwise
@@ -2185,7 +2884,10 @@ pub fn chroma_qp(chroma_array_type: u32, qpi: i32) -> i32 {
 /// `pub(crate)` for the encoder's intra decision module, whose mirrored
 /// derivation must use THIS table rather than a retyped copy — a derived
 /// table can drift, a shared one cannot.
-pub(crate) const MODE_422: [u32; 35] =[0, 1, 2, 2, 2, 2, 3, 5, 7, 8, 10, 12, 13, 15, 17, 18, 19, 20, 21, 22, 23, 23, 24, 24, 25, 25, 26, 27, 27, 28, 28, 29, 29, 30, 31];
+pub(crate) const MODE_422: [u32; 35] = [
+    0, 1, 2, 2, 2, 2, 3, 5, 7, 8, 10, 12, 13, 15, 17, 18, 19, 20, 21, 22, 23, 23, 24, 24, 25, 25,
+    26, 27, 27, 28, 28, 29, 29, 30, 31,
+];
 
 #[cfg(test)]
 mod write_round_trip {
@@ -2193,7 +2895,10 @@ mod write_round_trip {
     use crate::bitwriter::BitWriter;
     use crate::encode::Config;
     use crate::encode::gop::Kind;
-    use crate::encode::h265_syntax::{Geometry as EncGeometry, NAL_IDR_N_LP, NAL_TRAIL_R, PpsOptions, SliceHeader as EncSliceHeader, write_pps, write_pps_opts, write_slice_header, write_sps};
+    use crate::encode::h265_syntax::{
+        Geometry as EncGeometry, NAL_IDR_N_LP, NAL_TRAIL_R, PpsOptions,
+        SliceHeader as EncSliceHeader, write_pps, write_pps_opts, write_slice_header, write_sps,
+    };
     use crate::hevc::pic::Geometry as PicGeometry;
     use crate::hevc::residual::write_residual;
     use crate::nal::{HevcNalHeader, unescape_rbsp};
@@ -2202,7 +2907,10 @@ mod write_round_trip {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> u32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 33) as u32
         }
         fn below(&mut self, n: u32) -> u32 {
@@ -2390,7 +3098,11 @@ mod write_round_trip {
                 return None;
             }
             let i = self.idx4(xn, yn);
-            if self.coded[i] { Some(self.ct_depth[i]) } else { None }
+            if self.coded[i] {
+                Some(self.ct_depth[i])
+            } else {
+                None
+            }
         }
 
         /// The skip flag of the neighbour at `(xn, yn)` when it is
@@ -2401,7 +3113,11 @@ mod write_round_trip {
                 return None;
             }
             let i = self.idx4(xn, yn);
-            if self.coded[i] { Some(self.exp_skip[i] != 0) } else { None }
+            if self.coded[i] {
+                Some(self.exp_skip[i] != 0)
+            } else {
+                None
+            }
         }
 
         /// One mvd component whose magnitude lands in each spelling
@@ -2432,14 +3148,18 @@ mod write_round_trip {
         /// reader reads one, and inferred by the same conditions elsewhere.
         fn quadtree(&mut self, e: &mut CabacEncoder, x0: i32, y0: i32, log2_cb: u32, depth: u32) {
             let size = 1i32 << log2_cb;
-            let split = if x0 + size <= self.pw && y0 + size <= self.ph && log2_cb > self.log2_min_cb {
-                let split = self.rng.chance(if log2_cb >= 6 { 75 } else { 45 });
-                let nb = SplitCuNb { left_depth: self.neighbour_depth(x0 - 1, y0), above_depth: self.neighbour_depth(x0, y0 - 1) };
-                write_split_cu_flag(e, &mut self.cx, &nb, depth, split);
-                split
-            } else {
-                log2_cb > self.log2_min_cb
-            };
+            let split =
+                if x0 + size <= self.pw && y0 + size <= self.ph && log2_cb > self.log2_min_cb {
+                    let split = self.rng.chance(if log2_cb >= 6 { 75 } else { 45 });
+                    let nb = SplitCuNb {
+                        left_depth: self.neighbour_depth(x0 - 1, y0),
+                        above_depth: self.neighbour_depth(x0, y0 - 1),
+                    };
+                    write_split_cu_flag(e, &mut self.cx, &nb, depth, split);
+                    split
+                } else {
+                    log2_cb > self.log2_min_cb
+                };
             // A quantisation group starts at every node at least the
             // group's size — the reader's reset of `IsCuQpDeltaCoded`,
             // `CuQpDeltaVal` and `qPY_PREV` at the top of
@@ -2449,7 +3169,11 @@ mod write_round_trip {
                     self.is_cu_qp_delta_coded = false;
                     self.cu_qp_delta_val = 0;
                     self.qg = (x0, y0);
-                    self.qg_qp_prev = if self.first_qg { self.slice_qp } else { self.qp_y_prev };
+                    self.qg_qp_prev = if self.first_qg {
+                        self.slice_qp
+                    } else {
+                        self.qp_y_prev
+                    };
                     self.first_qg = false;
                 }
             }
@@ -2519,7 +3243,10 @@ mod write_round_trip {
 
         fn cu(&mut self, e: &mut CabacEncoder, x0: i32, y0: i32, log2_cb: u32, depth: u32) {
             let n = 1i32 << log2_cb;
-            debug_assert!(x0 + n <= self.pw && y0 + n <= self.ph, "leaf CUs lie inside the coded picture");
+            debug_assert!(
+                x0 + n <= self.pw && y0 + n <= self.ph,
+                "leaf CUs lie inside the coded picture"
+            );
             // cu_transquant_bypass_flag is the first bin of the CU when the
             // PPS enables it — before the skip flag and part_mode,
             // mirroring the reader.
@@ -2530,11 +3257,27 @@ mod write_round_trip {
             if by {
                 // The decoder records bypass CUs as filter-exempt (bit 0)
                 // and transquant-bypassed (bit 1).
-                PicInfo::fill4(&mut self.exp_exempt, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, 3u8);
+                PicInfo::fill4(
+                    &mut self.exp_exempt,
+                    self.w4,
+                    x0 as usize,
+                    y0 as usize,
+                    n as usize,
+                    n as usize,
+                    3u8,
+                );
             }
             // The reader records CtDepth for the whole CU before parsing
             // inside it; later siblings' split_cu_flag contexts read it.
-            PicInfo::fill4(&mut self.ct_depth, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, depth as u8);
+            PicInfo::fill4(
+                &mut self.ct_depth,
+                self.w4,
+                x0 as usize,
+                y0 as usize,
+                n as usize,
+                n as usize,
+                depth as u8,
+            );
             if self.p_slice {
                 self.p_cu(e, x0, y0, log2_cb, by);
             } else {
@@ -2544,7 +3287,15 @@ mod write_round_trip {
             // (`coding_unit`'s bookkeeping block): the value in force
             // then, which a delta coded inside the tree has already moved
             // and which a CU coding no delta leaves as it was.
-            PicInfo::fill4(&mut self.exp_qp, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, self.qp_y as i8);
+            PicInfo::fill4(
+                &mut self.exp_qp,
+                self.w4,
+                x0 as usize,
+                y0 as usize,
+                n as usize,
+                n as usize,
+                self.qp_y as i8,
+            );
         }
 
         /// One CU of a P slice, in `coding_unit`'s exact order: the skip
@@ -2559,29 +3310,87 @@ mod write_round_trip {
             let ls = self.neighbour_skip(x0 - 1, y0);
             let a_s = self.neighbour_skip(x0, y0 - 1);
             write_cu_skip_flag(e, &mut self.cx, ls, a_s, skip);
-            PicInfo::fill4(&mut self.exp_skip, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, skip as u8);
+            PicInfo::fill4(
+                &mut self.exp_skip,
+                self.w4,
+                x0 as usize,
+                y0 as usize,
+                n as usize,
+                n as usize,
+                skip as u8,
+            );
             if skip {
-                PicInfo::fill4(&mut self.exp_pred, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, 0);
-                PicInfo::fill4(&mut self.coded, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, true);
-                write_merge_idx(e, &mut self.cx, self.max_merge, self.rng.below(self.max_merge.max(1)));
+                PicInfo::fill4(
+                    &mut self.exp_pred,
+                    self.w4,
+                    x0 as usize,
+                    y0 as usize,
+                    n as usize,
+                    n as usize,
+                    0,
+                );
+                PicInfo::fill4(
+                    &mut self.coded,
+                    self.w4,
+                    x0 as usize,
+                    y0 as usize,
+                    n as usize,
+                    n as usize,
+                    true,
+                );
+                write_merge_idx(
+                    e,
+                    &mut self.cx,
+                    self.max_merge,
+                    self.rng.below(self.max_merge.max(1)),
+                );
                 return; // no residual, no tree
             }
             let intra = self.rng.chance(35);
             write_pred_mode_flag(e, &mut self.cx, intra);
             if intra {
-                PicInfo::fill4(&mut self.exp_pred, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, 1);
+                PicInfo::fill4(
+                    &mut self.exp_pred,
+                    self.w4,
+                    x0 as usize,
+                    y0 as usize,
+                    n as usize,
+                    n as usize,
+                    1,
+                );
                 self.intra_cu_body(e, x0, y0, log2_cb, by);
                 return;
             }
-            PicInfo::fill4(&mut self.exp_pred, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, 0);
-            PicInfo::fill4(&mut self.coded, self.w4, x0 as usize, y0 as usize, n as usize, n as usize, true);
+            PicInfo::fill4(
+                &mut self.exp_pred,
+                self.w4,
+                x0 as usize,
+                y0 as usize,
+                n as usize,
+                n as usize,
+                0,
+            );
+            PicInfo::fill4(
+                &mut self.coded,
+                self.w4,
+                x0 as usize,
+                y0 as usize,
+                n as usize,
+                n as usize,
+                true,
+            );
             write_part_mode_inter(e, &mut self.cx, PartMode::P2Nx2N);
             // One 2Nx2N prediction unit. A P slice never reads
             // inter_pred_idc: PRED_L0 is implied.
             let merge = self.rng.chance(50);
             write_merge_flag(e, &mut self.cx, merge);
             if merge {
-                write_merge_idx(e, &mut self.cx, self.max_merge, self.rng.below(self.max_merge.max(1)));
+                write_merge_idx(
+                    e,
+                    &mut self.cx,
+                    self.max_merge,
+                    self.rng.below(self.max_merge.max(1)),
+                );
             } else {
                 if self.nref > 1 {
                     write_ref_idx(e, &mut self.cx, self.nref, self.rng.below(self.nref));
@@ -2598,14 +3407,34 @@ mod write_round_trip {
                 r
             };
             if rqt {
-                self.tt(e, x0, y0, log2_cb, 0, 0, [true; 2], false, self.max_depth_inter, 0, by, false);
+                self.tt(
+                    e,
+                    x0,
+                    y0,
+                    log2_cb,
+                    0,
+                    0,
+                    [true; 2],
+                    false,
+                    self.max_depth_inter,
+                    0,
+                    by,
+                    false,
+                );
             }
         }
 
         /// Everything after the per-slice preamble of an intra CU — shared
         /// by the I-slice walk and intra-in-P, as the reader's intra arm
         /// serves both slice types.
-        fn intra_cu_body(&mut self, e: &mut CabacEncoder, x0: i32, y0: i32, log2_cb: u32, by: bool) {
+        fn intra_cu_body(
+            &mut self,
+            e: &mut CabacEncoder,
+            x0: i32,
+            y0: i32,
+            log2_cb: u32,
+            by: bool,
+        ) {
             let n = 1i32 << log2_cb;
             let nxn = log2_cb == self.log2_min_cb && self.rng.chance(40);
             if log2_cb == self.log2_min_cb {
@@ -2639,8 +3468,24 @@ mod write_round_trip {
                     payload[i] = rem;
                 }
                 modes[i] = target;
-                PicInfo::fill4(&mut self.intra_mode, self.w4, xp as usize, yp as usize, pb as usize, pb as usize, target as u8);
-                PicInfo::fill4(&mut self.coded, self.w4, xp as usize, yp as usize, pb as usize, pb as usize, true);
+                PicInfo::fill4(
+                    &mut self.intra_mode,
+                    self.w4,
+                    xp as usize,
+                    yp as usize,
+                    pb as usize,
+                    pb as usize,
+                    target as u8,
+                );
+                PicInfo::fill4(
+                    &mut self.coded,
+                    self.w4,
+                    xp as usize,
+                    yp as usize,
+                    pb as usize,
+                    pb as usize,
+                    true,
+                );
             }
             for &f in flags.iter().take(npu) {
                 write_prev_intra_luma_pred_flag(e, &mut self.cx, f);
@@ -2659,15 +3504,46 @@ mod write_round_trip {
             // rqt_root_cbf is not coded for intra CUs; the tree follows.
             let intra_split = nxn;
             let max_depth = self.max_depth_intra + intra_split as u32;
-            self.tt(e, x0, y0, log2_cb, 0, 0, [true; 2], intra_split, max_depth, chroma_mode, by, true);
+            self.tt(
+                e,
+                x0,
+                y0,
+                log2_cb,
+                0,
+                0,
+                [true; 2],
+                intra_split,
+                max_depth,
+                chroma_mode,
+                by,
+                true,
+            );
         }
 
         /// The writer's `transform_tree`, over the same inference
         /// conditions as the reader's.
         #[allow(clippy::too_many_arguments)]
         #[allow(clippy::too_many_arguments)]
-        fn tt(&mut self, e: &mut CabacEncoder, x0: i32, y0: i32, log2: u32, depth: u32, blk_idx: u32, parent_cbf: [bool; 2], intra_split: bool, max_depth: u32, chroma_mode: u32, bypass: bool, intra: bool) {
-            let split = if log2 <= self.log2_max_tb && log2 > self.log2_min_tb && depth < max_depth && !(intra_split && depth == 0) {
+        fn tt(
+            &mut self,
+            e: &mut CabacEncoder,
+            x0: i32,
+            y0: i32,
+            log2: u32,
+            depth: u32,
+            blk_idx: u32,
+            parent_cbf: [bool; 2],
+            intra_split: bool,
+            max_depth: u32,
+            chroma_mode: u32,
+            bypass: bool,
+            intra: bool,
+        ) {
+            let split = if log2 <= self.log2_max_tb
+                && log2 > self.log2_min_tb
+                && depth < max_depth
+                && !(intra_split && depth == 0)
+            {
                 let s = self.rng.chance(40);
                 write_split_transform_flag(e, &mut self.cx, log2, s);
                 s
@@ -2689,10 +3565,62 @@ mod write_round_trip {
             }
             if split {
                 let half = 1i32 << (log2 - 1);
-                self.tt(e, x0, y0, log2 - 1, depth + 1, 0, cbf_c, intra_split, max_depth, chroma_mode, bypass, intra);
-                self.tt(e, x0 + half, y0, log2 - 1, depth + 1, 1, cbf_c, intra_split, max_depth, chroma_mode, bypass, intra);
-                self.tt(e, x0, y0 + half, log2 - 1, depth + 1, 2, cbf_c, intra_split, max_depth, chroma_mode, bypass, intra);
-                self.tt(e, x0 + half, y0 + half, log2 - 1, depth + 1, 3, cbf_c, intra_split, max_depth, chroma_mode, bypass, intra);
+                self.tt(
+                    e,
+                    x0,
+                    y0,
+                    log2 - 1,
+                    depth + 1,
+                    0,
+                    cbf_c,
+                    intra_split,
+                    max_depth,
+                    chroma_mode,
+                    bypass,
+                    intra,
+                );
+                self.tt(
+                    e,
+                    x0 + half,
+                    y0,
+                    log2 - 1,
+                    depth + 1,
+                    1,
+                    cbf_c,
+                    intra_split,
+                    max_depth,
+                    chroma_mode,
+                    bypass,
+                    intra,
+                );
+                self.tt(
+                    e,
+                    x0,
+                    y0 + half,
+                    log2 - 1,
+                    depth + 1,
+                    2,
+                    cbf_c,
+                    intra_split,
+                    max_depth,
+                    chroma_mode,
+                    bypass,
+                    intra,
+                );
+                self.tt(
+                    e,
+                    x0 + half,
+                    y0 + half,
+                    log2 - 1,
+                    depth + 1,
+                    3,
+                    cbf_c,
+                    intra_split,
+                    max_depth,
+                    chroma_mode,
+                    bypass,
+                    intra,
+                );
                 return;
             }
             // A leaf. cbf_luma is always coded for intra CUs; for inter
@@ -2712,7 +3640,10 @@ mod write_round_trip {
             // group that carries a coded cbf — luma, or the chroma flags
             // this unit holds, inherited ones included — exactly
             // `transform_unit`'s gate, and before any residual.
-            if self.qp_delta.is_some() && !self.is_cu_qp_delta_coded && (cbf_luma || cbf_c[0] || cbf_c[1]) {
+            if self.qp_delta.is_some()
+                && !self.is_cu_qp_delta_coded
+                && (cbf_luma || cbf_c[0] || cbf_c[1])
+            {
                 let v = self.gen_qp_delta();
                 write_cu_qp_delta(e, &mut self.cx, v);
                 self.is_cu_qp_delta_coded = true;
@@ -2730,7 +3661,15 @@ mod write_round_trip {
                 let p = res_params(log2, 0, scan, bypass, intra);
                 write_residual(e, &mut self.cx, &p, &coeffs);
                 let nn = 1usize << log2;
-                PicInfo::fill4(&mut self.exp_cbf_luma, self.w4, x0 as usize, y0 as usize, nn, nn, 1);
+                PicInfo::fill4(
+                    &mut self.exp_cbf_luma,
+                    self.w4,
+                    x0 as usize,
+                    y0 as usize,
+                    nn,
+                    nn,
+                    1,
+                );
             }
             // Chroma: at this TU when its blocks are at least 4x4, else once
             // at the fourth 4x4 luma block, at the parent's size — with the
@@ -2747,7 +3686,13 @@ mod write_round_trip {
                 for c in 0..2usize {
                     if cbf_c[c] {
                         let scan = if intra {
-                            crate::hevc::residual::residual_scan_idx(true, log2c, 1 + c, 1, chroma_mode)
+                            crate::hevc::residual::residual_scan_idx(
+                                true,
+                                log2c,
+                                1 + c,
+                                1,
+                                chroma_mode,
+                            )
                         } else {
                             0
                         };
@@ -2807,11 +3752,13 @@ mod write_round_trip {
                         if n >= 8 {
                             for sy in 0..n / 4 {
                                 for sx in 0..n / 4 {
-                                    if (sx == 0 && sy == 0) || (sx == n / 4 - 1 && sy == n / 4 - 1) {
+                                    if (sx == 0 && sy == 0) || (sx == n / 4 - 1 && sy == n / 4 - 1)
+                                    {
                                         continue;
                                     }
                                     if self.rng.chance(40) {
-                                        c[(sy * 4) * n + sx * 4] = [1, -1, 2, 700][self.rng.below(4) as usize];
+                                        c[(sy * 4) * n + sx * 4] =
+                                            [1, -1, 2, 700][self.rng.below(4) as usize];
                                     }
                                 }
                             }
@@ -2833,7 +3780,13 @@ mod write_round_trip {
         }
     }
 
-    fn res_params(log2: u32, c_idx: usize, scan_idx: u32, bypass: bool, intra: bool) -> ResidualParams {
+    fn res_params(
+        log2: u32,
+        c_idx: usize,
+        scan_idx: u32,
+        bypass: bool,
+        intra: bool,
+    ) -> ResidualParams {
         ResidualParams {
             log2_size: log2,
             c_idx,
@@ -2877,7 +3830,11 @@ mod write_round_trip {
         let mut params = [SaoParams::default(); 3];
         for c in 0..3usize {
             // Cr (c == 2) inherits Cb's type, and its class in edge mode.
-            let type_idx = if c == 2 { params[1].type_idx } else { rng.below(3) as u8 };
+            let type_idx = if c == 2 {
+                params[1].type_idx
+            } else {
+                rng.below(3) as u8
+            };
             params[c].type_idx = type_idx;
             if type_idx == 0 {
                 continue;
@@ -2891,7 +3848,11 @@ mod write_round_trip {
                 params[c].band_or_class = rng.below(32) as u8;
             } else {
                 params[c].offsets = [mag(rng), mag(rng), -mag(rng), -mag(rng)];
-                params[c].band_or_class = if c == 2 { params[1].band_or_class } else { rng.below(4) as u8 };
+                params[c].band_or_class = if c == 2 {
+                    params[1].band_or_class
+                } else {
+                    rng.below(4) as u8
+                };
             }
         }
         params
@@ -2900,20 +3861,52 @@ mod write_round_trip {
     /// Returns how many (CTB, component) pairs took each `sao_type_idx` —
     /// off, band, edge — so a caller can prove its corpus reached every
     /// branch rather than assuming a small picture did.
-    fn round_trip_cfg(width: u32, height: u32, qp: i32, seed: u64, bypass: bool, sao: bool, qp_delta: Option<u32>) -> [usize; 3] {
+    fn round_trip_cfg(
+        width: u32,
+        height: u32,
+        qp: i32,
+        seed: u64,
+        bypass: bool,
+        sao: bool,
+        qp_delta: Option<u32>,
+    ) -> [usize; 3] {
         // The configuration under test is the one the encoder actually
         // writes: parse the written SPS/PPS with the production parsers and
         // drive both sides from the result.
-        let cfg = Config { width, height, chroma: ChromaFormat::Yuv420, bit_depth: 8, sao, ..Config::default() };
+        let cfg = Config {
+            width,
+            height,
+            chroma: ChromaFormat::Yuv420,
+            bit_depth: 8,
+            sao,
+            ..Config::default()
+        };
         let g = EncGeometry::new(&cfg);
-        let sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None))).expect("the encoder's SPS must parse");
-        let opts = PpsOptions { cu_qp_delta_depth: qp_delta, ..PpsOptions::default() };
-        let mut pps = Pps::parse(&unescape_rbsp(&write_pps_opts(26, bypass, false, &opts))).expect("the encoder's PPS must parse");
-        pps.resolve_tiles(&sps).expect("one tile covering the picture");
+        let sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None)))
+            .expect("the encoder's SPS must parse");
+        let opts = PpsOptions {
+            cu_qp_delta_depth: qp_delta,
+            ..PpsOptions::default()
+        };
+        let mut pps = Pps::parse(&unescape_rbsp(&write_pps_opts(26, bypass, false, &opts)))
+            .expect("the encoder's PPS must parse");
+        pps.resolve_tiles(&sps)
+            .expect("one tile covering the picture");
         assert!(!pps.sign_data_hiding && !pps.transform_skip_enabled);
-        assert_eq!(pps.cu_qp_delta_enabled, qp_delta.is_some(), "the PPS must carry the per-group quantiser switch");
-        assert_eq!(pps.diff_cu_qp_delta_depth, qp_delta.unwrap_or(0), "the PPS must carry the group depth");
-        assert_eq!(pps.transquant_bypass_enabled, bypass, "the PPS must carry the bypass switch");
+        assert_eq!(
+            pps.cu_qp_delta_enabled,
+            qp_delta.is_some(),
+            "the PPS must carry the per-group quantiser switch"
+        );
+        assert_eq!(
+            pps.diff_cu_qp_delta_depth,
+            qp_delta.unwrap_or(0),
+            "the PPS must carry the group depth"
+        );
+        assert_eq!(
+            pps.transquant_bypass_enabled, bypass,
+            "the PPS must carry the bypass switch"
+        );
 
         // The slice NAL: two header bytes, the slice segment header, byte
         // alignment, CABAC slice data (a terminate after every CTU).
@@ -2924,8 +3917,20 @@ mod write_round_trip {
         w.bits(8, 1); // nuh_layer_id 0, nuh_temporal_id_plus1 1
         // Both switches on when SAO is under test, so the reader walks
         // all three components and every inheritance rule is exercised.
-        let sao_flags = sao.then_some(crate::encode::h265_syntax::SaoFlags { luma: true, chroma: Some(true) });
-        let eh = EncSliceHeader { kind: Kind::Idr, poc_lsb: 0, qp, log2_max_poc_lsb: 8, ref_deltas: Vec::new(), kept_deltas: Vec::new(), sao: sao_flags, pred_weights: None };
+        let sao_flags = sao.then_some(crate::encode::h265_syntax::SaoFlags {
+            luma: true,
+            chroma: Some(true),
+        });
+        let eh = EncSliceHeader {
+            kind: Kind::Idr,
+            poc_lsb: 0,
+            qp,
+            log2_max_poc_lsb: 8,
+            ref_deltas: Vec::new(),
+            kept_deltas: Vec::new(),
+            sao: sao_flags,
+            pred_weights: None,
+        };
         write_slice_header(&eh, 26, NAL_IDR_N_LP, false, &mut w);
         w.flag(true); // byte_alignment(): alignment_bit_equal_to_one
         w.align_zero();
@@ -2973,7 +3978,10 @@ mod write_round_trip {
             for ctb in 0..wc * hc {
                 if sao {
                     let (rx, ry) = (ctb % wc, ctb / wc);
-                    let nb = SaoMergeNb { left: rx > 0, up: ry > 0 };
+                    let nb = SaoMergeNb {
+                        left: rx > 0,
+                        up: ry > 0,
+                    };
                     write_sao(&mut e, &mut wr.cx, &sctx, &nb, merges[ctb], &want[ctb]);
                 }
                 wr.write_ctu(&mut e, ctb, wc);
@@ -2988,14 +3996,29 @@ mod write_round_trip {
         let nal = HevcNalHeader::parse(&rbsp).expect("NAL header");
         let psc = pps.clone();
         let ssc = sps.clone();
-        let (hdr, pps, sps) = SliceHeader::parse(&rbsp, nal, &|_| Some(psc.clone()), &|_| Some(ssc.clone()), None).expect("the encoder's slice header must parse");
+        let (hdr, pps, sps) = SliceHeader::parse(
+            &rbsp,
+            nal,
+            &|_| Some(psc.clone()),
+            &|_| Some(ssc.clone()),
+            None,
+        )
+        .expect("the encoder's slice header must parse");
         assert_eq!(hdr.slice_type, SliceType::I);
-        assert_eq!(hdr.slice_qp, qp, "the header must carry the QP the contexts initialise from");
+        assert_eq!(
+            hdr.slice_qp, qp,
+            "the header must carry the QP the contexts initialise from"
+        );
         assert_eq!(hdr.data_bit_offset % 8, 0);
 
         // The production slice decoder, assembled the way `decoder.rs`
         // assembles it for a one-slice I picture.
-        let mut frame = Frame::<u8>::new(sps.width as usize, sps.height as usize, ChromaFormat::Yuv420, 8);
+        let mut frame = Frame::<u8>::new(
+            sps.width as usize,
+            sps.height as usize,
+            ChromaFormat::Yuv420,
+            8,
+        );
         let geo = Arc::new(PicGeometry::new(&sps, &pps));
         let mut info = PicInfo::new(geo);
         let cabac = Cabac::new(&rbsp[(hdr.data_bit_offset / 8) as usize..]);
@@ -3051,21 +4074,45 @@ mod write_round_trip {
             trace: TraceCfg::default(),
         };
         for ctb in 0..wc * hc {
-            dec.decode_ctu(ctb, ctb).unwrap_or_else(|e| panic!("{width}x{height} qp={qp} seed={seed}: CTU {ctb} did not decode: {e}"));
+            dec.decode_ctu(ctb, ctb).unwrap_or_else(|e| {
+                panic!("{width}x{height} qp={qp} seed={seed}: CTU {ctb} did not decode: {e}")
+            });
             let end = dec.cabac.terminate();
-            assert_eq!(end != 0, ctb == wc * hc - 1, "end_of_slice_segment_flag at CTU {ctb}");
+            assert_eq!(
+                end != 0,
+                ctb == wc * hc - 1,
+                "end_of_slice_segment_flag at CTU {ctb}"
+            );
         }
-        assert!(!dec.cabac.overrun(), "the decoder ran past what the writer wrote");
+        assert!(
+            !dec.cabac.overrun(),
+            "the decoder ran past what the writer wrote"
+        );
         assert_eq!(dec.warnings, 0);
 
         // Decoded fields against the writer's decisions…
         let tag = format!("{width}x{height} qp={qp} seed={seed}");
-        assert!(wr.coded.iter().all(|&c| c), "{tag}: the writer's walk must tile the picture");
+        assert!(
+            wr.coded.iter().all(|&c| c),
+            "{tag}: the writer's walk must tile the picture"
+        );
         assert_eq!(dec.info.ct_depth, wr.ct_depth, "{tag}: CtDepth differs");
-        assert_eq!(dec.info.intra_mode, wr.intra_mode, "{tag}: intra modes differ");
-        assert_eq!(dec.info.cbf_luma, wr.exp_cbf_luma, "{tag}: cbf_luma differs");
-        assert_eq!(dec.info.filter_exempt, wr.exp_exempt, "{tag}: the bypass CUs (filter-exempt map) differ");
-        assert!(dec.info.pred_mode.iter().all(|&p| p == 1), "{tag}: every CU is intra");
+        assert_eq!(
+            dec.info.intra_mode, wr.intra_mode,
+            "{tag}: intra modes differ"
+        );
+        assert_eq!(
+            dec.info.cbf_luma, wr.exp_cbf_luma,
+            "{tag}: cbf_luma differs"
+        );
+        assert_eq!(
+            dec.info.filter_exempt, wr.exp_exempt,
+            "{tag}: the bypass CUs (filter-exempt map) differ"
+        );
+        assert!(
+            dec.info.pred_mode.iter().all(|&p| p == 1),
+            "{tag}: every CU is intra"
+        );
         // The QP map: the slice quantiser everywhere without deltas, and
         // with them the per-CU value the writer's mirror of the reader's
         // group state arrived at — prediction, wrap and all.
@@ -3112,7 +4159,14 @@ mod write_round_trip {
     #[test]
     fn round_trips_sao_parameters() {
         let mut kinds = [0usize; 3];
-        for (w, h, qp, seed) in [(64u32, 64u32, 26i32, 60u64), (128, 64, 26, 61), (96, 96, 33, 62), (40, 40, 26, 63), (64, 64, 51, 64), (24, 16, 45, 65)] {
+        for (w, h, qp, seed) in [
+            (64u32, 64u32, 26i32, 60u64),
+            (128, 64, 26, 61),
+            (96, 96, 33, 62),
+            (40, 40, 26, 63),
+            (64, 64, 51, 64),
+            (24, 16, 45, 65),
+        ] {
             let k = round_trip_cfg(w, h, qp, seed, false, true, None);
             for i in 0..3 {
                 kinds[i] += k[i];
@@ -3187,7 +4241,12 @@ mod write_round_trip {
     /// (so nothing waits on its rows), at the given POC.
     fn complete_reference(sps: &Sps, poc: i32) -> SharedFrame<u8> {
         SharedFrame::new(
-            Frame::<u8>::new(sps.width as usize, sps.height as usize, ChromaFormat::Yuv420, 8),
+            Frame::<u8>::new(
+                sps.width as usize,
+                sps.height as usize,
+                ChromaFormat::Yuv420,
+                8,
+            ),
             poc,
             1,
             true,
@@ -3209,7 +4268,14 @@ mod write_round_trip {
     /// parameter sets switch off: SAO, TMVP, long-term references, list
     /// modification, cabac_init, weighting, chroma QP offsets, deblocking
     /// override.
-    fn write_p_header(w: &mut BitWriter, qp: i32, poc_lsb: u32, log2_max_poc_lsb: u32, nref: u32, max_merge: u32) {
+    fn write_p_header(
+        w: &mut BitWriter,
+        qp: i32,
+        poc_lsb: u32,
+        log2_max_poc_lsb: u32,
+        nref: u32,
+        max_merge: u32,
+    ) {
         w.bits(8, ((NAL_TRAIL_R as u32) & 0x3f) << 1);
         w.bits(8, 1); // nuh_layer_id 0, nuh_temporal_id_plus1 1
         w.flag(true); // first_slice_segment_in_pic_flag
@@ -3235,18 +4301,35 @@ mod write_round_trip {
     /// production slice decoder the way `decoder.rs` does for a one-slice
     /// P picture over copies of one complete reference, decode every CTU,
     /// then hand the decoder to `check` for the assertions.
-    fn decode_p(rbsp: &[u8], sps: &Sps, pps: &Pps, reference: &SharedFrame<u8>, check: impl FnOnce(&SliceDec<u8>)) {
+    fn decode_p(
+        rbsp: &[u8],
+        sps: &Sps,
+        pps: &Pps,
+        reference: &SharedFrame<u8>,
+        check: impl FnOnce(&SliceDec<u8>),
+    ) {
         let nal = HevcNalHeader::parse(rbsp).expect("NAL header");
         let psc = pps.clone();
         let ssc = sps.clone();
-        let (hdr, pps, sps) = SliceHeader::parse(rbsp, nal, &|_| Some(psc.clone()), &|_| Some(ssc.clone()), None)
-            .expect("the hand-written P header must parse");
+        let (hdr, pps, sps) = SliceHeader::parse(
+            rbsp,
+            nal,
+            &|_| Some(psc.clone()),
+            &|_| Some(ssc.clone()),
+            None,
+        )
+        .expect("the hand-written P header must parse");
         assert_eq!(hdr.slice_type, SliceType::P);
         assert_eq!(hdr.data_bit_offset % 8, 0);
         let nref = hdr.num_ref_idx[0] as usize;
         assert!(nref >= 1, "a P slice needs a reference");
         let cur_poc = hdr.poc_lsb as i32;
-        let mut frame = Frame::<u8>::new(sps.width as usize, sps.height as usize, ChromaFormat::Yuv420, 8);
+        let mut frame = Frame::<u8>::new(
+            sps.width as usize,
+            sps.height as usize,
+            ChromaFormat::Yuv420,
+            8,
+        );
         let geo = Arc::new(PicGeometry::new(&sps, &pps));
         let mut info = PicInfo::new(geo);
         // SAFETY: the reference is complete; no writer remains.
@@ -3263,7 +4346,10 @@ mod write_round_trip {
             cabac,
             cx: Contexts::new(1, hdr.slice_qp),
             refs: RefCtx {
-                pocs: [(0..nref).map(|i| cur_poc - 1 - i as i32).collect(), Vec::new()],
+                pocs: [
+                    (0..nref).map(|i| cur_poc - 1 - i as i32).collect(),
+                    Vec::new(),
+                ],
                 long_term: [vec![false; nref], Vec::new()],
                 col: None,
                 cur_poc,
@@ -3306,11 +4392,19 @@ mod write_round_trip {
             trace: TraceCfg::default(),
         };
         for ctb in 0..wc * hc {
-            dec.decode_ctu(ctb, ctb).unwrap_or_else(|e| panic!("P CTU {ctb} did not decode: {e}"));
+            dec.decode_ctu(ctb, ctb)
+                .unwrap_or_else(|e| panic!("P CTU {ctb} did not decode: {e}"));
             let end = dec.cabac.terminate();
-            assert_eq!(end != 0, ctb == wc * hc - 1, "end_of_slice_segment_flag at CTU {ctb}");
+            assert_eq!(
+                end != 0,
+                ctb == wc * hc - 1,
+                "end_of_slice_segment_flag at CTU {ctb}"
+            );
         }
-        assert!(!dec.cabac.overrun(), "the decoder ran past what the writer wrote");
+        assert!(
+            !dec.cabac.overrun(),
+            "the decoder ran past what the writer wrote"
+        );
         assert_eq!(dec.warnings, 0);
         check(&dec);
     }
@@ -3322,14 +4416,39 @@ mod write_round_trip {
     /// back. Motion *values* are checked by the scripted tests below,
     /// because merge and AMVP derive them from decoded neighbour state the
     /// writer does not mirror.
-    fn p_round_trip(width: u32, height: u32, qp: i32, seed: u64, nref: u32, max_merge: u32, qp_delta: Option<u32>) {
-        let cfg = Config { width, height, chroma: ChromaFormat::Yuv420, bit_depth: 8, max_refs: 4, ..Config::default() };
+    fn p_round_trip(
+        width: u32,
+        height: u32,
+        qp: i32,
+        seed: u64,
+        nref: u32,
+        max_merge: u32,
+        qp_delta: Option<u32>,
+    ) {
+        let cfg = Config {
+            width,
+            height,
+            chroma: ChromaFormat::Yuv420,
+            bit_depth: 8,
+            max_refs: 4,
+            ..Config::default()
+        };
         let g = EncGeometry::new(&cfg);
-        let sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None))).expect("the encoder's SPS must parse");
-        let opts = PpsOptions { cu_qp_delta_depth: qp_delta, ..PpsOptions::default() };
-        let mut pps = Pps::parse(&unescape_rbsp(&write_pps_opts(26, false, false, &opts))).expect("the encoder's PPS must parse");
-        assert_eq!(pps.cu_qp_delta_enabled, qp_delta.is_some(), "the PPS must carry the per-group quantiser switch");
-        pps.resolve_tiles(&sps).expect("one tile covering the picture");
+        let sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None)))
+            .expect("the encoder's SPS must parse");
+        let opts = PpsOptions {
+            cu_qp_delta_depth: qp_delta,
+            ..PpsOptions::default()
+        };
+        let mut pps = Pps::parse(&unescape_rbsp(&write_pps_opts(26, false, false, &opts)))
+            .expect("the encoder's PPS must parse");
+        assert_eq!(
+            pps.cu_qp_delta_enabled,
+            qp_delta.is_some(),
+            "the PPS must carry the per-group quantiser switch"
+        );
+        pps.resolve_tiles(&sps)
+            .expect("one tile covering the picture");
         let wc = sps.pic_width_in_ctbs() as usize;
         let hc = sps.pic_height_in_ctbs() as usize;
         let mut w = BitWriter::new();
@@ -3350,14 +4469,32 @@ mod write_round_trip {
         let reference = complete_reference(&sps, 3);
         let tag = format!("{width}x{height} qp={qp} seed={seed} nref={nref} mm={max_merge}");
         decode_p(&rbsp, &sps, &pps, &reference, |dec| {
-            assert_eq!(dec.hdr.num_ref_idx[0], nref, "{tag}: the header must carry the list length");
-            assert_eq!(dec.hdr.max_num_merge_cand, max_merge, "{tag}: the header must carry the merge cMax");
-            assert!(wr.coded.iter().all(|&c| c), "{tag}: the writer's walk must tile the picture");
+            assert_eq!(
+                dec.hdr.num_ref_idx[0], nref,
+                "{tag}: the header must carry the list length"
+            );
+            assert_eq!(
+                dec.hdr.max_num_merge_cand, max_merge,
+                "{tag}: the header must carry the merge cMax"
+            );
+            assert!(
+                wr.coded.iter().all(|&c| c),
+                "{tag}: the writer's walk must tile the picture"
+            );
             assert_eq!(dec.info.ct_depth, wr.ct_depth, "{tag}: CtDepth differs");
             assert_eq!(dec.info.skip, wr.exp_skip, "{tag}: the skip map differs");
-            assert_eq!(dec.info.pred_mode, wr.exp_pred, "{tag}: the pred_mode map differs");
-            assert_eq!(dec.info.cbf_luma, wr.exp_cbf_luma, "{tag}: cbf_luma differs");
-            assert_eq!(dec.info.intra_mode, wr.intra_mode, "{tag}: intra modes differ");
+            assert_eq!(
+                dec.info.pred_mode, wr.exp_pred,
+                "{tag}: the pred_mode map differs"
+            );
+            assert_eq!(
+                dec.info.cbf_luma, wr.exp_cbf_luma,
+                "{tag}: cbf_luma differs"
+            );
+            assert_eq!(
+                dec.info.intra_mode, wr.intra_mode,
+                "{tag}: intra modes differ"
+            );
             assert_eq!(dec.info.qp_y, wr.exp_qp, "{tag}: QP map differs");
             assert_eq!(dec.cx.c, wr.cx.c, "{tag}: CABAC context states diverged");
             assert_eq!(dec.cx.stat_coeff, wr.cx.stat_coeff, "{tag}");
@@ -3434,6 +4571,7 @@ mod write_round_trip {
     /// comes back through the production derivation proves them.
     #[test]
     fn p_mvd_and_ref_round_trip_by_value() {
+        #[rustfmt::skip]
         let mvds: [(i16, i16); 9] = [
             (0, 0), (1, 0), (0, -1), (1, -1), (-2, 2), (7, -3), (-9, 10), (100, -1000), (32767, -32767),
         ];
@@ -3445,18 +4583,32 @@ mod write_round_trip {
     }
 
     fn scripted_amvp(mx: i16, my: i16, nref: u32, ri: u32) {
-        let cfg = Config { width: 32, height: 32, chroma: ChromaFormat::Yuv420, bit_depth: 8, max_refs: 4, ..Config::default() };
+        let cfg = Config {
+            width: 32,
+            height: 32,
+            chroma: ChromaFormat::Yuv420,
+            bit_depth: 8,
+            max_refs: 4,
+            ..Config::default()
+        };
         let g = EncGeometry::new(&cfg);
         let sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None))).expect("SPS");
         let mut pps = Pps::parse(&unescape_rbsp(&write_pps(26, false, false))).expect("PPS");
         pps.resolve_tiles(&sps).expect("one tile");
-        assert_eq!(sps.pic_width_in_ctbs() * sps.pic_height_in_ctbs(), 1, "one CTU by construction");
+        assert_eq!(
+            sps.pic_width_in_ctbs() * sps.pic_height_in_ctbs(),
+            1,
+            "one CTU by construction"
+        );
         let mut w = BitWriter::new();
         write_p_header(&mut w, 26, 4, 8, nref, 5);
         let mut cx = Contexts::new(1, 26);
         {
             let mut e = CabacEncoder::new(&mut w);
-            let nb = SplitCuNb { left_depth: None, above_depth: None };
+            let nb = SplitCuNb {
+                left_depth: None,
+                above_depth: None,
+            };
             write_split_cu_flag(&mut e, &mut cx, &nb, 0, false);
             write_cu_skip_flag(&mut e, &mut cx, None, None, false);
             write_pred_mode_flag(&mut e, &mut cx, false);
@@ -3477,7 +4629,11 @@ mod write_round_trip {
             for y4 in 0..8 {
                 for x4 in 0..8 {
                     let mi = &dec.frame.motion[y4 * w4 + x4];
-                    assert_eq!(mi.mv[0], Mv::new(mx, my), "{tag}: motion is the mvd (zero predictor)");
+                    assert_eq!(
+                        mi.mv[0],
+                        Mv::new(mx, my),
+                        "{tag}: motion is the mvd (zero predictor)"
+                    );
                     assert_eq!(mi.ref_idx, [ri as i8, -1], "{tag}: the reference index");
                 }
             }
@@ -3523,7 +4679,15 @@ mod write_round_trip {
     /// production header must change both sides in one commit if they ever
     /// write a 1.
     #[allow(clippy::too_many_arguments)]
-    fn write_b_header(w: &mut BitWriter, qp: i32, poc_lsb: u32, log2_max_poc_lsb: u32, nref: [u32; 2], max_merge: u32, mvd_l1_zero: bool) {
+    fn write_b_header(
+        w: &mut BitWriter,
+        qp: i32,
+        poc_lsb: u32,
+        log2_max_poc_lsb: u32,
+        nref: [u32; 2],
+        max_merge: u32,
+        mvd_l1_zero: bool,
+    ) {
         w.bits(8, ((NAL_TRAIL_R as u32) & 0x3f) << 1);
         w.bits(8, 1); // nuh_layer_id 0, nuh_temporal_id_plus1 1
         w.flag(true); // first_slice_segment_in_pic_flag
@@ -3560,16 +4724,31 @@ mod write_round_trip {
     /// derives it — every reference POC at or before the current picture —
     /// rather than pasted from the P path, which hardcodes true. For a
     /// real B with one past and one future anchor it comes out false.
-    fn decode_b(rbsp: &[u8], sps: &Sps, pps: &Pps, reference: &SharedFrame<u8>, check: impl FnOnce(&SliceDec<u8>)) {
+    fn decode_b(
+        rbsp: &[u8],
+        sps: &Sps,
+        pps: &Pps,
+        reference: &SharedFrame<u8>,
+        check: impl FnOnce(&SliceDec<u8>),
+    ) {
         let nal = HevcNalHeader::parse(rbsp).expect("NAL header");
         let psc = pps.clone();
         let ssc = sps.clone();
-        let (hdr, pps, sps) = SliceHeader::parse(rbsp, nal, &|_| Some(psc.clone()), &|_| Some(ssc.clone()), None)
-            .expect("the hand-written B header must parse");
+        let (hdr, pps, sps) = SliceHeader::parse(
+            rbsp,
+            nal,
+            &|_| Some(psc.clone()),
+            &|_| Some(ssc.clone()),
+            None,
+        )
+        .expect("the hand-written B header must parse");
         assert_eq!(hdr.slice_type, SliceType::B);
         assert_eq!(hdr.data_bit_offset % 8, 0);
         let nref = [hdr.num_ref_idx[0] as usize, hdr.num_ref_idx[1] as usize];
-        assert!(nref[0] >= 1 && nref[1] >= 1, "a B slice needs a reference in each list");
+        assert!(
+            nref[0] >= 1 && nref[1] >= 1,
+            "a B slice needs a reference in each list"
+        );
         let cur_poc = hdr.poc_lsb as i32;
         // One past anchor in list 0, one future anchor in list 1.
         let pocs: [Vec<i32>; 2] = [
@@ -3577,8 +4756,16 @@ mod write_round_trip {
             (0..nref[1]).map(|i| cur_poc + 1 + i as i32).collect(),
         ];
         let no_backward_pred = pocs[0].iter().chain(pocs[1].iter()).all(|&p| p <= cur_poc);
-        assert!(!no_backward_pred, "a future anchor must make NoBackwardPredFlag false");
-        let mut frame = Frame::<u8>::new(sps.width as usize, sps.height as usize, ChromaFormat::Yuv420, 8);
+        assert!(
+            !no_backward_pred,
+            "a future anchor must make NoBackwardPredFlag false"
+        );
+        let mut frame = Frame::<u8>::new(
+            sps.width as usize,
+            sps.height as usize,
+            ChromaFormat::Yuv420,
+            8,
+        );
         let geo = Arc::new(PicGeometry::new(&sps, &pps));
         let mut info = PicInfo::new(geo);
         // SAFETY: the reference is complete; no writer remains.
@@ -3638,11 +4825,19 @@ mod write_round_trip {
             trace: TraceCfg::default(),
         };
         for ctb in 0..wc * hc {
-            dec.decode_ctu(ctb, ctb).unwrap_or_else(|e| panic!("B CTU {ctb} did not decode: {e}"));
+            dec.decode_ctu(ctb, ctb)
+                .unwrap_or_else(|e| panic!("B CTU {ctb} did not decode: {e}"));
             let end = dec.cabac.terminate();
-            assert_eq!(end != 0, ctb == wc * hc - 1, "end_of_slice_segment_flag at CTU {ctb}");
+            assert_eq!(
+                end != 0,
+                ctb == wc * hc - 1,
+                "end_of_slice_segment_flag at CTU {ctb}"
+            );
         }
-        assert!(!dec.cabac.overrun(), "the decoder ran past what the writer wrote");
+        assert!(
+            !dec.cabac.overrun(),
+            "the decoder ran past what the writer wrote"
+        );
         assert_eq!(dec.warnings, 0);
         check(&dec);
     }
@@ -3722,20 +4917,38 @@ mod write_round_trip {
                 e.encode_decision(&mut cx2.c[tail], second_bin);
                 e.encode_terminate(1);
             }
-            assert_eq!(cx.c, cx2.c, "idc={idc}: not the single +4 bin the reader reads");
+            assert_eq!(
+                cx.c, cx2.c,
+                "idc={idc}: not the single +4 bin the reader reads"
+            );
             w.align_zero();
             w2.align_zero();
-            assert_eq!(w.into_rbsp(), w2.into_rbsp(), "idc={idc}: bits differ from the single +4 bin");
+            assert_eq!(
+                w.into_rbsp(),
+                w2.into_rbsp(),
+                "idc={idc}: bits differ from the single +4 bin"
+            );
         }
     }
 
     fn scripted_b_amvp(idc: u32, mvd0: Mv, mvd1: Mv) {
-        let cfg = Config { width: 32, height: 32, chroma: ChromaFormat::Yuv420, bit_depth: 8, max_refs: 4, ..Config::default() };
+        let cfg = Config {
+            width: 32,
+            height: 32,
+            chroma: ChromaFormat::Yuv420,
+            bit_depth: 8,
+            max_refs: 4,
+            ..Config::default()
+        };
         let g = EncGeometry::new(&cfg);
         let sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None))).expect("SPS");
         let mut pps = Pps::parse(&unescape_rbsp(&write_pps(26, false, false))).expect("PPS");
         pps.resolve_tiles(&sps).expect("one tile");
-        assert_eq!(sps.pic_width_in_ctbs() * sps.pic_height_in_ctbs(), 1, "one CTU by construction");
+        assert_eq!(
+            sps.pic_width_in_ctbs() * sps.pic_height_in_ctbs(),
+            1,
+            "one CTU by construction"
+        );
         let n = 1i32 << sps.log2_ctb_size;
         let mut w = BitWriter::new();
         // POC 4, one anchor at 3 and one at 5; mvd_l1_zero 0 so list 1
@@ -3744,7 +4957,10 @@ mod write_round_trip {
         let mut cx = Contexts::new(0, 26);
         {
             let mut e = CabacEncoder::new(&mut w);
-            let nb = SplitCuNb { left_depth: None, above_depth: None };
+            let nb = SplitCuNb {
+                left_depth: None,
+                above_depth: None,
+            };
             write_split_cu_flag(&mut e, &mut cx, &nb, 0, false);
             write_cu_skip_flag(&mut e, &mut cx, None, None, false);
             write_pred_mode_flag(&mut e, &mut cx, false);
@@ -3788,7 +5004,10 @@ mod write_round_trip {
                     assert_eq!(mi.ref_idx, want_ref, "{tag}: which lists the PU uses");
                     for list in 0..2 {
                         if want_ref[list] >= 0 {
-                            assert_eq!(mi.mv[list], want_mv[list], "{tag}: list {list} motion is the mvd (zero predictor)");
+                            assert_eq!(
+                                mi.mv[list], want_mv[list],
+                                "{tag}: list {list} motion is the mvd (zero predictor)"
+                            );
                         }
                     }
                 }
@@ -3800,7 +5019,14 @@ mod write_round_trip {
     #[test]
     fn p_merge_and_skip_inherit_motion_by_value() {
         for skip in [false, true] {
-            let cfg = Config { width: 64, height: 32, chroma: ChromaFormat::Yuv420, bit_depth: 8, max_refs: 4, ..Config::default() };
+            let cfg = Config {
+                width: 64,
+                height: 32,
+                chroma: ChromaFormat::Yuv420,
+                bit_depth: 8,
+                max_refs: 4,
+                ..Config::default()
+            };
             let g = EncGeometry::new(&cfg);
             let sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None))).expect("SPS");
             let mut pps = Pps::parse(&unescape_rbsp(&write_pps(26, false, false))).expect("PPS");
@@ -3814,7 +5040,10 @@ mod write_round_trip {
             {
                 let mut e = CabacEncoder::new(&mut w);
                 // CTU 0: one 32x32 AMVP CU, no residual.
-                let nb = SplitCuNb { left_depth: None, above_depth: None };
+                let nb = SplitCuNb {
+                    left_depth: None,
+                    above_depth: None,
+                };
                 write_split_cu_flag(&mut e, &mut cx, &nb, 0, false);
                 write_cu_skip_flag(&mut e, &mut cx, None, None, false);
                 write_pred_mode_flag(&mut e, &mut cx, false);
@@ -3826,7 +5055,10 @@ mod write_round_trip {
                 e.encode_terminate(0);
                 // CTU 1: merge (or skip) at index 0 — the A1 candidate, the
                 // left CU's motion.
-                let nb = SplitCuNb { left_depth: Some(0), above_depth: None };
+                let nb = SplitCuNb {
+                    left_depth: Some(0),
+                    above_depth: None,
+                };
                 write_split_cu_flag(&mut e, &mut cx, &nb, 0, false);
                 write_cu_skip_flag(&mut e, &mut cx, Some(false), None, skip);
                 if skip {
@@ -3859,7 +5091,10 @@ mod write_round_trip {
                 for y4 in 0..8 {
                     for x4 in 0..16 {
                         let mi = &dec.frame.motion[y4 * w4 + x4];
-                        assert_eq!(mi.mv[0], mvd, "{tag}: ({x4},{y4}) motion inherited from the AMVP CU");
+                        assert_eq!(
+                            mi.mv[0], mvd,
+                            "{tag}: ({x4},{y4}) motion inherited from the AMVP CU"
+                        );
                         assert_eq!(mi.ref_idx, [0, -1], "{tag}: ({x4},{y4}) reference index");
                     }
                 }
@@ -3867,7 +5102,11 @@ mod write_round_trip {
                 for y4 in 0..8usize {
                     for x4 in 0..16usize {
                         let want = (skip && x4 >= 8) as u8;
-                        assert_eq!(skip_map[y4 * dec.info.w4 + x4], want, "{tag}: skip map at ({x4},{y4})");
+                        assert_eq!(
+                            skip_map[y4 * dec.info.w4 + x4],
+                            want,
+                            "{tag}: skip map at ({x4},{y4})"
+                        );
                     }
                 }
                 assert_eq!(dec.cx.c, cx.c, "{tag}: context states diverged");

@@ -24,22 +24,25 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::cabac::Cabac;
 use crate::dsp::Cpu;
 use crate::dsp::hevc::HevcDsp;
-use crate::nal::{HevcNalHeader, annexb_nals, escaped_offset, unescape_rbsp, unescape_rbsp_positions, unescaped_offset};
+use crate::nal::{
+    HevcNalHeader, annexb_nals, escaped_offset, unescape_rbsp, unescape_rbsp_positions,
+    unescaped_offset,
+};
 use crate::picture::Picture;
 use crate::threading::{Pool, default_threads, prof};
 use crate::{Error, Result};
 
 use super::ctu::{SliceDec, TraceCfg};
-use super::intra::IntraScratch;
 use super::ctx::Contexts;
 use super::deblock::{DeblockScratch, deblock_rows};
 use super::dpb::{Dpb, DpbPic, RefSets};
 use super::frame::{Frame, FramePool, Sample, SharedFrame};
 use super::inter::McScratch;
+use super::intra::IntraScratch;
 use super::mvpred::RefCtx;
 use super::pic::{Geometry, PicInfo, PicInfoPool, SliceFilterParams};
 use super::pps::Pps;
-use super::sao::{sao_ctb_row, SaoBand};
+use super::sao::{SaoBand, sao_ctb_row};
 use super::slice::{SliceHeader, SliceType, nal_type};
 use super::sps::{ScalingList, Sps, Vps};
 
@@ -187,7 +190,9 @@ impl<S: Sample> PicShared<S> {
         self.decoded_rows.store(r, Ordering::Release);
         drop(_g);
         let ctb = 1usize << self.sps.log2_ctb_size;
-        self.frame.progress.set_decoded(((r * ctb).min(height)) as i32);
+        self.frame
+            .progress
+            .set_decoded(((r * ctb).min(height)) as i32);
     }
 
     fn mark_ctb_done(&self, addr: usize) {
@@ -216,7 +221,9 @@ impl<S: Sample> PicShared<S> {
         // Test-only: the stalled-sleeper test wants the last rows' waits
         // (on the row above them) to block instead of spinning.
         #[cfg(test)]
-        let spin = !pic.hang_hooks || hang_hook::WAKE_STALL_US.load(Ordering::Relaxed) == 0 || addr / pic.wc + 3 < pic.row_ctbs.len();
+        let spin = !pic.hang_hooks
+            || hang_hook::WAKE_STALL_US.load(Ordering::Relaxed) == 0
+            || addr / pic.wc + 3 < pic.row_ctbs.len();
         #[cfg(not(test))]
         let spin = true;
         // Spin briefly: the producer is usually one CTB away.
@@ -237,7 +244,11 @@ impl<S: Sample> PicShared<S> {
         if Self::blocking_wait(pic, WaitOn::Ctb(addr)) {
             Ok(())
         } else {
-            Err(Error::bitstream(format!("CTB {addr} (row {}, column {}) was never decoded: nothing that could produce it can run (lost data)", addr / pic.wc, addr % pic.wc)))
+            Err(Error::bitstream(format!(
+                "CTB {addr} (row {}, column {}) was never decoded: nothing that could produce it can run (lost data)",
+                addr / pic.wc,
+                addr % pic.wc
+            )))
         }
     }
 
@@ -261,7 +272,10 @@ impl<S: Sample> PicShared<S> {
     /// oversubscribed machine that lasts longer than any timer — a waiter
     /// that gave up on it would decode from blocks it was about to write.
     fn blocking_wait(pic: &Arc<Self>, on: WaitOn) -> bool {
-        let pool = pic.pool.as_ref().expect("blocking waits happen on the pool");
+        let pool = pic
+            .pool
+            .as_ref()
+            .expect("blocking waits happen on the pool");
         let mut g = pic.lock.lock().unwrap();
         pic.tasks_waiting.fetch_add(1, Ordering::AcqRel);
         let id = pool.register_wait(Box::new({
@@ -277,7 +291,13 @@ impl<S: Sample> PicShared<S> {
             // it, judge (`wpp_gate_tests`).
             let us = hang_hook::WAKE_STALL_US.load(Ordering::Relaxed);
             let stall_row = matches!(on, WaitOn::Ctb(a) if a / pic.wc + 3 == pic.row_ctbs.len());
-            if pic.hang_hooks && us > 0 && stall_row && hang_hook::WAKE_STALL_BUDGET.try_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(1)).is_ok() {
+            if pic.hang_hooks
+                && us > 0
+                && stall_row
+                && hang_hook::WAKE_STALL_BUDGET
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(1))
+                    .is_ok()
+            {
                 drop(g);
                 std::thread::sleep(std::time::Duration::from_micros(us));
                 g = pic.lock.lock().unwrap();
@@ -317,7 +337,10 @@ impl<S: Sample> PicShared<S> {
             }
             // Closed: the verdict also depends on the pool and on other
             // pictures' tasks, whose changes are not announced here — poll.
-            let (g2, _) = pic.cv.wait_timeout(g, std::time::Duration::from_millis(50)).unwrap();
+            let (g2, _) = pic
+                .cv
+                .wait_timeout(g, std::time::Duration::from_millis(50))
+                .unwrap();
             g = g2;
         };
         pool.unregister_wait(id);
@@ -386,7 +409,9 @@ impl<S: Sample> PicShared<S> {
 
     /// Whether the picture is closed and every task has run.
     fn all_done(&self) -> bool {
-        self.closed.load(Ordering::Acquire) && self.tasks_finished.load(Ordering::Acquire) >= self.tasks_submitted.load(Ordering::Acquire)
+        self.closed.load(Ordering::Acquire)
+            && self.tasks_finished.load(Ordering::Acquire)
+                >= self.tasks_submitted.load(Ordering::Acquire)
     }
 
     /// Run the tail exactly once, on whichever thread observes the picture
@@ -403,12 +428,17 @@ thread_local! {
 }
 
 fn take_scratch<S: Sample>() -> McScratch<S> {
-    SCRATCH.with(|s| {
-        let mut v = s.borrow_mut();
-        let pos = v.iter().position(|b| b.is::<McScratch<S>>());
-        pos.map(|i| *v.swap_remove(i).downcast::<McScratch<S>>().expect("checked"))
-    })
-    .unwrap_or_default()
+    SCRATCH
+        .with(|s| {
+            let mut v = s.borrow_mut();
+            let pos = v.iter().position(|b| b.is::<McScratch<S>>());
+            pos.map(|i| {
+                *v.swap_remove(i)
+                    .downcast::<McScratch<S>>()
+                    .expect("checked")
+            })
+        })
+        .unwrap_or_default()
 }
 
 fn give_scratch<S: Sample>(m: McScratch<S>) {
@@ -422,7 +452,11 @@ fn give_scratch<S: Sample>(m: McScratch<S>) {
 /// Decode one substream (`sub` of segment `seg`): from its first CTB until
 /// `end_of_slice_segment_flag`, the end of the tile, or the end of the CTB
 /// row (with WPP).
-fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>, sub: usize) -> Result<()> {
+fn run_substream<S: Sample>(
+    pic_arc: &Arc<PicShared<S>>,
+    seg_arc: &Arc<Segment>,
+    sub: usize,
+) -> Result<()> {
     let pic: &PicShared<S> = pic_arc;
     let seg: &Segment = seg_arc;
     let sps = &pic.sps;
@@ -482,15 +516,35 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
     let slice_addr = ind.segment_address;
 
     // Reference lists.
-    let lists = if ind.slice_type != SliceType::I { pic.sets.build_ref_lists(ind)? } else { [Vec::new(), Vec::new()] };
+    let lists = if ind.slice_type != SliceType::I {
+        pic.sets.build_ref_lists(ind)?
+    } else {
+        [Vec::new(), Vec::new()]
+    };
     // SAFETY: reference reads wait on progress.
-    let ref_frames: [Vec<&Frame<S>>; 2] = [lists[0].iter().map(|e| unsafe { e.frame.get() }).collect(), lists[1].iter().map(|e| unsafe { e.frame.get() }).collect()];
-    let ref_shared: [Vec<&SharedFrame<S>>; 2] = [lists[0].iter().map(|e| &*e.frame).collect(), lists[1].iter().map(|e| &*e.frame).collect()];
-    let pocs: [Vec<i32>; 2] = [lists[0].iter().map(|e| e.poc).collect(), lists[1].iter().map(|e| e.poc).collect()];
-    let long_term: [Vec<bool>; 2] = [lists[0].iter().map(|e| e.long_term).collect(), lists[1].iter().map(|e| e.long_term).collect()];
+    let ref_frames: [Vec<&Frame<S>>; 2] = [
+        lists[0].iter().map(|e| unsafe { e.frame.get() }).collect(),
+        lists[1].iter().map(|e| unsafe { e.frame.get() }).collect(),
+    ];
+    let ref_shared: [Vec<&SharedFrame<S>>; 2] = [
+        lists[0].iter().map(|e| &*e.frame).collect(),
+        lists[1].iter().map(|e| &*e.frame).collect(),
+    ];
+    let pocs: [Vec<i32>; 2] = [
+        lists[0].iter().map(|e| e.poc).collect(),
+        lists[1].iter().map(|e| e.poc).collect(),
+    ];
+    let long_term: [Vec<bool>; 2] = [
+        lists[0].iter().map(|e| e.long_term).collect(),
+        lists[1].iter().map(|e| e.long_term).collect(),
+    ];
     let no_backward_pred = pocs[0].iter().chain(pocs[1].iter()).all(|&p| p <= pic.poc);
     let (col, col_shared) = if ind.temporal_mvp_enabled && ind.slice_type != SliceType::I {
-        let list = if ind.slice_type == SliceType::B && !ind.collocated_from_l0 { 1 } else { 0 };
+        let list = if ind.slice_type == SliceType::B && !ind.collocated_from_l0 {
+            1
+        } else {
+            0
+        };
         match lists[list].get(ind.collocated_ref_idx as usize) {
             Some(e) => (Some(unsafe { e.frame.get() }), Some(&*e.frame)),
             None => return Err(Error::bitstream("collocated_ref_idx out of range")),
@@ -513,7 +567,8 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
     };
 
     // Contexts at the start (9.3.1).
-    let first_in_tile = ctb_addr_ts == 0 || info.tile_id_ts[ctb_addr_ts] != info.tile_id_ts[ctb_addr_ts - 1];
+    let first_in_tile =
+        ctb_addr_ts == 0 || info.tile_id_ts[ctb_addr_ts] != info.tile_id_ts[ctb_addr_ts - 1];
     let row_start = pps.entropy_coding_sync && ctb_addr_rs % wc == tile_col_start(ctb_addr_rs);
     let mut cx = Contexts::new(init_type, ind.slice_qp);
     let mut first_qg = true;
@@ -531,8 +586,15 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
         // Continues the previous segment: wait for it to end.
         let prev = {
             let segs = pic.segments.lock().unwrap();
-            let idx = segs.iter().position(|s| std::ptr::eq(&**s, seg)).unwrap_or(0);
-            if idx > 0 { Some(segs[idx - 1].clone()) } else { None }
+            let idx = segs
+                .iter()
+                .position(|s| std::ptr::eq(&**s, seg))
+                .unwrap_or(0);
+            if idx > 0 {
+                Some(segs[idx - 1].clone())
+            } else {
+                None
+            }
         };
         if let Some(prev) = prev {
             wait_segment(pic_arc, &prev)?;
@@ -575,7 +637,11 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
         luma_res: Vec::new(),
         luma_res_valid: false,
         wide: sps.wide_pipeline(),
-        coeffs_wide: if sps.wide_pipeline() { vec![0; 1024] } else { Vec::new() },
+        coeffs_wide: if sps.wide_pipeline() {
+            vec![0; 1024]
+        } else {
+            Vec::new()
+        },
         luma_res_wide: Vec::new(),
         dsp: pic.dsp,
         mc: {
@@ -611,21 +677,32 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
                 // Checksum of the CTB's luma right after reconstruction.
                 let ctb = 1usize << sps.log2_ctb_size;
                 let (x0, y0) = (rx * ctb, ry * ctb);
-                let (w, h) = (ctb.min(dec.frame.width - x0), ctb.min(dec.frame.height - y0));
+                let (w, h) = (
+                    ctb.min(dec.frame.width - x0),
+                    ctb.min(dec.frame.height - y0),
+                );
                 let mut sum: u64 = 0;
                 for yy in 0..h {
                     let off = dec.frame.y.offset(x0 as isize, (y0 + yy) as isize);
                     for xx in 0..w {
-                        sum = sum.wrapping_mul(31).wrapping_add(dec.frame.y.data[off + xx].to_i32() as u64);
+                        sum = sum
+                            .wrapping_mul(31)
+                            .wrapping_add(dec.frame.y.data[off + xx].to_i32() as u64);
                     }
                 }
-                eprintln!("ctb poc={} addr={} sum={sum:x} qp={} cx0={}", pic.poc, ctb_addr_rs, dec.qp_y, dec.cx.c[0]);
+                eprintln!(
+                    "ctb poc={} addr={} sum={sum:x} qp={} cx0={}",
+                    pic.poc, ctb_addr_rs, dec.qp_y, dec.cx.c[0]
+                );
             }
             if pps.entropy_coding_sync && rx == tile_col_start(ctb_addr_rs) + 1 {
                 // WPP storage: written before this CTB is published; one
                 // slot per (CTB row, tile column).
                 // SAFETY: the slot is written by this task only.
-                unsafe { *pic.wpp_ctx[ry * pic.wpp_cols + tile_col_idx(&pps, rx)].get() = Some(dec.cx.clone()) };
+                unsafe {
+                    *pic.wpp_ctx[ry * pic.wpp_cols + tile_col_idx(&pps, rx)].get() =
+                        Some(dec.cx.clone())
+                };
             }
             pic.mark_ctb_done(ctb_addr_rs);
             // The row below may start once we are two CTBs in (its first CTB
@@ -669,7 +746,8 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
             }
             ctb_addr_rs = dec.info.ctb_ts_to_rs[ctb_addr_ts] as usize;
             let new_tile = dec.info.tile_id_ts[ctb_addr_ts] != dec.info.tile_id_ts[ctb_addr_ts - 1];
-            let new_row = pps.entropy_coding_sync && ctb_addr_rs % wc == tile_col_start(ctb_addr_rs);
+            let new_row =
+                pps.entropy_coding_sync && ctb_addr_rs % wc == tile_col_start(ctb_addr_rs);
             if new_tile || new_row {
                 // The next substream is another task's.
                 break;
@@ -687,7 +765,9 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
 
 /// Hand substream `sub` of `seg` to the pool (or run it inline), once.
 fn spawn_substream<S: Sample>(pic: &Arc<PicShared<S>>, seg: &Arc<Segment>, sub: usize) {
-    let Some(flag) = seg.submitted.get(sub) else { return };
+    let Some(flag) = seg.submitted.get(sub) else {
+        return;
+    };
     if flag.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -784,7 +864,12 @@ fn drain_inline<S: Sample>(pic: &PicShared<S>) {
 /// The WPP synchronisation source for the first CTB of a row: the contexts
 /// stored after the second CTB of the row above, if that CTB is in the same
 /// slice and tile.
-fn wpp_sync_source<S: Sample>(pic: &Arc<PicShared<S>>, info: &PicInfo, ctb_addr_rs: usize, slice_addr: u32) -> Result<Option<Contexts>> {
+fn wpp_sync_source<S: Sample>(
+    pic: &Arc<PicShared<S>>,
+    info: &PicInfo,
+    ctb_addr_rs: usize,
+    slice_addr: u32,
+) -> Result<Option<Contexts>> {
     let wc = info.wc;
     let row = ctb_addr_rs / wc;
     if row == 0 {
@@ -827,7 +912,10 @@ fn wait_segment<S: Sample>(pic: &Arc<PicShared<S>>, seg: &Arc<Segment>) -> Resul
     if PicShared::blocking_wait(pic, WaitOn::Segment(seg.clone())) {
         Ok(())
     } else {
-        Err(Error::bitstream(format!("slice segment at CTB {} never ran to its end: nothing that could finish it can run (lost data)", seg.hdr.segment_address)))
+        Err(Error::bitstream(format!(
+            "slice segment at CTB {} never ran to its end: nothing that could finish it can run (lost data)",
+            seg.hdr.segment_address
+        )))
     }
 }
 
@@ -855,7 +943,9 @@ impl<S: Sample> RowFilterState<S> {
     /// Some row just completed: act on every complete row in order.
     fn row_done(&mut self, pic: &PicShared<S>, frame: &mut Frame<S>, info: &PicInfo) {
         let wc = info.wc;
-        while self.next_filter_row < info.hc && pic.row_ctbs[self.next_filter_row].load(Ordering::Acquire) >= wc {
+        while self.next_filter_row < info.hc
+            && pic.row_ctbs[self.next_filter_row].load(Ordering::Acquire) >= wc
+        {
             let r = self.next_filter_row;
             self.row_complete(pic, r, frame, info);
             self.next_filter_row += 1;
@@ -883,19 +973,52 @@ impl<S: Sample> RowFilterState<S> {
             return;
         }
         let (y0, y1) = Self::row_span(pic, r, frame);
-        deblock_rows(&pic.dsp, &mut self.deblock_scratch, frame, info, &pic.pps, pic.sps.bit_depth_luma, pic.sps.bit_depth_chroma, y0 / 4, y1.div_ceil(4));
+        deblock_rows(
+            &pic.dsp,
+            &mut self.deblock_scratch,
+            frame,
+            info,
+            &pic.pps,
+            pic.sps.bit_depth_luma,
+            pic.sps.bit_depth_chroma,
+            y0 / 4,
+            y1.div_ceil(4),
+        );
     }
 
-    fn sao_and_publish(&mut self, pic: &PicShared<S>, r: usize, frame: &mut Frame<S>, info: &PicInfo) {
+    fn sao_and_publish(
+        &mut self,
+        pic: &PicShared<S>,
+        r: usize,
+        frame: &mut Frame<S>,
+        info: &PicInfo,
+    ) {
         let (y0, y1) = Self::row_span(pic, r, frame);
         if pic.sao && pic.sps.sao_enabled {
             let ctb = 1usize << pic.sps.log2_ctb_size;
             // A band frame from the pool (recycled picture to picture: an
             // allocation per picture here was measurable in page faults).
             let frames = &pic.frames;
-            let src = self.sao_src.get_or_insert_with(|| Box::new(frames.take(frame.width, ctb + 4, frame.chroma, frame.bit_depth, frame.bit_depth_chroma)));
+            let src = self.sao_src.get_or_insert_with(|| {
+                Box::new(frames.take(
+                    frame.width,
+                    ctb + 4,
+                    frame.chroma,
+                    frame.bit_depth,
+                    frame.bit_depth_chroma,
+                ))
+            });
             self.sao_band.fill(frame, src, ctb, r);
-            sao_ctb_row(&pic.dsp, frame, src, &self.sao_band, info, &pic.sps, &pic.pps, r);
+            sao_ctb_row(
+                &pic.dsp,
+                frame,
+                src,
+                &self.sao_band,
+                info,
+                &pic.sps,
+                &pic.pps,
+                r,
+            );
         }
         frame.extend_rows(y0, y1);
         pic.frame.progress.set_done(y1 as i32);
@@ -945,8 +1068,18 @@ fn finish_picture_tasks<S: Sample>(pic: &PicShared<S>) {
         // picture was created and when its first CTB was decoded, which is
         // the same flag read once per process.
         if let Some(created) = pic.created {
-            let first = pic.first_ctb.lock().unwrap().map(|f| f.duration_since(created).as_micros()).unwrap_or(0);
-            eprintln!("pic poc={} created+{}us first-ctb, +{}us complete", pic.poc, first, created.elapsed().as_micros());
+            let first = pic
+                .first_ctb
+                .lock()
+                .unwrap()
+                .map(|f| f.duration_since(created).as_micros())
+                .unwrap_or(0);
+            eprintln!(
+                "pic poc={} created+{}us first-ctb, +{}us complete",
+                pic.poc,
+                first,
+                created.elapsed().as_micros()
+            );
         }
     }
 }
@@ -1031,11 +1164,19 @@ impl<S: Sample> HevcDecoderImpl<S> {
         // Substream tasks block on their neighbours and references while
         // holding a worker, so run more workers than hardware threads; the
         // queue is unbounded (pictures in flight are what is bounded).
-        let tasks = if threads > 1 { Some(Pool::new(threads * 2, usize::MAX)) } else { None };
+        let tasks = if threads > 1 {
+            Some(Pool::new(threads * 2, usize::MAX))
+        } else {
+            None
+        };
         // Filtering is roughly a fifth of the work and never blocks: a few
         // threads of their own keep it off the decoding tasks' critical path
         // without ever being starved by them.
-        let filter_tasks = if threads > 1 { Some(Pool::new((threads / 4).max(1), usize::MAX)) } else { None };
+        let filter_tasks = if threads > 1 {
+            Some(Pool::new((threads / 4).max(1), usize::MAX))
+        } else {
+            None
+        };
         HevcDecoderImpl {
             vps: HashMap::new(),
             sps: HashMap::new(),
@@ -1057,7 +1198,10 @@ impl<S: Sample> HevcDecoderImpl<S> {
             sao: std::env::var_os("H26X_NO_SAO").is_none(),
             geometry: None,
             in_flight: std::collections::VecDeque::new(),
-            max_in_flight: std::env::var("H26X_INFLIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(threads.clamp(2, 16)),
+            max_in_flight: std::env::var("H26X_INFLIGHT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(threads.clamp(2, 16)),
             output_pool: crate::picture::OutputPool::default(),
             info_pool: PicInfoPool::default(),
             #[cfg(test)]
@@ -1116,7 +1260,9 @@ impl<S: Sample> HevcDecoderImpl<S> {
                 if super::hash::verify_enabled() {
                     if let Some(cur) = &self.cur {
                         let rbsp = unescape_rbsp(nal);
-                        if let Some(h) = super::hash::parse_sei(&rbsp[2..], cur.shared.sps.chroma_format_idc) {
+                        if let Some(h) =
+                            super::hash::parse_sei(&rbsp[2..], cur.shared.sps.chroma_format_idc)
+                        {
                             *cur.shared.frame.hash.lock().unwrap() = Some(h);
                         }
                     }
@@ -1147,7 +1293,12 @@ impl<S: Sample> HevcDecoderImpl<S> {
 
     /// The next picture in output order if it is already finished.
     pub fn try_next_picture(&mut self) -> Option<Picture> {
-        if self.dpb.output.front().is_some_and(|p| p.frame.progress.is_complete()) {
+        if self
+            .dpb
+            .output
+            .front()
+            .is_some_and(|p| p.frame.progress.is_complete())
+        {
             return self.next_picture();
         }
         None
@@ -1169,7 +1320,13 @@ impl<S: Sample> HevcDecoderImpl<S> {
         let sps_map = &self.sps;
         let pps_map = &self.pps;
         let independent = self.cur.as_ref().and_then(|c| c.independent.as_deref());
-        let (hdr, mut pps, sps) = SliceHeader::parse(&rbsp, nh, &|id| pps_map.get(&id).cloned(), &|id| sps_map.get(&id).cloned(), independent)?;
+        let (hdr, mut pps, sps) = SliceHeader::parse(
+            &rbsp,
+            nh,
+            &|id| pps_map.get(&id).cloned(),
+            &|id| sps_map.get(&id).cloned(),
+            independent,
+        )?;
         if first_flag {
             if sps.separate_colour_plane {
                 return Err(Error::unsupported("separate_colour_plane_flag"));
@@ -1180,7 +1337,9 @@ impl<S: Sample> HevcDecoderImpl<S> {
                 return Ok(());
             }
         }
-        let Some(cur) = self.cur.as_mut() else { return Ok(()) };
+        let Some(cur) = self.cur.as_mut() else {
+            return Ok(());
+        };
         let pic = &cur.shared;
         // First slice: take the buffers (allocation happens here, on the
         // caller's thread, only when the pool has no spare frame).
@@ -1188,7 +1347,13 @@ impl<S: Sample> HevcDecoderImpl<S> {
             // SAFETY: nothing else touches the frame before progress > 0.
             let frame: &mut Frame<S> = unsafe { pic.frame_mut() };
             if frame.width == 0 {
-                let mut f = self.frames.take(pic.sps.width as usize, pic.sps.height as usize, pic.sps.chroma_format(), pic.sps.bit_depth_luma, pic.sps.bit_depth_chroma);
+                let mut f = self.frames.take(
+                    pic.sps.width as usize,
+                    pic.sps.height as usize,
+                    pic.sps.chroma_format(),
+                    pic.sps.bit_depth_luma,
+                    pic.sps.bit_depth_chroma,
+                );
                 f.poc = pic.poc;
                 *frame = f;
             }
@@ -1299,8 +1464,12 @@ impl<S: Sample> HevcDecoderImpl<S> {
                     // cannot even fail. Stop waiting: the picture completes
                     // without those rows, its blocked tasks fail once it is
                     // closed, and the failures are counted.
-                    let all_blocked = prev_pic.tasks_finished.load(Ordering::Acquire) + prev_pic.tasks_waiting.load(Ordering::Acquire) >= prev_pic.tasks_submitted.load(Ordering::Acquire);
-                    let nothing_runs = self.tasks.as_ref().is_some_and(|p| (all_blocked || p.blocked() >= p.threads()) && !p.any_wait_satisfiable());
+                    let all_blocked = prev_pic.tasks_finished.load(Ordering::Acquire)
+                        + prev_pic.tasks_waiting.load(Ordering::Acquire)
+                        >= prev_pic.tasks_submitted.load(Ordering::Acquire);
+                    let nothing_runs = self.tasks.as_ref().is_some_and(|p| {
+                        (all_blocked || p.blocked() >= p.threads()) && !p.any_wait_satisfiable()
+                    });
                     if nothing_runs {
                         let since = *stuck_since.get_or_insert_with(std::time::Instant::now);
                         if since.elapsed() > std::time::Duration::from_millis(200) {
@@ -1309,7 +1478,10 @@ impl<S: Sample> HevcDecoderImpl<S> {
                     } else {
                         stuck_since = None;
                     }
-                    let (g2, _) = prev_pic.cv.wait_timeout(g, std::time::Duration::from_millis(5)).unwrap();
+                    let (g2, _) = prev_pic
+                        .cv
+                        .wait_timeout(g, std::time::Duration::from_millis(5))
+                        .unwrap();
                     g = g2;
                 }
             }
@@ -1328,11 +1500,18 @@ impl<S: Sample> HevcDecoderImpl<S> {
         Ok(())
     }
 
-    fn start_picture(&mut self, hdr: &SliceHeader, sps: Sps, pps: Pps, nh: HevcNalHeader) -> Result<()> {
+    fn start_picture(
+        &mut self,
+        hdr: &SliceHeader,
+        sps: Sps,
+        pps: Pps,
+        nh: HevcNalHeader,
+    ) -> Result<()> {
         let t = nh.unit_type;
         let irap = nal_type::is_irap(t);
         if irap {
-            self.no_rasl_output = nal_type::is_idr(t) || nal_type::is_bla(t) || self.first_in_sequence;
+            self.no_rasl_output =
+                nal_type::is_idr(t) || nal_type::is_bla(t) || self.first_in_sequence;
         }
         if nal_type::is_rasl(t) && self.no_rasl_output {
             self.skipping = true;
@@ -1355,7 +1534,11 @@ impl<S: Sample> HevcDecoderImpl<S> {
             }
         };
         let poc = msb + lsb;
-        if nh.temporal_id == 0 && !nal_type::is_rasl(t) && !nal_type::is_radl(t) && !nal_type::is_sub_layer_non_ref(t) {
+        if nh.temporal_id == 0
+            && !nal_type::is_rasl(t)
+            && !nal_type::is_radl(t)
+            && !nal_type::is_sub_layer_non_ref(t)
+        {
             self.prev_tid0_poc = poc;
         }
         let first_pic = self.decode_index == 0;
@@ -1365,9 +1548,23 @@ impl<S: Sample> HevcDecoderImpl<S> {
         let chroma = sps.chroma_format();
         let crop = sps.conf_win;
         let idr = nal_type::is_idr(t);
-        let sets = self.dpb.apply_rps(hdr, &sps, poc, idr, chroma, sps.bit_depth_luma, sps.bit_depth_chroma, self.decode_index, crop);
+        let sets = self.dpb.apply_rps(
+            hdr,
+            &sps,
+            poc,
+            idr,
+            chroma,
+            sps.bit_depth_luma,
+            sps.bit_depth_chroma,
+            self.decode_index,
+            crop,
+        );
         if irap && self.no_rasl_output && !first_pic {
-            let no_output = if t == nal_type::CRA { true } else { hdr.no_output_of_prior_pics };
+            let no_output = if t == nal_type::CRA {
+                true
+            } else {
+                hdr.no_output_of_prior_pics
+            };
             self.dpb.before_decode(true, no_output);
         } else {
             self.dpb.before_decode(false, false);
@@ -1382,7 +1579,12 @@ impl<S: Sample> HevcDecoderImpl<S> {
         }
         self.in_flight.retain(|f| !f.progress.is_complete());
         let id = self.dpb.alloc_id();
-        let shared_frame = Arc::new(SharedFrame::with_pool(Frame::empty(), poc, id, self.frames.clone()));
+        let shared_frame = Arc::new(SharedFrame::with_pool(
+            Frame::empty(),
+            poc,
+            id,
+            self.frames.clone(),
+        ));
         self.in_flight.push_back(shared_frame.clone());
         self.dpb.insert_current(DpbPic {
             frame: shared_frame.clone(),
@@ -1404,7 +1606,13 @@ impl<S: Sample> HevcDecoderImpl<S> {
         } else {
             None
         };
-        let key = GeoKey { width: sps.width, height: sps.height, log2_ctb: sps.log2_ctb_size, col_bd: pps.col_bd.clone(), row_bd: pps.row_bd.clone() };
+        let key = GeoKey {
+            width: sps.width,
+            height: sps.height,
+            log2_ctb: sps.log2_ctb_size,
+            col_bd: pps.col_bd.clone(),
+            row_bd: pps.row_bd.clone(),
+        };
         let geo = match &self.geometry {
             Some((k, g)) if *k == key => g.clone(),
             _ => {
@@ -1432,7 +1640,11 @@ impl<S: Sample> HevcDecoderImpl<S> {
             // and motion compensation; the loop filters it shares take the
             // scalar table too — the SIMD u16 kernels are proven at 8–12
             // bits by the rung sweep, not at 16.
-            dsp: if sps_wide { HevcDsp::scalar() } else { self.dsp },
+            dsp: if sps_wide {
+                HevcDsp::scalar()
+            } else {
+                self.dsp
+            },
             ctb_done: (0..nc).map(|_| AtomicBool::new(false)).collect(),
             done_count: AtomicUsize::new(0),
             tasks_submitted: AtomicUsize::new(0),
@@ -1453,7 +1665,13 @@ impl<S: Sample> HevcDecoderImpl<S> {
             pool: self.tasks.clone(),
             filter_pool: self.filter_tasks.clone(),
             inline_queue: Mutex::new(std::collections::VecDeque::new()),
-            filters: Mutex::new(RowFilterState { next_filter_row: 0, sao_src: None, sao_band: SaoBand::new(), finished: false, deblock_scratch: DeblockScratch::default() }),
+            filters: Mutex::new(RowFilterState {
+                next_filter_row: 0,
+                sao_src: None,
+                sao_band: SaoBand::new(),
+                finished: false,
+                deblock_scratch: DeblockScratch::default(),
+            }),
             filter_pending: AtomicBool::new(false),
             frames: self.frames.clone(),
             deblock: self.deblock,
@@ -1465,7 +1683,14 @@ impl<S: Sample> HevcDecoderImpl<S> {
             #[cfg(test)]
             hang_hooks: self.hang_hooks,
         });
-        self.cur = Some(Current { id, pic_output, shared: pic, independent: None, slice_count: 0, buffers_ready: false });
+        self.cur = Some(Current {
+            id,
+            pic_output,
+            shared: pic,
+            independent: None,
+            slice_count: 0,
+            buffers_ready: false,
+        });
         self.decode_index += 1;
         Ok(())
     }
@@ -1556,18 +1781,31 @@ impl HevcDecoder {
     /// A decoder with one worker per hardware thread (capped), or as
     /// `H26X_THREADS` says.
     pub fn new() -> Self {
-        let n = std::env::var("H26X_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(default_threads);
+        let n = std::env::var("H26X_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(default_threads);
         Self::with_threads(n)
     }
 
     /// A decoder with `threads` workers; 0 or 1 decodes on the caller's thread.
     pub fn with_threads(threads: usize) -> Self {
-        HevcDecoder { threads, inner: None, pending: Vec::new(), leftover: std::collections::VecDeque::new(), warnings_before: 0 }
+        HevcDecoder {
+            threads,
+            inner: None,
+            pending: Vec::new(),
+            leftover: std::collections::VecDeque::new(),
+            warnings_before: 0,
+        }
     }
 
     /// Non-fatal problems seen so far.
     pub fn warnings(&self) -> u64 {
-        self.warnings_before + self.inner.as_ref().map_or(0, |i| with_inner!(i, d => d.warnings()))
+        self.warnings_before
+            + self
+                .inner
+                .as_ref()
+                .map_or(0, |i| with_inner!(i, d => d.warnings()))
     }
 
     /// Feed Annex-B data (any number of NAL units with start codes).
@@ -1602,7 +1840,11 @@ impl HevcDecoder {
                     }
                     self.warnings_before += with_inner!(&old, d => d.warnings());
                 }
-                let mut inner = if want_u8 { Inner::U8(HevcDecoderImpl::with_threads(self.threads)) } else { Inner::U16(HevcDecoderImpl::with_threads(self.threads)) };
+                let mut inner = if want_u8 {
+                    Inner::U8(HevcDecoderImpl::with_threads(self.threads))
+                } else {
+                    Inner::U16(HevcDecoderImpl::with_threads(self.threads))
+                };
                 for p in std::mem::take(&mut self.pending) {
                     let _ = with_inner!(&mut inner, d => d.push_nal(&p));
                 }
@@ -1673,10 +1915,12 @@ pub(crate) mod hang_hook {
     /// so that they block).
     pub static WAKE_STALL_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     /// How many such stalls remain (each costs `WAKE_STALL_US`).
-    pub static WAKE_STALL_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static WAKE_STALL_BUDGET: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
     /// Raster address at which every substream starting there fails before
     /// decoding anything (`usize::MAX` = off): lost data, injected.
-    pub static FAIL_SUBSTREAM_AT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    pub static FAIL_SUBSTREAM_AT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(usize::MAX);
     /// Every armed decoder in the process reads the same values: tests that
     /// set them run one at a time.
     pub static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1704,7 +1948,10 @@ mod wpp_gate_tests {
         if let Ok(w) = std::env::var("H26X_WORK") {
             paths.push(format!("{w}/conf/hevc/streams/{rel}"));
         }
-        paths.push(format!("{}/tools/conformance/hevc/streams/{rel}", env!("CARGO_MANIFEST_DIR")));
+        paths.push(format!(
+            "{}/tools/conformance/hevc/streams/{rel}",
+            env!("CARGO_MANIFEST_DIR")
+        ));
         for p in &paths {
             if let Ok(d) = std::fs::read(p) {
                 return Some(Arc::new(d));
@@ -1725,7 +1972,11 @@ mod wpp_gate_tests {
     /// Decode on another thread: (frames, hash of every output byte,
     /// warnings), or `None` when it has not finished within `limit` — a hang,
     /// not a wait, since the stream decodes in well under a second.
-    fn decode_or_hang(data: &Arc<Vec<u8>>, threads: usize, limit: Duration) -> Option<(usize, u64, u64)> {
+    fn decode_or_hang(
+        data: &Arc<Vec<u8>>,
+        threads: usize,
+        limit: Duration,
+    ) -> Option<(usize, u64, u64)> {
         let data = data.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1764,10 +2015,18 @@ mod wpp_gate_tests {
         hang_hook::STALL_US.store(2000, Ordering::Relaxed);
         let widened = decode_or_hang(&data, 4, limit);
         hang_hook::STALL_US.store(0, Ordering::Relaxed);
-        assert_eq!(widened, Some(reference), "hung or differed with the spawn window widened: a later segment's task ran ahead of the row it waits on");
+        assert_eq!(
+            widened,
+            Some(reference),
+            "hung or differed with the spawn window widened: a later segment's task ran ahead of the row it waits on"
+        );
         // The bare race, at the runner's worker counts.
         for (i, threads) in [4, 12, 4, 12, 4, 12, 4, 12].into_iter().enumerate() {
-            assert_eq!(decode_or_hang(&data, threads, limit), Some(reference), "run {i} at {threads} threads");
+            assert_eq!(
+                decode_or_hang(&data, threads, limit),
+                Some(reference),
+                "run {i} at {threads} threads"
+            );
         }
     }
 
@@ -1791,8 +2050,15 @@ mod wpp_gate_tests {
         let stalled = decode_or_hang(&data, 4, limit);
         hang_hook::WAKE_STALL_US.store(0, Ordering::Relaxed);
         let stalls = 40 - hang_hook::WAKE_STALL_BUDGET.swap(0, Ordering::Relaxed);
-        assert!(stalls >= 8, "only {stalls} stalls happened: the hook no longer reaches the blocking waits");
-        assert_eq!(stalled, Some(reference), "a waiter gave up on a CTB its sleeping neighbour was about to decode");
+        assert!(
+            stalls >= 8,
+            "only {stalls} stalls happened: the hook no longer reaches the blocking waits"
+        );
+        assert_eq!(
+            stalled,
+            Some(reference),
+            "a waiter gave up on a CTB its sleeping neighbour was about to decode"
+        );
     }
 
     /// Lost data must end in errors, never in a hang: when every substream
@@ -1811,6 +2077,9 @@ mod wpp_gate_tests {
         hang_hook::FAIL_SUBSTREAM_AT.store(usize::MAX, Ordering::Relaxed);
         let (frames, _, warnings) = r.expect("the decoder hung on a failed substream");
         assert_eq!(frames, 48);
-        assert!(warnings >= 48, "every picture's first substream failed, {warnings} warnings");
+        assert!(
+            warnings >= 48,
+            "every picture's first substream failed, {warnings} warnings"
+        );
     }
 }

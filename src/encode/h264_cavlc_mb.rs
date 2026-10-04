@@ -31,19 +31,21 @@ use crate::bitwriter::BitWriter;
 use crate::encode::h264_intra::{MbDecision, MbKind};
 use crate::encode::h264_me::{BDecision, BMbKind, InterDecision, InterMbKind};
 use crate::encode::h264_pic::{
-    BMb, CodedPair, Colocated, IntraTools, PMb, PairMb, PairWriter, PicMotion, code_b_picture, code_intra_picture,
-    code_p_picture,
+    BMb, CodedPair, Colocated, IntraTools, PMb, PairMb, PairWriter, PicMotion, code_b_picture,
+    code_intra_picture, code_p_picture,
+};
+use crate::encode::h264_syntax::{Geometry, Plane, Recon};
+use crate::h264::cavlc::{
+    SCAN_CHROMA_DC, SCAN8_SUB, SCAN8_SUB_FIELD, part_index_of, write_residual_block_cavlc,
 };
 use crate::h264::mb::MbNeighbours;
-use crate::encode::h264_syntax::{Geometry, Plane, Recon};
-use crate::h264::cavlc::{SCAN8_SUB, SCAN8_SUB_FIELD, SCAN_CHROMA_DC, part_index_of, write_residual_block_cavlc};
 use crate::h264::mb::SubMbShape;
 use crate::h264::mb::raster_of_blk;
-use crate::sample::Sample;
 use crate::h264::tables::{
-    GOLOMB_TO_INTER_CBP, GOLOMB_TO_INTER_CBP_GRAY, GOLOMB_TO_INTRA4X4_CBP,
-    FIELD_SCAN4X4, GOLOMB_TO_INTRA4X4_CBP_GRAY, SCAN_CHROMA_DC_422, ZIGZAG4X4,
+    FIELD_SCAN4X4, GOLOMB_TO_INTER_CBP, GOLOMB_TO_INTER_CBP_GRAY, GOLOMB_TO_INTRA4X4_CBP,
+    GOLOMB_TO_INTRA4X4_CBP_GRAY, SCAN_CHROMA_DC_422, ZIGZAG4X4,
 };
+use crate::sample::Sample;
 
 /// `coded_block_pattern` me(v) for intra: cbp -> codeNum, the inverse of
 /// the reader's codeNum -> cbp table, derived from it at compile time.
@@ -129,7 +131,11 @@ impl NzState {
     fn new(mbs_wide: usize, rows: usize, c444: bool) -> Self {
         debug_assert!(!c444 || rows == 0, "4:4:4 has no 4:2:x chroma rows");
         NzState {
-            top_luma: [vec![0; mbs_wide * 4], vec![0; mbs_wide * 4], vec![0; mbs_wide * 4]],
+            top_luma: [
+                vec![0; mbs_wide * 4],
+                vec![0; mbs_wide * 4],
+                vec![0; mbs_wide * 4],
+            ],
             left_luma: [[0; 4]; 3],
             top_chroma: [vec![0; mbs_wide * 2], vec![0; mbs_wide * 2]],
             left_chroma: [[0; 4]; 2],
@@ -200,13 +206,11 @@ fn write_macroblock(
     // pattern.
     match dec.kind {
         MbKind::I4x4 | MbKind::I8x8 => w.ue(mb_type_offset),
-        MbKind::I16x16 => w.ue(
-            mb_type_offset
-                + 1
-                + dec.intra16_mode as u32
-                + 4 * dec.cbp_chroma as u32
-                + 12 * (dec.cbp_luma == 15) as u32,
-        ),
+        MbKind::I16x16 => w.ue(mb_type_offset
+            + 1
+            + dec.intra16_mode as u32
+            + 4 * dec.cbp_chroma as u32
+            + 12 * (dec.cbp_luma == 15) as u32),
     }
 
     // `transform_size_8x8_flag`, before `mb_pred()` and only for I_NxN:
@@ -217,7 +221,10 @@ fn write_macroblock(
     if t8x8_mode && dec.kind.is_nxn() {
         w.flag(dec.transform_8x8);
     }
-    debug_assert!(t8x8_mode || !dec.transform_8x8, "no PPS flag, no 8x8 transform");
+    debug_assert!(
+        t8x8_mode || !dec.transform_8x8,
+        "no PPS flag, no 8x8 transform"
+    );
 
     match dec.kind {
         // The sixteen prediction modes, in luma4x4BlkIdx order — the
@@ -322,7 +329,10 @@ fn write_p16_macroblock(
         !matches!(dec.kind, InterMbKind::PSkip | InterMbKind::UseIntra),
         "only a coded P macroblock carries this syntax"
     );
-    debug_assert_eq!(dec.ref_idx, 0, "more than one reference needs te(v) ref_idx writing");
+    debug_assert_eq!(
+        dec.ref_idx, 0,
+        "more than one reference needs te(v) ref_idx writing"
+    );
     w.ue(dec.kind.p_mb_type()); // Table 7-13
     // `P_8x8` first spells its four `sub_mb_type`s (Table 7-17), all of
     // them before any motion — `sub_mb_pred()` is three separate passes
@@ -338,7 +348,11 @@ fn write_p16_macroblock(
     // an MBAFF frame, whose list holds each frame's two fields, and whose
     // te(v) index over two entries is one inverted bit (`read_ref_idx`).
     if ref_idx_zeros {
-        let parts = if dec.kind == InterMbKind::P8x8 { 4 } else { dec.kind.parts().len() };
+        let parts = if dec.kind == InterMbKind::P8x8 {
+            4
+        } else {
+            dec.kind.parts().len()
+        };
         for _ in 0..parts {
             w.te(0, 1);
         }
@@ -430,8 +444,11 @@ fn write_plane_residual(
     nz: &[u8; 16],
 ) {
     let mut cur = [0u8; 16];
-    let (scan4, scan8sub): (&[u8; 16], &[[u8; 16]; 4]) =
-        if st.field { (&FIELD_SCAN4X4, &SCAN8_SUB_FIELD) } else { (&ZIGZAG4X4, &SCAN8_SUB) };
+    let (scan4, scan8sub): (&[u8; 16], &[[u8; 16]; 4]) = if st.field {
+        (&FIELD_SCAN4X4, &SCAN8_SUB_FIELD)
+    } else {
+        (&ZIGZAG4X4, &SCAN8_SUB)
+    };
     let nc_at = |cur: &[u8; 16], st: &NzState, bx: usize, by: usize| -> i32 {
         let a = if bx > 0 {
             Some(cur[by * 4 + bx - 1])
@@ -450,7 +467,10 @@ fn write_plane_residual(
         nc_of(a, b)
     };
     if let Some(dc) = dc {
-        debug_assert!(!transform_8x8, "Intra_16x16 carries no transform_size_8x8_flag");
+        debug_assert!(
+            !transform_8x8,
+            "Intra_16x16 carries no transform_size_8x8_flag"
+        );
         // The DC block first. Its own count is not stored anywhere — the
         // reader discards it too — so the return is deliberately dropped.
         let nc = nc_at(&cur, st, 0, 0);
@@ -534,18 +554,46 @@ fn write_mb_residual(
     // Luma, then (4:4:4) Cb and Cr coded the same way — the mirror of
     // `parse_residual_cavlc`'s plane order, each plane's `nC` from its own
     // neighbour counts (`plane_nc` in src/h264/cavlc.rs).
-    write_plane_residual(w, st, 0, mb_x, left, top, luma_dc, transform_8x8, cbp, luma, nz_luma);
+    write_plane_residual(
+        w,
+        st,
+        0,
+        mb_x,
+        left,
+        top,
+        luma_dc,
+        transform_8x8,
+        cbp,
+        luma,
+        nz_luma,
+    );
     if st.c444 {
         // 4:4:4's chroma planes are luma-style, transform size included.
         write_plane_residual(
-            w, st, 1, mb_x, left, top,
+            w,
+            st,
+            1,
+            mb_x,
+            left,
+            top,
             luma_dc.is_some().then_some(&chroma_dc[0]),
-            transform_8x8, cbp, &chroma_ac[0], &nz_chroma[0],
+            transform_8x8,
+            cbp,
+            &chroma_ac[0],
+            &nz_chroma[0],
         );
         write_plane_residual(
-            w, st, 2, mb_x, left, top,
+            w,
+            st,
+            2,
+            mb_x,
+            left,
+            top,
             luma_dc.is_some().then_some(&chroma_dc[1]),
-            transform_8x8, cbp, &chroma_ac[1], &nz_chroma[1],
+            transform_8x8,
+            cbp,
+            &chroma_ac[1],
+            &nz_chroma[1],
         );
     }
     if chroma && cbp & 0x30 != 0 {
@@ -621,8 +669,16 @@ pub fn write_intra_picture<S: Sample>(
     rec: &mut [Recon<S>],
 ) -> PicMotion {
     let mbs_wide = g.mbs_wide as usize;
-    let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 { 0 } else { g.chroma_mb().1 as usize / 4 };
-    let mut st = NzState::new(mbs_wide, rows, g.chroma == crate::picture::ChromaFormat::Yuv444);
+    let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 {
+        0
+    } else {
+        g.chroma_mb().1 as usize / 4
+    };
+    let mut st = NzState::new(
+        mbs_wide,
+        rows,
+        g.chroma == crate::picture::ChromaFormat::Yuv444,
+    );
     st.field = g.field_pic;
     let t8x8 = tools.transform_8x8;
     code_intra_picture(g, tools, qp, planes, rec, |mb_x, mb_y, dec| {
@@ -652,8 +708,16 @@ pub fn write_p_picture<S: Sample>(
     weights: Option<&crate::h264::slice::PredWeightTable>,
 ) -> PicMotion {
     let mbs_wide = g.mbs_wide as usize;
-    let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 { 0 } else { g.chroma_mb().1 as usize / 4 };
-    let mut st = NzState::new(mbs_wide, rows, g.chroma == crate::picture::ChromaFormat::Yuv444);
+    let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 {
+        0
+    } else {
+        g.chroma_mb().1 as usize / 4
+    };
+    let mut st = NzState::new(
+        mbs_wide,
+        rows,
+        g.chroma == crate::picture::ChromaFormat::Yuv444,
+    );
     st.field = g.field_pic;
     // `mb_skip_run`: counted here, written before each coded macroblock,
     // and flushed after the last one — the reader expects a run before
@@ -661,24 +725,33 @@ pub fn write_p_picture<S: Sample>(
     // when the slice ends in skips (7.3.4).
     let mut skip_run: u32 = 0;
     let t8x8 = tools.transform_8x8;
-    let fmbs = code_p_picture(g, tools, qp, planes, rec, refp, weights, |mb_x, mb_y, mb| match mb {
-        PMb::Skip(_) => {
-            skip_run += 1;
-            skip_nz(&mut st, mb_x);
-        }
-        PMb::Coded(dec) => {
-            w.ue(skip_run);
-            skip_run = 0;
-            write_p16_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
-        }
-        PMb::Intra(idec) => {
-            w.ue(skip_run);
-            skip_run = 0;
-            // Intra in a P slice: the same macroblock, `mb_type` shifted
-            // by 5 (Table 7-11's note).
-            write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 5, t8x8);
-        }
-    });
+    let fmbs = code_p_picture(
+        g,
+        tools,
+        qp,
+        planes,
+        rec,
+        refp,
+        weights,
+        |mb_x, mb_y, mb| match mb {
+            PMb::Skip(_) => {
+                skip_run += 1;
+                skip_nz(&mut st, mb_x);
+            }
+            PMb::Coded(dec) => {
+                w.ue(skip_run);
+                skip_run = 0;
+                write_p16_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+            }
+            PMb::Intra(idec) => {
+                w.ue(skip_run);
+                skip_run = 0;
+                // Intra in a P slice: the same macroblock, `mb_type` shifted
+                // by 5 (Table 7-11's note).
+                write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 5, t8x8);
+            }
+        },
+    );
     if skip_run > 0 {
         w.ue(skip_run);
     }
@@ -817,29 +890,47 @@ pub fn write_b_picture<S: Sample>(
     weights: crate::encode::h264_me::BWeights<'_>,
 ) -> PicMotion {
     let mbs_wide = g.mbs_wide as usize;
-    let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 { 0 } else { g.chroma_mb().1 as usize / 4 };
-    let mut st = NzState::new(mbs_wide, rows, g.chroma == crate::picture::ChromaFormat::Yuv444);
+    let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 {
+        0
+    } else {
+        g.chroma_mb().1 as usize / 4
+    };
+    let mut st = NzState::new(
+        mbs_wide,
+        rows,
+        g.chroma == crate::picture::ChromaFormat::Yuv444,
+    );
     st.field = g.field_pic;
     let mut skip_run: u32 = 0;
     let t8x8 = tools.transform_8x8;
-    let fmbs = code_b_picture(g, tools, qp, planes, rec, refs, col, weights, |mb_x, mb_y, mb| match mb {
-        BMb::Skip(_) => {
-            skip_run += 1;
-            skip_nz(&mut st, mb_x);
-        }
-        BMb::Direct(dec) | BMb::Explicit(dec) => {
-            w.ue(skip_run);
-            skip_run = 0;
-            write_b_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
-        }
-        BMb::Intra(idec) => {
-            w.ue(skip_run);
-            skip_run = 0;
-            // Intra in a B slice: the same macroblock, `mb_type` shifted
-            // by 23 (Table 7-14's note).
-            write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 23, t8x8);
-        }
-    });
+    let fmbs = code_b_picture(
+        g,
+        tools,
+        qp,
+        planes,
+        rec,
+        refs,
+        col,
+        weights,
+        |mb_x, mb_y, mb| match mb {
+            BMb::Skip(_) => {
+                skip_run += 1;
+                skip_nz(&mut st, mb_x);
+            }
+            BMb::Direct(dec) | BMb::Explicit(dec) => {
+                w.ue(skip_run);
+                skip_run = 0;
+                write_b_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+            }
+            BMb::Intra(idec) => {
+                w.ue(skip_run);
+                skip_run = 0;
+                // Intra in a B slice: the same macroblock, `mb_type` shifted
+                // by 23 (Table 7-14's note).
+                write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 23, t8x8);
+            }
+        },
+    );
     if skip_run > 0 {
         w.ue(skip_run);
     }
@@ -858,7 +949,10 @@ struct MbCounts {
 }
 
 impl MbCounts {
-    const SKIP: MbCounts = MbCounts { luma: [0; 16], chroma: [[0; 16]; 2] };
+    const SKIP: MbCounts = MbCounts {
+        luma: [0; 16],
+        chroma: [[0; 16]; 2],
+    };
 
     fn of(cbp_luma: u8, cbp_chroma: u8, nz_luma: &[u8; 16], nz_chroma: &[[u8; 16]; 2]) -> Self {
         let mut luma = [0u8; 16];
@@ -867,12 +961,21 @@ impl MbCounts {
                 *v = nz_luma[r];
             }
         }
-        MbCounts { luma, chroma: if cbp_chroma == 2 { *nz_chroma } else { [[0; 16]; 2] } }
+        MbCounts {
+            luma,
+            chroma: if cbp_chroma == 2 {
+                *nz_chroma
+            } else {
+                [[0; 16]; 2]
+            },
+        }
     }
 
     fn of_mb(mb: &PairMb) -> Self {
         match mb {
-            PairMb::Intra(d) | PairMb::PIntra(d) | PairMb::BIntra(d) => Self::of(d.cbp_luma, d.cbp_chroma, &d.nz_luma, &d.nz_chroma),
+            PairMb::Intra(d) | PairMb::PIntra(d) | PairMb::BIntra(d) => {
+                Self::of(d.cbp_luma, d.cbp_chroma, &d.nz_luma, &d.nz_chroma)
+            }
             PairMb::P(d) => Self::of(d.cbp_luma, d.cbp_chroma, &d.nz_luma, &d.nz_chroma),
             PairMb::B(d) => Self::of(d.cbp_luma, d.cbp_chroma, &d.nz_luma, &d.nz_chroma),
         }
@@ -984,7 +1087,12 @@ pub(crate) struct MbaffCavlc<'w> {
 
 impl<'w> MbaffCavlc<'w> {
     /// Begin the slice data of an MBAFF picture of `slice` type.
-    pub(crate) fn new<S: Sample>(w: &'w mut BitWriter, g: &Geometry, tools: &IntraTools<S>, slice: crate::h264::SliceType) -> Self {
+    pub(crate) fn new<S: Sample>(
+        w: &'w mut BitWriter,
+        g: &Geometry,
+        tools: &IntraTools<S>,
+        slice: crate::h264::SliceType,
+    ) -> Self {
         let rows = match g.chroma {
             crate::picture::ChromaFormat::Yuv420 => 2,
             crate::picture::ChromaFormat::Yuv422 => 4,
@@ -1012,12 +1120,30 @@ impl PairWriter for MbaffCavlc<'_> {
     fn trial_bits(&self, pair: &CodedPair, pm: &PicMotion) -> u64 {
         let mut w = BitWriter::new();
         let mut run = self.skip_run;
-        let _ = write_pair_cavlc(&mut w, &mut run, &self.counts, pair, pm, self.inter, self.rows, self.t8x8);
+        let _ = write_pair_cavlc(
+            &mut w,
+            &mut run,
+            &self.counts,
+            pair,
+            pm,
+            self.inter,
+            self.rows,
+            self.t8x8,
+        );
         w.position()
     }
 
     fn write_pair(&mut self, pair: &CodedPair, pm: &PicMotion) {
-        let c = write_pair_cavlc(self.w, &mut self.skip_run, &self.counts, pair, pm, self.inter, self.rows, self.t8x8);
+        let c = write_pair_cavlc(
+            self.w,
+            &mut self.skip_run,
+            &self.counts,
+            pair,
+            pm,
+            self.inter,
+            self.rows,
+            self.t8x8,
+        );
         let mbw = pm.info.mb_width;
         self.counts[pair.top] = Some(c[0]);
         self.counts[pair.top + mbw] = Some(c[1]);
@@ -1030,19 +1156,22 @@ mod tests {
     use crate::bitreader::BitReader;
     use crate::encode::h264_intra::{IntraCtx, MbAvail, PredMode, code_macroblock, quad_rasters};
     use crate::encode::h264_me::test_b_decision as b_decision;
-    use crate::h264::tables::ZIGZAG8X8;
     use crate::encode::h264_syntax::recon_plane;
     use crate::h264::SliceType;
-    use crate::h264::mb::chroma_qp;
-    use crate::h264::sps::ScalingLists;
-    use crate::h264::transform::Dequant;
     use crate::h264::cavlc::{intra_mb_type, parse_mb_cavlc};
     use crate::h264::frame::{CHROMA_PAD, LUMA_PAD};
+    use crate::h264::mb::chroma_qp;
     use crate::h264::mb::{MbKind as DecKind, MbLayer, MbNeighbours, PicInfo, SliceCtx};
     use crate::h264::recon::QpState;
+    use crate::h264::sps::ScalingLists;
+    use crate::h264::tables::ZIGZAG8X8;
+    use crate::h264::transform::Dequant;
 
     fn flat() -> ScalingLists {
-        ScalingLists { list4x4: [[16; 16]; 6], list8x8: [[16; 64]; 6] }
+        ScalingLists {
+            list4x4: [[16; 16]; 6],
+            list8x8: [[16; 64]; 6],
+        }
     }
 
     /// The derived coded_block_pattern mappings really invert the reader's:
@@ -1051,29 +1180,25 @@ mod tests {
     fn cbp_mapping_round_trips() {
         for code in 0..48usize {
             assert_eq!(
-                INTRA_CBP_TO_GOLOMB[GOLOMB_TO_INTRA4X4_CBP[code] as usize] as usize,
-                code,
+                INTRA_CBP_TO_GOLOMB[GOLOMB_TO_INTRA4X4_CBP[code] as usize] as usize, code,
                 "intra cbp codeNum {code}"
             );
         }
         for code in 0..16usize {
             assert_eq!(
-                INTRA_CBP_TO_GOLOMB_GRAY[GOLOMB_TO_INTRA4X4_CBP_GRAY[code] as usize] as usize,
-                code,
+                INTRA_CBP_TO_GOLOMB_GRAY[GOLOMB_TO_INTRA4X4_CBP_GRAY[code] as usize] as usize, code,
                 "monochrome intra cbp codeNum {code}"
             );
         }
         for code in 0..48usize {
             assert_eq!(
-                INTER_CBP_TO_GOLOMB[GOLOMB_TO_INTER_CBP[code] as usize] as usize,
-                code,
+                INTER_CBP_TO_GOLOMB[GOLOMB_TO_INTER_CBP[code] as usize] as usize, code,
                 "inter cbp codeNum {code}"
             );
         }
         for code in 0..16usize {
             assert_eq!(
-                INTER_CBP_TO_GOLOMB_GRAY[GOLOMB_TO_INTER_CBP_GRAY[code] as usize] as usize,
-                code,
+                INTER_CBP_TO_GOLOMB_GRAY[GOLOMB_TO_INTER_CBP_GRAY[code] as usize] as usize, code,
                 "monochrome inter cbp codeNum {code}"
             );
         }
@@ -1114,7 +1239,12 @@ mod tests {
     /// kind of thing only a round trip through the real reader catches.
     #[test]
     fn a_p16_macroblock_round_trips_through_the_reader() {
-        for (mvdx, mvdy, coded) in [(0i16, 0i16, false), (7, -3, true), (-13, 21, true), (1, 0, false)] {
+        for (mvdx, mvdy, coded) in [
+            (0i16, 0i16, false),
+            (7, -3, true),
+            (-13, 21, true),
+            (1, 0, false),
+        ] {
             let mut dec = InterDecision {
                 mvd: [crate::h264::frame::Mv::new(mvdx, mvdy); 16],
                 ..InterDecision::default()
@@ -1140,9 +1270,15 @@ mod tests {
 
             let ctx = p_ctx();
             let info = PicInfo::new(1, 1);
-            let nb = MbNeighbours { mb_width: 1, ..MbNeighbours::default() };
+            let nb = MbNeighbours {
+                mb_width: 1,
+                ..MbNeighbours::default()
+            };
             let dq = Dequant::new(&flat());
-            let mut qps = QpState { prev_qp: 28, chroma_offset: [0, 0] };
+            let mut qps = QpState {
+                prev_qp: 28,
+                chroma_offset: [0, 0],
+            };
             let mut r = BitReader::new(&rbsp);
             let t = r.ue();
             let mut layer = MbLayer::new(DecKind::I4x4);
@@ -1151,11 +1287,17 @@ mod tests {
             assert!(!r.overrun());
 
             assert_eq!(layer.kind, DecKind::Inter16x16, "mvd ({mvdx},{mvdy})");
-            assert_eq!(layer.ref_idx[0][0], 0, "one active reference infers ref_idx 0");
+            assert_eq!(
+                layer.ref_idx[0][0], 0,
+                "one active reference infers ref_idx 0"
+            );
             assert_eq!(layer.mvd[0].mvd[0], crate::h264::frame::Mv::new(mvdx, mvdy));
             assert_eq!(layer.cbp, dec.cbp_luma | (dec.cbp_chroma << 4));
             assert_eq!(layer.qp_delta, if coded { dec.qp_delta as i32 } else { 0 });
-            assert_eq!(layer.qp, 28, "constant QP whether or not a delta was carried");
+            assert_eq!(
+                layer.qp, 28,
+                "constant QP whether or not a delta was carried"
+            );
             for blk in 0..16 {
                 assert_eq!(layer.nz[0][blk], dec.nz_luma[blk], "luma nz {blk}");
             }
@@ -1185,38 +1327,73 @@ mod tests {
     /// lists) is exactly the kind of thing a single case cannot pin.
     #[test]
     fn every_b_shape_round_trips_through_the_reader() {
-        use crate::h264::mb::{PRED_BI, PRED_L0, PRED_L1};
         use crate::h264::frame::Mv;
+        use crate::h264::mb::{PRED_BI, PRED_L0, PRED_L1};
         let mut cases: Vec<BDecision> = Vec::new();
-        cases.push(b_decision(BMbKind::BDirect16, [PRED_BI; 4], [SubMbShape::S8x8; 4], 1));
+        cases.push(b_decision(
+            BMbKind::BDirect16,
+            [PRED_BI; 4],
+            [SubMbShape::S8x8; 4],
+            1,
+        ));
         for dir in [PRED_L0, PRED_L1, PRED_BI] {
             cases.push(b_decision(BMbKind::B16, [dir; 4], [SubMbShape::S8x8; 4], 2));
         }
         for d0 in [PRED_L0, PRED_L1, PRED_BI] {
             for d1 in [PRED_L0, PRED_L1, PRED_BI] {
-                cases.push(b_decision(BMbKind::B16x8, [d0, d0, d1, d1], [SubMbShape::S8x8; 4], 3));
-                cases.push(b_decision(BMbKind::B8x16, [d0, d1, d0, d1], [SubMbShape::S8x8; 4], 4));
+                cases.push(b_decision(
+                    BMbKind::B16x8,
+                    [d0, d0, d1, d1],
+                    [SubMbShape::S8x8; 4],
+                    3,
+                ));
+                cases.push(b_decision(
+                    BMbKind::B8x16,
+                    [d0, d1, d0, d1],
+                    [SubMbShape::S8x8; 4],
+                    4,
+                ));
             }
         }
         cases.push(b_decision(
             BMbKind::B8x8,
             [PRED_BI, PRED_L0, PRED_L1, PRED_BI],
-            [SubMbShape::Direct, SubMbShape::S8x8, SubMbShape::S8x4, SubMbShape::S4x4],
+            [
+                SubMbShape::Direct,
+                SubMbShape::S8x8,
+                SubMbShape::S8x4,
+                SubMbShape::S4x4,
+            ],
             5,
         ));
         cases.push(b_decision(
             BMbKind::B8x8,
             [PRED_BI, PRED_L0, PRED_L0, PRED_L1],
-            [SubMbShape::S4x8, SubMbShape::Direct, SubMbShape::Direct, SubMbShape::S8x8],
+            [
+                SubMbShape::S4x8,
+                SubMbShape::Direct,
+                SubMbShape::Direct,
+                SubMbShape::S8x8,
+            ],
             6,
         ));
         cases.push(b_decision(
             BMbKind::B8x8,
             [PRED_L0, PRED_L0, PRED_L1, PRED_BI],
-            [SubMbShape::S8x4, SubMbShape::S4x8, SubMbShape::S4x4, SubMbShape::S8x8],
+            [
+                SubMbShape::S8x4,
+                SubMbShape::S4x8,
+                SubMbShape::S4x4,
+                SubMbShape::S8x8,
+            ],
             7,
         ));
-        cases.push(b_decision(BMbKind::B8x8, [PRED_L0; 4], [SubMbShape::Direct; 4], 8));
+        cases.push(b_decision(
+            BMbKind::B8x8,
+            [PRED_L0; 4],
+            [SubMbShape::Direct; 4],
+            8,
+        ));
 
         for dec in &cases {
             let mut st = NzState::new(1, 2, false);
@@ -1232,9 +1409,15 @@ mod tests {
                 ..p_ctx()
             };
             let info = PicInfo::new(1, 1);
-            let nb = MbNeighbours { mb_width: 1, ..MbNeighbours::default() };
+            let nb = MbNeighbours {
+                mb_width: 1,
+                ..MbNeighbours::default()
+            };
             let dq = Dequant::new(&flat());
-            let mut qps = QpState { prev_qp: 28, chroma_offset: [0, 0] };
+            let mut qps = QpState {
+                prev_qp: 28,
+                chroma_offset: [0, 0],
+            };
             let mut r = BitReader::new(&rbsp);
             let t = r.ue();
             let mut layer = MbLayer::new(DecKind::I4x4);
@@ -1248,13 +1431,23 @@ mod tests {
             for part in 0..4 {
                 if dec.is_direct_part(part) {
                     if dec.kind == BMbKind::B8x8 {
-                        assert_eq!(layer.sub_shape[part], SubMbShape::Direct, "{tag}: part {part}");
+                        assert_eq!(
+                            layer.sub_shape[part],
+                            SubMbShape::Direct,
+                            "{tag}: part {part}"
+                        );
                     }
                     continue;
                 }
-                assert_eq!(layer.pred_dir[part], dec.dir[part], "{tag}: part {part} direction");
+                assert_eq!(
+                    layer.pred_dir[part], dec.dir[part],
+                    "{tag}: part {part} direction"
+                );
                 if dec.kind == BMbKind::B8x8 {
-                    assert_eq!(layer.sub_shape[part], dec.sub_shape[part], "{tag}: part {part} shape");
+                    assert_eq!(
+                        layer.sub_shape[part], dec.sub_shape[part],
+                        "{tag}: part {part} shape"
+                    );
                 }
                 for l in 0..2 {
                     if dec.used(part)[l] {
@@ -1276,10 +1469,17 @@ mod tests {
                     } else {
                         Mv::ZERO
                     };
-                    assert_eq!(layer.mvd[blk].mvd[l], want, "{tag}: block {blk} list {l} mvd");
+                    assert_eq!(
+                        layer.mvd[blk].mvd[l], want,
+                        "{tag}: block {blk} list {l} mvd"
+                    );
                 }
             }
-            assert_eq!(layer.cbp, dec.cbp_luma | (dec.cbp_chroma << 4), "{tag}: cbp");
+            assert_eq!(
+                layer.cbp,
+                dec.cbp_luma | (dec.cbp_chroma << 4),
+                "{tag}: cbp"
+            );
             for blk in 0..16 {
                 assert_eq!(layer.nz[0][blk], dec.nz_luma[blk], "{tag}: luma nz {blk}");
             }
@@ -1294,26 +1494,41 @@ mod tests {
     /// produced, so no row is a number nothing spells.
     #[test]
     fn b_mb_type_numbering_inverts_the_readers_tables() {
+        use crate::encode::h264_me::b_sub_mb_type_code;
         use crate::h264::cavlc::{b_mb_type, b_sub_mb_type};
         use crate::h264::mb::{PRED_BI, PRED_L0, PRED_L1};
-        use crate::encode::h264_me::b_sub_mb_type_code;
         let dirs = [PRED_L0, PRED_L1, PRED_BI];
         let mut seen = std::collections::BTreeSet::new();
         for d0 in dirs {
             for d1 in dirs {
                 for kind in [BMbKind::B16x8, BMbKind::B8x16] {
-                    let dir = if kind == BMbKind::B16x8 { [d0, d0, d1, d1] } else { [d0, d1, d0, d1] };
-                    let dec = BDecision { kind, dir, ..BDecision::default() };
+                    let dir = if kind == BMbKind::B16x8 {
+                        [d0, d0, d1, d1]
+                    } else {
+                        [d0, d1, d0, d1]
+                    };
+                    let dec = BDecision {
+                        kind,
+                        dir,
+                        ..BDecision::default()
+                    };
                     let t = dec.mb_type();
                     assert!((4..=21).contains(&t), "{kind:?} {d0} {d1}: {t}");
-                    assert!(seen.insert(t), "{kind:?} {d0} {d1}: mb_type {t} spelled twice");
+                    assert!(
+                        seen.insert(t),
+                        "{kind:?} {d0} {d1}: mb_type {t} spelled twice"
+                    );
                     let mut layer = MbLayer::new(DecKind::I4x4);
                     b_mb_type(t, &mut layer).unwrap();
                     assert_eq!(layer.kind, kind.dec_kind(), "{kind:?} {d0} {d1}");
                     assert_eq!(layer.pred_dir, dir, "{kind:?} {d0} {d1}");
                 }
             }
-            let dec = BDecision { kind: BMbKind::B16, dir: [d0; 4], ..BDecision::default() };
+            let dec = BDecision {
+                kind: BMbKind::B16,
+                dir: [d0; 4],
+                ..BDecision::default()
+            };
             let mut layer = MbLayer::new(DecKind::I4x4);
             b_mb_type(dec.mb_type(), &mut layer).unwrap();
             assert_eq!(layer.kind, DecKind::Inter16x16);
@@ -1321,15 +1536,30 @@ mod tests {
         }
         assert_eq!(seen.len(), 18, "the eighteen two-partition rows");
         let mut layer = MbLayer::new(DecKind::I4x4);
-        b_mb_type(BDecision { kind: BMbKind::B8x8, ..BDecision::default() }.mb_type(), &mut layer)
-            .unwrap();
+        b_mb_type(
+            BDecision {
+                kind: BMbKind::B8x8,
+                ..BDecision::default()
+            }
+            .mb_type(),
+            &mut layer,
+        )
+        .unwrap();
         assert_eq!(layer.kind, DecKind::Inter8x8);
 
         let mut codes = std::collections::BTreeSet::new();
-        for shape in [SubMbShape::S8x8, SubMbShape::S8x4, SubMbShape::S4x8, SubMbShape::S4x4] {
+        for shape in [
+            SubMbShape::S8x8,
+            SubMbShape::S8x4,
+            SubMbShape::S4x8,
+            SubMbShape::S4x4,
+        ] {
             for dir in dirs {
                 let t = b_sub_mb_type_code(shape, dir);
-                assert!(codes.insert(t), "{shape:?} {dir}: sub_mb_type {t} spelled twice");
+                assert!(
+                    codes.insert(t),
+                    "{shape:?} {dir}: sub_mb_type {t} spelled twice"
+                );
                 assert_eq!(b_sub_mb_type(t).unwrap(), (shape, dir), "{shape:?} {dir}");
             }
         }
@@ -1337,7 +1567,10 @@ mod tests {
         assert_eq!(t, 0);
         assert_eq!(b_sub_mb_type(0).unwrap().0, SubMbShape::Direct);
         codes.insert(t);
-        assert_eq!(codes.into_iter().collect::<Vec<_>>(), (0..=12).collect::<Vec<_>>());
+        assert_eq!(
+            codes.into_iter().collect::<Vec<_>>(),
+            (0..=12).collect::<Vec<_>>()
+        );
     }
 
     /// A 4:4:4 intra macroblock — decided by the real mode decision,
@@ -1391,9 +1624,24 @@ mod tests {
                 cb[i] = lcg();
                 cr[i] = lcg();
             }
-            let mb = MbAvail { left: false, top: false, top_left: false, top_right: false };
+            let mb = MbAvail {
+                left: false,
+                top: false,
+                top_left: false,
+                top_right: false,
+            };
             let (dec, _modes) = code_macroblock(
-                &ctx, &mut rec, 0, 0, &y, 16, [&cb, &cr], 16, mb, &[None; 4], &[None; 4],
+                &ctx,
+                &mut rec,
+                0,
+                0,
+                &y,
+                16,
+                [&cb, &cr],
+                16,
+                mb,
+                &[None; 4],
+                &[None; 4],
             );
             assert_eq!(dec.cbp_chroma, 0, "ChromaArrayType 3 has no chroma cbp");
 
@@ -1403,12 +1651,25 @@ mod tests {
             w.rbsp_trailing_bits();
             let rbsp = w.into_rbsp();
 
-            let sctx = SliceCtx { chroma_format_idc: 3, ..p_ctx() };
-            let sctx = SliceCtx { slice_type: SliceType::I, num_ref_idx: [0, 0], ..sctx };
+            let sctx = SliceCtx {
+                chroma_format_idc: 3,
+                ..p_ctx()
+            };
+            let sctx = SliceCtx {
+                slice_type: SliceType::I,
+                num_ref_idx: [0, 0],
+                ..sctx
+            };
             let info = PicInfo::new(1, 1);
-            let nb = MbNeighbours { mb_width: 1, ..MbNeighbours::default() };
+            let nb = MbNeighbours {
+                mb_width: 1,
+                ..MbNeighbours::default()
+            };
             let dq = Dequant::new(&flat());
-            let mut qps = QpState { prev_qp: qp as i32, chroma_offset: [0, 0] };
+            let mut qps = QpState {
+                prev_qp: qp as i32,
+                chroma_offset: [0, 0],
+            };
             let mut r = BitReader::new(&rbsp);
             let t = r.ue();
             let mut layer = MbLayer::new(DecKind::I4x4);
@@ -1436,7 +1697,8 @@ mod tests {
                 assert_eq!(layer.nz[0][blk], dec.nz_luma[blk], "qp={qp} luma nz {blk}");
                 for comp in 0..2 {
                     assert_eq!(
-                        layer.nz[1 + comp][blk], dec.nz_chroma[comp][blk],
+                        layer.nz[1 + comp][blk],
+                        dec.nz_chroma[comp][blk],
                         "qp={qp} plane {comp} nz {blk}"
                     );
                 }
@@ -1463,9 +1725,15 @@ mod tests {
 
         let ctx = p_ctx();
         let info = PicInfo::new(1, 1);
-        let nb = MbNeighbours { mb_width: 1, ..MbNeighbours::default() };
+        let nb = MbNeighbours {
+            mb_width: 1,
+            ..MbNeighbours::default()
+        };
         let dq = Dequant::new(&flat());
-        let mut qps = QpState { prev_qp: 26, chroma_offset: [0, 0] };
+        let mut qps = QpState {
+            prev_qp: 26,
+            chroma_offset: [0, 0],
+        };
         let mut r = BitReader::new(&rbsp);
         assert_eq!(r.ue(), 0, "the skip run before the coded macroblock");
         let t = r.ue();
@@ -1553,9 +1821,15 @@ mod tests {
             sp_qsc: [0; 2],
         };
         let info = PicInfo::new(1, 1);
-        let nb = MbNeighbours { mb_width: 1, ..MbNeighbours::default() };
+        let nb = MbNeighbours {
+            mb_width: 1,
+            ..MbNeighbours::default()
+        };
         let dq = Dequant::new(&flat());
-        let mut qps = QpState { prev_qp: qp as i32, chroma_offset: [0, 0] };
+        let mut qps = QpState {
+            prev_qp: qp as i32,
+            chroma_offset: [0, 0],
+        };
         let mut r = BitReader::new(&rbsp);
         let t = r.ue();
         let mut layer = MbLayer::new(DecKind::I4x4);
@@ -1585,7 +1859,10 @@ mod tests {
                 assert_eq!(&layer.dc[0][..], &dc[..], "luma DC levels");
             }
         }
-        assert_eq!(layer.transform_8x8, dec.transform_8x8, "transform_size_8x8_flag");
+        assert_eq!(
+            layer.transform_8x8, dec.transform_8x8,
+            "transform_size_8x8_flag"
+        );
         assert_eq!(layer.cbp, dec.cbp_luma | (dec.cbp_chroma << 4), "cbp");
         assert_eq!(layer.chroma_mode, dec.chroma_mode);
         assert_eq!(layer.qp_delta, dec.qp_delta as i32);
@@ -1608,8 +1885,10 @@ mod tests {
                 }
                 if dec.cbp_chroma != 0 {
                     let n_dc = if rows == 4 { 8 } else { 4 };
-                    let dc: Vec<i32> =
-                        dec.chroma_dc[comp][..n_dc].iter().map(|&v| v as i32).collect();
+                    let dc: Vec<i32> = dec.chroma_dc[comp][..n_dc]
+                        .iter()
+                        .map(|&v| v as i32)
+                        .collect();
                     assert_eq!(&layer.chroma_dc[comp][..n_dc], &dc[..], "chroma DC {comp}");
                 }
             }
@@ -1680,9 +1959,24 @@ mod tests {
                     recon_plane(8, 8, CHROMA_PAD),
                     recon_plane(8, 8, CHROMA_PAD),
                 ];
-                let mb = MbAvail { left: false, top: false, top_left: false, top_right: false };
+                let mb = MbAvail {
+                    left: false,
+                    top: false,
+                    top_left: false,
+                    top_right: false,
+                };
                 let (dec, modes) = code_macroblock(
-                    &ctx, &mut rec, 0, 0, y, 16, [cb, cr], 8, mb, &[None; 4], &[None; 4],
+                    &ctx,
+                    &mut rec,
+                    0,
+                    0,
+                    y,
+                    16,
+                    [cb, cr],
+                    8,
+                    mb,
+                    &[None; 4],
+                    &[None; 4],
                 );
                 let chosen = (dec.kind == MbKind::I4x4).then_some(&modes);
                 round_trip(&dec, chosen, qp);
@@ -1707,7 +2001,9 @@ mod tests {
         let tools = IntraTools::<u8>::new(true, false, 8);
         let mut seed = 0x8080_8080u32;
         let mut lcg = move |x: usize, y: usize| -> u8 {
-            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223 ^ ((x * 31 + y) as u32));
+            seed = seed
+                .wrapping_mul(1664525)
+                .wrapping_add(1013904223 ^ ((x * 31 + y) as u32));
             (seed >> 16) as u8
         };
         // Smooth enough that the 8x8 candidate wins somewhere, detailed
@@ -1754,17 +2050,35 @@ mod tests {
                     recon_plane(cw, chroma_h as u32, cpad),
                     recon_plane(cw, chroma_h as u32, cpad),
                 ];
-                let mb = MbAvail { left: false, top: false, top_left: false, top_right: false };
+                let mb = MbAvail {
+                    left: false,
+                    top: false,
+                    top_left: false,
+                    top_right: false,
+                };
                 let cstride = cw as usize;
                 let (dec, modes) = code_macroblock(
-                    &ctx, &mut rec, 0, 0, &y, 16, [&cb, &cr], cstride, mb, &[None; 4], &[None; 4],
+                    &ctx,
+                    &mut rec,
+                    0,
+                    0,
+                    &y,
+                    16,
+                    [&cb, &cr],
+                    cstride,
+                    mb,
+                    &[None; 4],
+                    &[None; 4],
                 );
                 saw_8x8 |= dec.kind == MbKind::I8x8;
                 let chosen = dec.kind.is_nxn().then_some(&modes);
                 round_trip_fmt(&dec, chosen, qp, cfi, true);
             }
         }
-        assert!(saw_8x8, "no configuration chose the 8x8 transform; the test proved nothing");
+        assert!(
+            saw_8x8,
+            "no configuration chose the 8x8 transform; the test proved nothing"
+        );
     }
 
     /// A hand-built `I_8x8` decision, so the writer's 8x8 syntax is
@@ -1780,7 +2094,10 @@ mod tests {
         let mut dec = MbDecision {
             kind: MbKind::I8x8,
             transform_8x8: true,
-            luma_pred: [PredMode { use_predicted: true, rem: 0 }; 16],
+            luma_pred: [PredMode {
+                use_predicted: true,
+                rem: 0,
+            }; 16],
             chroma_mode: 1,
             ..MbDecision::default()
         };
@@ -1858,11 +2175,20 @@ mod tests {
             w.rbsp_trailing_bits();
             let rbsp = w.into_rbsp();
 
-            let ctx = SliceCtx { transform_8x8_mode: true, ..p_ctx() };
+            let ctx = SliceCtx {
+                transform_8x8_mode: true,
+                ..p_ctx()
+            };
             let info = PicInfo::new(1, 1);
-            let nb = MbNeighbours { mb_width: 1, ..MbNeighbours::default() };
+            let nb = MbNeighbours {
+                mb_width: 1,
+                ..MbNeighbours::default()
+            };
             let dq = Dequant::new(&flat());
-            let mut qps = QpState { prev_qp: 28, chroma_offset: [0, 0] };
+            let mut qps = QpState {
+                prev_qp: 28,
+                chroma_offset: [0, 0],
+            };
             let mut r = BitReader::new(&rbsp);
             let t = r.ue();
             let mut layer = MbLayer::new(DecKind::I4x4);
@@ -1870,15 +2196,25 @@ mod tests {
                 .expect("the reader rejected what the writer produced");
             assert!(!r.overrun());
             assert_eq!(layer.kind, DecKind::Inter16x16);
-            assert_eq!(layer.transform_8x8, dec.transform_8x8, "t8x8={t8x8} coded={coded}");
+            assert_eq!(
+                layer.transform_8x8, dec.transform_8x8,
+                "t8x8={t8x8} coded={coded}"
+            );
             assert_eq!(layer.cbp, dec.cbp_luma | (dec.cbp_chroma << 4));
-            assert_eq!(layer.nz[0], dec.nz_luma, "t8x8={t8x8} coded={coded} luma nz");
+            assert_eq!(
+                layer.nz[0], dec.nz_luma,
+                "t8x8={t8x8} coded={coded} luma nz"
+            );
             // The reader scales as it parses, so the levels come back
             // dequantised — and asking *it* for the table and shift is
             // what pins the 8x8 inter scaling list (index 1, since the
             // 8x8 lists run `2 * plane + inter`) and the `qP / 6` shift.
             let mbdq = crate::h264::mb::MbDequant::for_mb(
-                &dq, &ctx, [0, 0], DecKind::Inter16x16, layer.qp,
+                &dq,
+                &ctx,
+                [0, 0],
+                DecKind::Inter16x16,
+                layer.qp,
             )
             .expect("not lossless");
             let (table, shift) = mbdq.q8[0];
@@ -1897,7 +2233,10 @@ mod tests {
                         mbdq.q4[0].1,
                     )
                 };
-                assert_eq!(layer.coef[0][i], want, "t8x8={t8x8} coded={coded} coeff {i}");
+                assert_eq!(
+                    layer.coef[0][i], want,
+                    "t8x8={t8x8} coded={coded} coeff {i}"
+                );
             }
         }
     }
@@ -1912,7 +2251,10 @@ mod tests {
     fn a_synthetic_i4x4_macroblock_round_trips() {
         let mut dec = MbDecision {
             kind: MbKind::I4x4,
-            luma_pred: [PredMode { use_predicted: true, rem: 0 }; 16],
+            luma_pred: [PredMode {
+                use_predicted: true,
+                rem: 0,
+            }; 16],
             chroma_mode: 1,
             ..MbDecision::default()
         };

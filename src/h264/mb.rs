@@ -532,7 +532,6 @@ pub struct MbNeighbours {
 }
 
 impl MbNeighbours {
-
     /// [`Self::derive`] into an existing value (the slice decoder keeps one
     /// and refills it per macroblock; the struct is a few hundred bytes and
     /// building it in a temporary was a copy per macroblock). The nonzero
@@ -606,7 +605,8 @@ impl MbNeighbours {
                 if chroma_rows > 0 {
                     for comp in 0..2 {
                         for c in 0..2 {
-                            self.nzc_top[comp][c] = info.chroma_nz[b * 32 + comp * 16 + (chroma_rows - 1) * 2 + c];
+                            self.nzc_top[comp][c] =
+                                info.chroma_nz[b * 32 + comp * 16 + (chroma_rows - 1) * 2 + c];
                         }
                     }
                 }
@@ -646,7 +646,6 @@ impl MbNeighbours {
             }
         }
     }
-
 
     /// [`Self::derive_mbaff`] into an existing value.
     pub fn derive_mbaff_into(&mut self, info: &PicInfo, addr: usize, slice: u16, cur_field: bool) {
@@ -929,7 +928,6 @@ impl NbMotion {
     };
 }
 
-
 /// The motion of the block holding the neighbouring luma sample `(xn, yn)`
 /// (relative to the current macroblock's top-left) for one list, as
 /// prediction needs it — the form 6.4.11.7 uses, which matters in an MBAFF
@@ -1006,7 +1004,10 @@ pub struct MotionCache {
 
 impl Default for MotionCache {
     fn default() -> Self {
-        MotionCache { left: [[NbMotion::NONE; 8]; 2], top: [[NbMotion::NONE; 6]; 2] }
+        MotionCache {
+            left: [[NbMotion::NONE; 8]; 2],
+            top: [[NbMotion::NONE; 6]; 2],
+        }
     }
 }
 
@@ -1019,11 +1020,14 @@ impl MotionCache {
             // Table 6-4 neighbours, through the general derivation.
             for list in 0..2 {
                 for r in 0..4 {
-                    c.left[list][r] = neighbour_motion_at(nb, frame, info, 0, list, -1, r as i32 * 4);
-                    c.top[list][r] = neighbour_motion_at(nb, frame, info, 0, list, r as i32 * 4, -1);
+                    c.left[list][r] =
+                        neighbour_motion_at(nb, frame, info, 0, list, -1, r as i32 * 4);
+                    c.top[list][r] =
+                        neighbour_motion_at(nb, frame, info, 0, list, r as i32 * 4, -1);
                 }
                 for r in 0..3 {
-                    c.left[list][4 + r] = neighbour_motion_at(nb, frame, info, 0, list, -1, r as i32 * 4 + 3);
+                    c.left[list][4 + r] =
+                        neighbour_motion_at(nb, frame, info, 0, list, -1, r as i32 * 4 + 3);
                 }
                 c.top[list][4] = neighbour_motion_at(nb, frame, info, 0, list, 16, -1);
                 c.top[list][5] = neighbour_motion_at(nb, frame, info, 0, list, -1, -1);
@@ -1032,10 +1036,18 @@ impl MotionCache {
         }
         // An intra neighbour is available but "not used for inter
         // prediction": refIdx -1, mv 0.
-        const INTRA: NbMotion = NbMotion { avail: true, ref_idx: -1, mv: Mv::ZERO };
+        const INTRA: NbMotion = NbMotion {
+            avail: true,
+            ref_idx: -1,
+            mv: Mv::ZERO,
+        };
         let of = |list: usize, addr: usize, blk: usize| -> NbMotion {
             let m = frame.motion[list][addr * 16 + blk];
-            NbMotion { avail: true, ref_idx: m.ref_idx, mv: m.mv }
+            NbMotion {
+                avail: true,
+                ref_idx: m.ref_idx,
+                mv: m.mv,
+            }
         };
         // Each side is written whole: its entries, or NONE when unavailable.
         match nb.a {
@@ -1073,13 +1085,21 @@ impl MotionCache {
         for list in 0..2 {
             c.top[list][4] = match nb.c {
                 Some(cc) => {
-                    if info.mbs[cc].kind.is_intra() { INTRA } else { of(list, cc, 12) }
+                    if info.mbs[cc].kind.is_intra() {
+                        INTRA
+                    } else {
+                        of(list, cc, 12)
+                    }
                 }
                 None => NbMotion::NONE,
             };
             c.top[list][5] = match nb.d {
                 Some(d) => {
-                    if info.mbs[d].kind.is_intra() { INTRA } else { of(list, d, 15) }
+                    if info.mbs[d].kind.is_intra() {
+                        INTRA
+                    } else {
+                        of(list, d, 15)
+                    }
                 }
                 None => NbMotion::NONE,
             };
@@ -1100,10 +1120,18 @@ impl MotionCache {
                 self.top[list][4]
             }
         } else if xn < 0 {
-            if yn & 3 == 0 { self.left[list][(yn >> 2) as usize] } else { self.left[list][4 + (yn >> 2) as usize] }
+            if yn & 3 == 0 {
+                self.left[list][(yn >> 2) as usize]
+            } else {
+                self.left[list][4 + (yn >> 2) as usize]
+            }
         } else if xn < 16 && block_available(done, xn >> 2, yn >> 2) {
             let m = cur[list][((yn >> 2) * 4 + (xn >> 2)) as usize];
-            NbMotion { avail: true, ref_idx: m.ref_idx, mv: m.mv }
+            NbMotion {
+                avail: true,
+                ref_idx: m.ref_idx,
+                mv: m.mv,
+            }
         } else {
             NbMotion::NONE
         }
@@ -1220,7 +1248,15 @@ pub fn p_skip_mv(cache: &MotionCache, cur: &MbMotion) -> Mv {
 /// Write `motion` for list `list` into the 4x4 blocks of the rectangle
 /// `(x, y, w, h)` (samples within the macroblock) of the macroblock being
 /// derived.
-pub fn fill_motion(cur: &mut MbMotion, list: usize, x: usize, y: usize, w: usize, h: usize, motion: BlockMotion) {
+pub fn fill_motion(
+    cur: &mut MbMotion,
+    list: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    motion: BlockMotion,
+) {
     let blocks = &mut cur[list];
     for by in y / 4..(y + h) / 4 {
         for bx in x / 4..(x + w) / 4 {
@@ -1335,10 +1371,20 @@ impl<'a> MbDequant<'a> {
     /// The tables for a macroblock of `kind` at `QP_Y = qp` in a slice with
     /// `chroma_offset` (the PPS chroma QP offsets); `None` when it is
     /// lossless.
-    pub fn for_mb(dq: &'a super::transform::Dequant, ctx: &SliceCtx, chroma_offset: [i32; 2], kind: MbKind, qp: i32) -> Option<Self> {
+    pub fn for_mb(
+        dq: &'a super::transform::Dequant,
+        ctx: &SliceCtx,
+        chroma_offset: [i32; 2],
+        kind: MbKind,
+        qp: i32,
+    ) -> Option<Self> {
         let bd_off = 6 * (ctx.bit_depth as i32 - 8);
         // The primed QPs the scaling uses.
-        let qps = [qp + bd_off, chroma_qp(qp, chroma_offset[0], bd_off) + bd_off, chroma_qp(qp, chroma_offset[1], bd_off) + bd_off];
+        let qps = [
+            qp + bd_off,
+            chroma_qp(qp, chroma_offset[0], bd_off) + bd_off,
+            chroma_qp(qp, chroma_offset[1], bd_off) + bd_off,
+        ];
         if ctx.transform_bypass && qps[0] == 0 {
             return None;
         }
@@ -1356,8 +1402,14 @@ impl<'a> MbDequant<'a> {
         for p in 0..planes {
             let q = qps[p];
             let list = p + ctx.scaling_plane;
-            q4[p] = (&dq.scale4[list + if inter { 3 } else { 0 }][(q % 6) as usize], (q / 6 + 2) as u32);
-            q8[p] = (&dq.scale8[2 * list + inter as usize][(q % 6) as usize], (q / 6) as u32);
+            q4[p] = (
+                &dq.scale4[list + if inter { 3 } else { 0 }][(q % 6) as usize],
+                (q / 6 + 2) as u32,
+            );
+            q8[p] = (
+                &dq.scale8[2 * list + inter as usize][(q % 6) as usize],
+                (q / 6) as u32,
+            );
         }
         Some(MbDequant { q4, q8 })
     }
@@ -1367,7 +1419,11 @@ impl<'a> MbDequant<'a> {
 /// so a malformed level cannot panic; a conforming stream stays in range).
 #[inline(always)]
 pub(crate) fn dequant_level(level: i32, table: i32, shift: u32) -> i32 {
-    (level.wrapping_mul(table).wrapping_shl(shift).wrapping_add(32)) >> 6
+    (level
+        .wrapping_mul(table)
+        .wrapping_shl(shift)
+        .wrapping_add(32))
+        >> 6
 }
 
 /// `H26X_TRACE_IPM`: trace syntax elements (macroblock starts, intra

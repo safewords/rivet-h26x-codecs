@@ -42,7 +42,8 @@ pub type FdctFn = fn(block: &mut [i16], log2: u32, bit_depth: u32);
 pub type Fdst4Fn = fn(block: &mut [i16], bit_depth: u32);
 /// Forward quantisation: coefficients in, levels out, returning the count
 /// of nonzero levels.
-pub type HevcQuantFn = fn(coeffs: &[i16], levels: &mut [i16], n: usize, scale: i32, qbits: u32, offset: i32) -> u32;
+pub type HevcQuantFn =
+    fn(coeffs: &[i16], levels: &mut [i16], n: usize, scale: i32, qbits: u32, offset: i32) -> u32;
 
 /// The H.265 encode-side kernel table.
 #[derive(Clone)]
@@ -64,7 +65,12 @@ impl HevcEncDsp {
     pub fn scalar() -> Self {
         HevcEncDsp {
             cpu: Cpu::SCALAR,
-            fdct: [fdct_scalar::<4>, fdct_scalar::<8>, fdct_scalar::<16>, fdct_scalar::<32>],
+            fdct: [
+                fdct_scalar::<4>,
+                fdct_scalar::<8>,
+                fdct_scalar::<16>,
+                fdct_scalar::<32>,
+            ],
             fdst4: fdst4_scalar,
             quant: quant_scalar,
             fskip: fskip_scalar,
@@ -156,7 +162,11 @@ pub(crate) fn fdct_scalar<const N: usize>(block: &mut [i16], log2: u32, bit_dept
         }
         fdct1(&row, N, &mut out);
         for x in 0..N {
-            let v = if s1 > 0 { (out[x] + (1 << (s1 - 1))) >> s1 } else { out[x] };
+            let v = if s1 > 0 {
+                (out[x] + (1 << (s1 - 1))) >> s1
+            } else {
+                out[x]
+            };
             tmp[y * N + x] = v.clamp(-32768, 32767) as i16;
         }
     }
@@ -173,7 +183,12 @@ pub(crate) fn fdct_scalar<const N: usize>(block: &mut [i16], log2: u32, bit_dept
 }
 
 /// The DST matrix of 8.6.4.2, read the way a forward transform reads it.
-pub(crate) const DST4: [[i32; 4]; 4] = [[29, 55, 74, 84], [74, 74, 0, -74], [84, -29, -74, 55], [55, -84, 74, -29]];
+pub(crate) const DST4: [[i32; 4]; 4] = [
+    [29, 55, 74, 84],
+    [74, 74, 0, -74],
+    [84, -29, -74, 55],
+    [55, -84, 74, -29],
+];
 
 /// The matrices laid out for the SIMD tiers.
 ///
@@ -355,7 +370,11 @@ pub(crate) fn fdst4_scalar(block: &mut [i16], bit_depth: u32) {
             for k in 0..4 {
                 s += DST4[j][k] * block[y * 4 + k] as i32;
             }
-            let v = if s1 > 0 { (s + (1 << (s1 - 1))) >> s1 } else { s };
+            let v = if s1 > 0 {
+                (s + (1 << (s1 - 1))) >> s1
+            } else {
+                s
+            };
             tmp[y * 4 + j] = v.clamp(-32768, 32767) as i16;
         }
     }
@@ -390,7 +409,14 @@ fn fskip_scalar(block: &mut [i16], log2: u32, bit_depth: u32) {
     }
 }
 
-pub(crate) fn quant_scalar(coeffs: &[i16], levels: &mut [i16], n: usize, scale: i32, qbits: u32, offset: i32) -> u32 {
+pub(crate) fn quant_scalar(
+    coeffs: &[i16],
+    levels: &mut [i16],
+    n: usize,
+    scale: i32,
+    qbits: u32,
+    offset: i32,
+) -> u32 {
     let mut nz = 0;
     for i in 0..n * n {
         let c = coeffs[i] as i32;
@@ -425,10 +451,14 @@ pub fn rdpcm_forward(block: &mut [i16], log2: u32, vertical: bool) {
 mod tests {
     use super::layouts::*;
     use super::*;
-    use crate::hevc::residual::{ScalingSource, rdpcm_residual, scale_coefficients, transform_skip_residual};
+    use crate::hevc::residual::{
+        ScalingSource, rdpcm_residual, scale_coefficients, transform_skip_residual,
+    };
 
     fn lcg(s: &mut u64) -> i32 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 33) & 0x1ff) as i32 - 255
     }
 
@@ -468,13 +498,25 @@ mod tests {
                     (HevcEncDsp::scalar().fdct[(log2 - 2) as usize])(&mut block, log2, bd);
                     let mut levels = vec![0i16; n * n];
                     quant_scalar(&block, &mut levels, n, scale, qb, off);
-                    scale_coefficients(&mut levels, log2, qp, bd, ScalingSource::Flat, false, n - 1, n - 1);
+                    scale_coefficients(
+                        &mut levels,
+                        log2,
+                        qp,
+                        bd,
+                        ScalingSource::Flat,
+                        false,
+                        n - 1,
+                        n - 1,
+                    );
                     (dsp.idct[(log2 - 2) as usize])(&mut levels, 20 - bd as i32, n - 1, n - 1);
                     for i in 0..n * n {
                         worst = worst.max((levels[i] as i32 - res[i] as i32).abs());
                     }
                 }
-                assert!(worst <= 8 * step + 16, "log2={log2} qp={qp} worst={worst} step={step}");
+                assert!(
+                    worst <= 8 * step + 16,
+                    "log2={log2} qp={qp} worst={worst} step={step}"
+                );
             }
         }
     }
@@ -562,13 +604,26 @@ mod tests {
     /// consistently wrong in both stages of every tier that reads it.
     #[test]
     fn pair_table_is_the_matrix() {
-        for &(n, t) in &[(4usize, &FP4[..]), (8, &FP8[..]), (16, &FP16[..]), (32, &FP32[..])] {
+        for &(n, t) in &[
+            (4usize, &FP4[..]),
+            (8, &FP8[..]),
+            (16, &FP16[..]),
+            (32, &FP32[..]),
+        ] {
             let step = 32 / n;
             assert_eq!(t.len(), n * n, "n={n}");
             for q in 0..n / 2 {
                 for j in 0..n {
-                    assert_eq!(t[q * 2 * n + 2 * j], TRANSFORM32[j * step][2 * q] as i16, "n={n} q={q} j={j}");
-                    assert_eq!(t[q * 2 * n + 2 * j + 1], TRANSFORM32[j * step][2 * q + 1] as i16, "n={n} q={q} j={j}");
+                    assert_eq!(
+                        t[q * 2 * n + 2 * j],
+                        TRANSFORM32[j * step][2 * q] as i16,
+                        "n={n} q={q} j={j}"
+                    );
+                    assert_eq!(
+                        t[q * 2 * n + 2 * j + 1],
+                        TRANSFORM32[j * step][2 * q + 1] as i16,
+                        "n={n} q={q} j={j}"
+                    );
                 }
             }
         }
@@ -583,12 +638,21 @@ mod tests {
     /// And the column table is its transpose, entry for entry.
     #[test]
     fn column_table_is_the_matrix_transposed() {
-        for &(n, t) in &[(4usize, &CT4[..]), (8, &CT8[..]), (16, &CT16[..]), (32, &CT32[..])] {
+        for &(n, t) in &[
+            (4usize, &CT4[..]),
+            (8, &CT8[..]),
+            (16, &CT16[..]),
+            (32, &CT32[..]),
+        ] {
             let step = 32 / n;
             assert_eq!(t.len(), n * n, "n={n}");
             for k in 0..n {
                 for j in 0..n {
-                    assert_eq!(t[k * n + j], TRANSFORM32[j * step][k] as i16, "n={n} k={k} j={j}");
+                    assert_eq!(
+                        t[k * n + j],
+                        TRANSFORM32[j * step][k] as i16,
+                        "n={n} k={k} j={j}"
+                    );
                 }
             }
         }
@@ -599,11 +663,20 @@ mod tests {
             }
         }
         // And the row-major copy is the matrix, entry for entry.
-        for &(n, t) in &[(4usize, &MT4[..]), (8, &MT8[..]), (16, &MT16[..]), (32, &MT32[..])] {
+        for &(n, t) in &[
+            (4usize, &MT4[..]),
+            (8, &MT8[..]),
+            (16, &MT16[..]),
+            (32, &MT32[..]),
+        ] {
             let step = 32 / n;
             for j in 0..n {
                 for k in 0..n {
-                    assert_eq!(t[j * n + k], TRANSFORM32[j * step][k] as i16, "n={n} j={j} k={k}");
+                    assert_eq!(
+                        t[j * n + k],
+                        TRANSFORM32[j * step][k] as i16,
+                        "n={n} j={j} k={k}"
+                    );
                 }
             }
         }
@@ -621,7 +694,10 @@ mod tests {
             let mut block = vec![64i16; n * n];
             (HevcEncDsp::scalar().fdct[(log2 - 2) as usize])(&mut block, log2, 8);
             assert!(block[0] != 0, "log2={log2} lost its DC");
-            assert!(block[1..].iter().all(|&v| v == 0), "log2={log2} is not DC-only");
+            assert!(
+                block[1..].iter().all(|&v| v == 0),
+                "log2={log2} is not DC-only"
+            );
         }
     }
 }

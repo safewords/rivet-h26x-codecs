@@ -31,12 +31,14 @@ use crate::dsp::distortion::DistortionDsp;
 use crate::dsp::h264::{H264Dsp, NO_DC};
 use crate::dsp::h264_enc::{H264EncDsp, Quant, qbits4, qbits8, quant_offset};
 use crate::encode::h264_syntax::Recon;
-use crate::sample::Sample;
 use crate::h264::cavlc::sub_block_counts_8x8_scan;
 use crate::h264::intra::{IntraAvail, predict_4x4, predict_8x8, predict_16x16, predict_chroma};
 use crate::h264::mb::dequant_level;
 use crate::h264::tables::BLK4X4_FROM_RASTER;
-use crate::h264::transform::{Dequant, chroma_dc_transform_420, chroma_dc_transform_422, luma_dc_transform};
+use crate::h264::transform::{
+    Dequant, chroma_dc_transform_420, chroma_dc_transform_422, luma_dc_transform,
+};
+use crate::sample::Sample;
 
 /// How a macroblock was coded, in the form an entropy coder needs.
 ///
@@ -362,8 +364,9 @@ pub(crate) fn code_block_8x8<S: Sample>(
     let mut residual = [0i16; 64];
     for y in 0..8 {
         for x in 0..8 {
-            residual[y * 8 + x] =
-                (src[y * src_stride + x].to_i32() - rec.data[off + y * rec.stride + x].to_i32()) as i16;
+            residual[y * 8 + x] = (src[y * src_stride + x].to_i32()
+                - rec.data[off + y * rec.stride + x].to_i32())
+                as i16;
         }
     }
     let mut coeffs = [0i32; 64];
@@ -375,7 +378,13 @@ pub(crate) fn code_block_8x8<S: Sample>(
     let qbits = qbits8(qp);
     let offset = quant_offset(qbits, intra);
     let mut levels = [0i16; 64];
-    let _ = (ctx.enc.quant8)(&coeffs, &mut levels, &ctx.quant.mf8[list8][(qp % 6) as usize], qbits, offset);
+    let _ = (ctx.enc.quant8)(
+        &coeffs,
+        &mut levels,
+        &ctx.quant.mf8[list8][(qp % 6) as usize],
+        qbits,
+        offset,
+    );
     let counts = sub_block_counts_8x8_scan(&levels, ctx.field);
     (levels, counts)
 }
@@ -413,7 +422,12 @@ pub(crate) fn reconstruct_8x8<S: Sample>(
 /// by8 + (sub >> 1))` in src/h264/cavlc.rs and src/h264/cabac_mb.rs).
 pub(crate) fn quad_rasters(blk8: usize) -> [usize; 4] {
     let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
-    [by8 * 4 + bx8, by8 * 4 + bx8 + 1, (by8 + 1) * 4 + bx8, (by8 + 1) * 4 + bx8 + 1]
+    [
+        by8 * 4 + bx8,
+        by8 * 4 + bx8 + 1,
+        (by8 + 1) * 4 + bx8,
+        (by8 + 1) * 4 + bx8 + 1,
+    ]
 }
 
 /// The prediction of an Intra_4x4 mode (8.3.1.1): the smaller of the left
@@ -428,11 +442,18 @@ fn predicted_mode(left: Option<u8>, top: Option<u8>) -> u8 {
 /// Turn a chosen mode into the flag and remainder the syntax carries.
 fn as_syntax(chosen: u8, predicted: u8) -> PredMode {
     if chosen == predicted {
-        PredMode { use_predicted: true, rem: 0 }
+        PredMode {
+            use_predicted: true,
+            rem: 0,
+        }
     } else {
         PredMode {
             use_predicted: false,
-            rem: if chosen < predicted { chosen } else { chosen - 1 },
+            rem: if chosen < predicted {
+                chosen
+            } else {
+                chosen - 1
+            },
         }
     }
 }
@@ -461,8 +482,9 @@ fn code_block_4x4<S: Sample>(
     let mut residual = [0i16; 16];
     for y in 0..4 {
         for x in 0..4 {
-            residual[y * 4 + x] =
-                (src[y * src_stride + x].to_i32() - rec.data[off + y * rec.stride + x].to_i32()) as i16;
+            residual[y * 4 + x] = (src[y * src_stride + x].to_i32()
+                - rec.data[off + y * rec.stride + x].to_i32())
+                as i16;
         }
     }
     let mut coeffs = [0i32; 16];
@@ -485,7 +507,15 @@ fn code_block_4x4<S: Sample>(
 
 /// Dequantise levels and add the inverse transform to the prediction
 /// already in `rec` — the decoder's own path, so the two cannot disagree.
-fn reconstruct_4x4<S: Sample>(ctx: &IntraCtx<S>, rec: &mut Recon<S>, off: usize, levels: &[i16; 16], list: usize, qp: i32, dc: Option<i32>) {
+fn reconstruct_4x4<S: Sample>(
+    ctx: &IntraCtx<S>,
+    rec: &mut Recon<S>,
+    off: usize,
+    levels: &[i16; 16],
+    list: usize,
+    qp: i32,
+    dc: Option<i32>,
+) {
     let m = (qp % 6) as usize;
     let scale = &ctx.dequant.scale4[list][m];
     let q6 = qp / 6;
@@ -498,7 +528,13 @@ fn reconstruct_4x4<S: Sample>(ctx: &IntraCtx<S>, rec: &mut Recon<S>, off: usize,
             (c + (1 << (3 - q6))) >> (4 - q6)
         };
     }
-    (ctx.dsp.residual4)(&mut rec.data[off..], rec.stride, &coefs, dc.unwrap_or(NO_DC), ctx.max);
+    (ctx.dsp.residual4)(
+        &mut rec.data[off..],
+        rec.stride,
+        &coefs,
+        dc.unwrap_or(NO_DC),
+        ctx.max,
+    );
 }
 
 /// Code one macroblock as `I_16x16` with the given prediction mode,
@@ -517,7 +553,8 @@ fn code_i16x16<S: Sample>(
     mb: MbAvail,
     out: &mut MbDecision,
 ) {
-    let (dc_levels, levels, nz) = code_i16x16_plane(ctx, rec, px, py, src, src_stride, mode, mb, 0, ctx.qp_prime);
+    let (dc_levels, levels, nz) =
+        code_i16x16_plane(ctx, rec, px, py, src, src_stride, mode, mb, 0, ctx.qp_prime);
     out.kind = MbKind::I16x16;
     out.intra16_mode = mode;
     out.luma = levels;
@@ -765,7 +802,16 @@ fn code_i8x8<S: Sample>(
         }
 
         let _ = predict_8x8(rec, boff, rec.stride, best.1, av, ctx.bit_depth);
-        let (lv, counts) = code_block_8x8(ctx, rec, boff, &src[soff..], src_stride, 0, ctx.qp_prime, true);
+        let (lv, counts) = code_block_8x8(
+            ctx,
+            rec,
+            boff,
+            &src[soff..],
+            src_stride,
+            0,
+            ctx.qp_prime,
+            true,
+        );
         reconstruct_8x8(ctx, rec, boff, &lv, 0, ctx.qp_prime);
         levels.as_flattened_mut()[blk8 * 64..blk8 * 64 + 64].copy_from_slice(&lv);
         for (sub, &r) in quad_rasters(blk8).iter().enumerate() {
@@ -842,7 +888,8 @@ fn code_i4x4<S: Sample>(
         // be scored before the next overwrites it.
         let mut src_blk = [S::default(); 16];
         for y in 0..4 {
-            src_blk[y * 4..y * 4 + 4].copy_from_slice(&src[soff + y * src_stride..soff + y * src_stride + 4]);
+            src_blk[y * 4..y * 4 + 4]
+                .copy_from_slice(&src[soff + y * src_stride..soff + y * src_stride + 4]);
         }
         let mut best = (u32::MAX, 2u8);
         for mode in 0..9u8 {
@@ -863,7 +910,16 @@ fn code_i4x4<S: Sample>(
 
         // Re-predict with the winner, then code and reconstruct.
         let _ = predict_4x4(rec, boff, rec.stride, best.1, av, ctx.bit_depth);
-        let (lv, n, _) = code_block_4x4(ctx, rec, boff, &src[soff..], src_stride, 0, ctx.qp_prime, true);
+        let (lv, n, _) = code_block_4x4(
+            ctx,
+            rec,
+            boff,
+            &src[soff..],
+            src_stride,
+            0,
+            ctx.qp_prime,
+            true,
+        );
         levels[raster] = lv;
         nz[raster] = n as u8;
         reconstruct_4x4(ctx, rec, boff, &lv, 0, ctx.qp_prime, None);
@@ -915,7 +971,16 @@ fn code_chroma<S: Sample>(
     for comp in 0..2 {
         let plane = &mut rec[comp + 1];
         let off = plane.offset(cx as isize, cy as isize);
-        let _ = predict_chroma(plane, off, plane.stride, mode, av, [mb.left; 4], ctx.bit_depth, h);
+        let _ = predict_chroma(
+            plane,
+            off,
+            plane.stride,
+            mode,
+            av,
+            [mb.left; 4],
+            ctx.bit_depth,
+            h,
+        );
 
         let qp = ctx.qpc_prime[comp];
         let list = 1 + comp; // Cb intra, Cr intra
@@ -929,8 +994,9 @@ fn code_chroma<S: Sample>(
             let mut residual = [0i16; 16];
             for y in 0..4 {
                 for x in 0..4 {
-                    residual[y * 4 + x] =
-                        (src[comp][soff + y * src_stride + x].to_i32() - plane.data[boff + y * plane.stride + x].to_i32()) as i16;
+                    residual[y * 4 + x] = (src[comp][soff + y * src_stride + x].to_i32()
+                        - plane.data[boff + y * plane.stride + x].to_i32())
+                        as i16;
                 }
             }
             let mut coeffs = [0i32; 16];
@@ -992,7 +1058,11 @@ fn code_chroma<S: Sample>(
             chroma_dc_transform_420(&mut d4, ctx.dequant.scale4[list][m][0], qp);
             dc_rec[..4].copy_from_slice(&d4);
         } else {
-            chroma_dc_transform_422(&mut dc_rec, ctx.dequant.scale4[list][((qp + 3) % 6) as usize][0], qp);
+            chroma_dc_transform_422(
+                &mut dc_rec,
+                ctx.dequant.scale4[list][((qp + 3) % 6) as usize][0],
+                qp,
+            );
         }
         for blk in 0..blocks {
             let (bx, by) = (blk % 2, blk / 2);
@@ -1008,7 +1078,13 @@ fn code_chroma<S: Sample>(
                     (c + (1 << (3 - q6))) >> (4 - q6)
                 };
             }
-            (ctx.dsp.residual4)(&mut plane.data[boff..], plane.stride, &coefs, dc_rec[blk], ctx.max);
+            (ctx.dsp.residual4)(
+                &mut plane.data[boff..],
+                plane.stride,
+                &coefs,
+                dc_rec[blk],
+                ctx.max,
+            );
         }
 
         any_ac |= nz.iter().any(|&n| n != 0);
@@ -1072,7 +1148,11 @@ fn placeholder_intra_cost(kind: MbKind, distortion: u64, lambda: f32) -> f32 {
 /// the 8x8 transform is on offer, SATD otherwise ([`satd_lambda`] says
 /// why neither is scaled to the depth).
 fn intra_lambda<S: Sample>(ctx: &IntraCtx<S>) -> f32 {
-    if ctx.t8x8 { ssd_lambda(ctx) } else { satd_lambda(ctx) }
+    if ctx.t8x8 {
+        ssd_lambda(ctx)
+    } else {
+        satd_lambda(ctx)
+    }
 }
 
 /// [`lambda`] at the picture's quantiser, for a cost paired with a SATD —
@@ -1128,7 +1208,12 @@ pub(crate) fn ssd_lambda<S: Sample>(ctx: &IntraCtx<S>) -> f32 {
 /// "everything not using the 8x8 transform is byte-identical" be checked
 /// rather than argued about. Unifying the two is a change of its own,
 /// with its own before-and-after numbers, and it should happen.
-fn intra_distortion<S: Sample>(ctx: &IntraCtx<S>, src: &[S], src_stride: usize, recon: &[S]) -> u64 {
+fn intra_distortion<S: Sample>(
+    ctx: &IntraCtx<S>,
+    src: &[S],
+    src_stride: usize,
+    recon: &[S],
+) -> u64 {
     if ctx.t8x8 {
         (ctx.dist.ssd)(src, src_stride, recon, 16, 16, 16)
     } else {
@@ -1179,7 +1264,18 @@ pub fn code_macroblock<S: Sample>(
     top_modes: &[Option<u8>; 4],
 ) -> (MbDecision, [u8; 16]) {
     code_macroblock_modes8(
-        ctx, rec, mb_x, mb_y, src_luma, luma_stride, src_chroma, chroma_stride, mb, left_modes, top_modes, left_modes,
+        ctx,
+        rec,
+        mb_x,
+        mb_y,
+        src_luma,
+        luma_stride,
+        src_chroma,
+        chroma_stride,
+        mb,
+        left_modes,
+        top_modes,
+        left_modes,
     )
 }
 
@@ -1261,7 +1357,12 @@ pub(crate) fn code_macroblock_modes8<S: Sample>(
     // I_16x16: its prediction reads only neighbours outside the
     // macroblock, which neither I_NxN candidate touched, so the modes can
     // be scored without undoing anything.
-    let av = IntraAvail { top: mb.top, left: mb.left, top_left: mb.top_left, top_right: false };
+    let av = IntraAvail {
+        top: mb.top,
+        left: mb.left,
+        top_left: mb.top_left,
+        top_right: false,
+    };
     let ystride = rec[0].stride;
     let mut best = (f32::MAX, 2u8);
     for mode in 0..4u8 {
@@ -1285,7 +1386,17 @@ pub(crate) fn code_macroblock_modes8<S: Sample>(
     let chosen_nxn;
     if best.0 < cost_4x4 && best.0 < cost_8x8 {
         let mut i16out = MbDecision::default();
-        code_i16x16(ctx, &mut rec[0], px, py, &src_luma[soff..], luma_stride, best.1, mb, &mut i16out);
+        code_i16x16(
+            ctx,
+            &mut rec[0],
+            px,
+            py,
+            &src_luma[soff..],
+            luma_stride,
+            best.1,
+            mb,
+            &mut i16out,
+        );
         i16out.luma_pred = out.luma_pred;
         out = i16out;
         chosen_nxn = [2u8; 16];
@@ -1409,7 +1520,18 @@ pub(crate) fn code_macroblock_modes8<S: Sample>(
                 let plane = &mut rec[comp + 1];
                 let off = plane.offset(cx as isize, cy as isize);
                 let cstride = plane.stride;
-                if predict_chroma(plane, off, cstride, mode, av, [mb.left; 4], ctx.bit_depth, ch).is_err() {
+                if predict_chroma(
+                    plane,
+                    off,
+                    cstride,
+                    mode,
+                    av,
+                    [mb.left; 4],
+                    ctx.bit_depth,
+                    ch,
+                )
+                .is_err()
+                {
                     ok = false;
                     break;
                 }
@@ -1444,7 +1566,10 @@ mod tests {
     use crate::h264::sps::ScalingLists;
 
     fn flat() -> ScalingLists {
-        ScalingLists { list4x4: [[16; 16]; 6], list8x8: [[16; 64]; 6] }
+        ScalingLists {
+            list4x4: [[16; 16]; 6],
+            list8x8: [[16; 64]; 6],
+        }
     }
 
     /// Every 4x4 block's top-right neighbour must already be
@@ -1453,7 +1578,12 @@ mod tests {
     /// exists to encode.
     #[test]
     fn top_right_availability_follows_the_scan_order() {
-        let all = MbAvail { left: true, top: true, top_left: true, top_right: true };
+        let all = MbAvail {
+            left: true,
+            top: true,
+            top_left: true,
+            top_right: true,
+        };
         // Inside the macroblock, a block on the right edge below the top
         // row never has one.
         for by in 1..4 {
@@ -1465,7 +1595,10 @@ mod tests {
             assert!(top_right_ready(bx, 0, all));
         }
         assert!(top_right_ready(3, 0, all));
-        let no_tr = MbAvail { top_right: false, ..all };
+        let no_tr = MbAvail {
+            top_right: false,
+            ..all
+        };
         assert!(!top_right_ready(3, 0, no_tr));
         // And every "ready" block really does come later in decode order.
         for by in 1..4 {
@@ -1498,8 +1631,8 @@ mod tests {
     /// right — and every plane and prediction kind the encoder codes 8x8.
     #[test]
     fn the_8x8_reconstruction_scales_as_the_reader_will() {
-        use crate::h264::mb::{MbDequant, MbKind as DecKind, SliceCtx, chroma_qp, dequant_level};
         use crate::h264::SliceType;
+        use crate::h264::mb::{MbDequant, MbKind as DecKind, SliceCtx, chroma_qp, dequant_level};
         let dsp = H264Dsp::<u8>::new(Cpu::SCALAR);
         let enc = H264EncDsp::SCALAR;
         let dist = DistortionDsp::<u8>::scalar();
@@ -1529,7 +1662,9 @@ mod tests {
         };
         let mut seed = 0x51ded00du64;
         let mut lcg = move || -> i16 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 40) & 0x3f) as i16 - 32
         };
         for qp in 0..52i32 {
@@ -1578,7 +1713,11 @@ mod tests {
                 reconstruct_8x8(&ctx, &mut rec, off, &levels, list8, plane_qp);
 
                 // The reader's own answer, built the way a parser gets it.
-                let kind = if inter { DecKind::Inter16x16 } else { DecKind::I8x8 };
+                let kind = if inter {
+                    DecKind::Inter16x16
+                } else {
+                    DecKind::I8x8
+                };
                 let mbdq = MbDequant::for_mb(&dq, &sctx, [0, 0], kind, qp).expect("not lossless");
                 let (table, shift) = mbdq.q8[plane];
                 let mut coefs = [0i32; 64];
@@ -1652,7 +1791,12 @@ mod tests {
         }
         let src = vec![128u8; 32 * 32];
         let mut out = MbDecision::default();
-        let mb = MbAvail { left: true, top: true, top_left: true, top_right: true };
+        let mb = MbAvail {
+            left: true,
+            top: true,
+            top_left: true,
+            top_right: true,
+        };
         code_i16x16(&ctx, &mut rec, 0, 0, &src, 32, 2, mb, &mut out);
         assert_eq!(out.cbp_luma, 0, "a flat block should code no luma");
         assert!(out.luma_dc.iter().all(|&v| v == 0));

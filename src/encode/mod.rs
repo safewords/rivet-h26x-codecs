@@ -76,6 +76,7 @@
 use crate::Result;
 use crate::picture::ChromaFormat;
 
+pub(crate) mod aq;
 pub mod gop;
 pub mod h264;
 pub mod h264_cabac_mb;
@@ -89,13 +90,12 @@ pub mod h265;
 pub mod h265_deblock;
 pub mod h265_intra;
 pub mod h265_me;
-pub(crate) mod rc;
-pub(crate) mod aq;
 pub(crate) mod h265_sao;
+pub mod h265_syntax;
 pub(crate) mod h265_wp;
 pub mod hrd;
-pub mod h265_syntax;
 pub mod level;
+pub(crate) mod rc;
 
 /// How lossy, and by what means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -618,13 +618,19 @@ impl Config {
             return Err(crate::Error::unsupported("encode: zero-sized picture"));
         }
         if !(8..=14).contains(&self.bit_depth) {
-            return Err(crate::Error::unsupported("encode: bit depth outside 8..=14"));
+            return Err(crate::Error::unsupported(
+                "encode: bit depth outside 8..=14",
+            ));
         }
         if self.max_refs == 0 {
-            return Err(crate::Error::unsupported("encode: max_refs must be at least 1"));
+            return Err(crate::Error::unsupported(
+                "encode: max_refs must be at least 1",
+            ));
         }
         if self.fps_den == 0 {
-            return Err(crate::Error::unsupported("encode: fps_den is zero (the frame rate is fps / fps_den)"));
+            return Err(crate::Error::unsupported(
+                "encode: fps_den is zero (the frame rate is fps / fps_den)",
+            ));
         }
         if self.frame_rate().0 > i32::MAX as u32 {
             return Err(crate::Error::unsupported(
@@ -632,7 +638,9 @@ impl Config {
             ));
         }
         if !(self.aq_strength >= 0.0) || self.aq_strength > 4.0 {
-            return Err(crate::Error::unsupported("encode: aq_strength outside 0.0..=4.0"));
+            return Err(crate::Error::unsupported(
+                "encode: aq_strength outside 0.0..=4.0",
+            ));
         }
         if self.lookahead > 0 && !matches!(self.rate, RateControl::Bitrate { .. }) {
             return Err(crate::Error::unsupported(
@@ -645,10 +653,14 @@ impl Config {
             ));
         }
         if self.lookahead > 250 {
-            return Err(crate::Error::unsupported("encode: lookahead above 250 pictures"));
+            return Err(crate::Error::unsupported(
+                "encode: lookahead above 250 pictures",
+            ));
         }
         if self.chroma_loc.is_some_and(|t| t > 5) {
-            return Err(crate::Error::unsupported("encode: chroma_loc outside 0..=5 (H.273 chroma_sample_loc_type)"));
+            return Err(crate::Error::unsupported(
+                "encode: chroma_loc outside 0..=5 (H.273 chroma_sample_loc_type)",
+            ));
         }
         if self.chroma_loc.is_some() && self.chroma != ChromaFormat::Yuv420 {
             return Err(crate::Error::unsupported(
@@ -675,7 +687,11 @@ impl Config {
 /// 10-bit stream carrying a 12-bit value would not fail, it would wrap
 /// somewhere in the reconstruction and desync. At 8 bits every byte is
 /// in range and nothing is checked.
-pub(crate) fn unpack_samples<S: crate::sample::Sample>(bytes: &[u8], bit_depth: u32, codec: &str) -> Result<Vec<S>> {
+pub(crate) fn unpack_samples<S: crate::sample::Sample>(
+    bytes: &[u8],
+    bit_depth: u32,
+    codec: &str,
+) -> Result<Vec<S>> {
     if S::BYTES == 1 {
         return Ok(bytes.iter().map(|&b| S::from_i32(i32::from(b))).collect());
     }

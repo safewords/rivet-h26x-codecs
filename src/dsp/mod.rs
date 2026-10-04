@@ -33,30 +33,20 @@ pub mod u16_sweep;
 // `h264_neon`'s `round5`) still needs its block. And on wasm32 rustc treats
 // every call to a `#[target_feature]` function as safe, so the `simd128`
 // modules never had redundant blocks to allow.
-#[cfg(target_arch = "x86_64")]
-pub(crate) mod x86_compat;
-#[cfg(target_arch = "x86_64")]
-pub(crate) mod h264_x86_128;
-#[cfg(target_arch = "x86_64")]
-pub(crate) mod h264_x86_128_u16;
-#[cfg(target_arch = "x86_64")]
-pub(crate) mod h264_avx2;
-#[cfg(target_arch = "x86_64")]
-pub(crate) mod h264_avx2_u16;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod distortion_neon;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod distortion_neon_u16;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod distortion_x86;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod distortion_x86_u16;
 #[cfg(target_arch = "x86_64")]
+pub(crate) mod h264_avx2;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod h264_avx2_u16;
+#[cfg(target_arch = "x86_64")]
 pub(crate) mod h264_enc_x86;
-#[cfg(target_arch = "x86_64")]
-pub(crate) mod hevc_enc_x86;
-#[cfg(target_arch = "x86_64")]
-pub(crate) mod sao_x86;
-#[cfg(target_arch = "aarch64")]
-pub(crate) mod distortion_neon;
-#[cfg(target_arch = "aarch64")]
-pub(crate) mod distortion_neon_u16;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod h264_neon;
 #[cfg(target_arch = "aarch64")]
@@ -66,35 +56,45 @@ pub(crate) mod h264_wasm128;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod h264_wasm128_u16;
 #[cfg(target_arch = "x86_64")]
-pub(crate) mod hevc_x86_128;
+pub(crate) mod h264_x86_128;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod h264_x86_128_u16;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod hevc_avx2;
 #[cfg(target_arch = "x86_64")]
-pub(crate) mod hevc_avx512;
-#[cfg(target_arch = "aarch64")]
-pub(crate) mod hevc_neon;
-#[cfg(target_arch = "x86_64")]
 pub(crate) mod hevc_avx2_u8;
 #[cfg(target_arch = "x86_64")]
+pub(crate) mod hevc_avx512;
+#[cfg(target_arch = "x86_64")]
 pub(crate) mod hevc_avx512_u8;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod hevc_enc_x86;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod hevc_neon;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod hevc_neon_u8;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod hevc_wasm128;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod hevc_x86_128;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod neon_dotprod;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod sao_x86;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod x86_compat;
 // The encode-only tiers beyond x86: the same kernels as `distortion_x86`
 // and `hevc_enc_x86`, on NEON and on wasm `simd128`.
-#[cfg(target_arch = "aarch64")]
-pub(crate) mod h264_enc_neon;
-#[cfg(target_arch = "aarch64")]
-pub(crate) mod hevc_enc_neon;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod distortion_wasm128;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod distortion_wasm128_u16;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod h264_enc_neon;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod h264_enc_wasm128;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod hevc_enc_neon;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod hevc_enc_wasm128;
 
@@ -193,17 +193,34 @@ impl Cpu {
                 && std::is_x86_feature_detected!("avx512bw")
                 && std::is_x86_feature_detected!("avx512vl");
             let avx512vnni = avx512 && std::is_x86_feature_detected!("avx512vnni");
-            return Self { avx2, avx512, avx512vnni, avx, sse41, ssse3, sse2, ..Self::SCALAR };
+            return Self {
+                avx2,
+                avx512,
+                avx512vnni,
+                avx,
+                sse41,
+                ssse3,
+                sse2,
+                ..Self::SCALAR
+            };
         }
         #[cfg(target_arch = "wasm32")]
         {
-            return Self { simd128: cfg!(target_feature = "simd128"), ..Self::SCALAR };
+            return Self {
+                simd128: cfg!(target_feature = "simd128"),
+                ..Self::SCALAR
+            };
         }
         #[cfg(target_arch = "aarch64")]
         {
             let dotprod = std::arch::is_aarch64_feature_detected!("dotprod");
             let i8mm = std::arch::is_aarch64_feature_detected!("i8mm");
-            return Self { neon: true, dotprod, i8mm, ..Self::SCALAR };
+            return Self {
+                neon: true,
+                dotprod,
+                i8mm,
+                ..Self::SCALAR
+            };
         }
         #[allow(unreachable_code)]
         Self::SCALAR

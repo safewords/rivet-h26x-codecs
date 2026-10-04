@@ -176,10 +176,18 @@ fn j_narrow(w: &[v128; 6], maxv: v128) -> v128 {
     let c23 = i32x4_splat(pair(20, 20));
     let c45 = i32x4_splat(pair(-5, 1));
     let round = i32x4_splat(512 + 32 * 16384);
-    let half = |a: v128, b: v128, c: v128| i32x4_add(i32x4_add(i32x4_dot_i16x8(a, c01), i32x4_dot_i16x8(b, c23)), i32x4_add(i32x4_dot_i16x8(c, c45), round));
+    let half = |a: v128, b: v128, c: v128| {
+        i32x4_add(
+            i32x4_add(i32x4_dot_i16x8(a, c01), i32x4_dot_i16x8(b, c23)),
+            i32x4_add(i32x4_dot_i16x8(c, c45), round),
+        )
+    };
     let lo = half(zip_lo16(r0, r1), zip_lo16(r2, r3), zip_lo16(r4, r5));
     let hi = half(zip_hi16(r0, r1), zip_hi16(r2, r3), zip_hi16(r4, r5));
-    clip(i16x8_narrow_i32x4(i32x4_shr(lo, 10), i32x4_shr(hi, 10)), maxv)
+    clip(
+        i16x8_narrow_i32x4(i32x4_shr(lo, 10), i32x4_shr(hi, 10)),
+        maxv,
+    )
 }
 
 /// A six-tap as two vectors of four i32.
@@ -196,8 +204,14 @@ unsafe fn tap6_wide(p: *const u16, step: usize) -> Wide {
         let v = i16x8_add(a, f);
         let k = i32x4_splat(pair(20, -5));
         [
-            i32x4_add(i32x4_dot_i16x8(zip_lo16(t, u), k), u32x4_extend_low_u16x8(v)),
-            i32x4_add(i32x4_dot_i16x8(zip_hi16(t, u), k), u32x4_extend_high_u16x8(v)),
+            i32x4_add(
+                i32x4_dot_i16x8(zip_lo16(t, u), k),
+                u32x4_extend_low_u16x8(v),
+            ),
+            i32x4_add(
+                i32x4_dot_i16x8(zip_hi16(t, u), k),
+                u32x4_extend_high_u16x8(v),
+            ),
         ]
     }
 }
@@ -205,7 +219,13 @@ unsafe fn tap6_wide(p: *const u16, step: usize) -> Wide {
 #[inline]
 fn half_wide(v: Wide, maxv: v128) -> v128 {
     let r = i32x4_splat(16);
-    clip(i16x8_narrow_i32x4(i32x4_shr(i32x4_add(v[0], r), 5), i32x4_shr(i32x4_add(v[1], r), 5)), maxv)
+    clip(
+        i16x8_narrow_i32x4(
+            i32x4_shr(i32x4_add(v[0], r), 5),
+            i32x4_shr(i32x4_add(v[1], r), 5),
+        ),
+        maxv,
+    )
 }
 
 #[inline]
@@ -221,11 +241,26 @@ fn tap6_i32(r0: v128, r1: v128, r2: v128, r3: v128, r4: v128, r5: v128) -> v128 
 #[inline]
 fn j_wide(w: &[Wide; 6], maxv: v128) -> v128 {
     let round = i32x4_splat(512);
-    let half = |k: usize| i32x4_shr(i32x4_add(tap6_i32(w[0][k], w[1][k], w[2][k], w[3][k], w[4][k], w[5][k]), round), 10);
+    let half = |k: usize| {
+        i32x4_shr(
+            i32x4_add(
+                tap6_i32(w[0][k], w[1][k], w[2][k], w[3][k], w[4][k], w[5][k]),
+                round,
+            ),
+            10,
+        )
+    };
     clip(i16x8_narrow_i32x4(half(0), half(1)), maxv)
 }
 
-fn qpel<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+fn qpel<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     let need = (h + 5 - 1) * stride + 21;
     if src.len() < need || dst.len() < h * PRED_STRIDE || w > 16 || !(1..=DEEPEST).contains(&max) {
         return (H264Dsp::<u16>::SCALAR.qpel[YF * 4 + XF])(dst, src, stride, w, h, max);
@@ -239,7 +274,14 @@ fn qpel<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: 
     }
 }
 
-unsafe fn qpel_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_narrow<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     if matches!((XF, YF), (2, 2) | (2, 1) | (2, 3) | (1, 2) | (3, 2)) {
         return unsafe { qpel_centre_narrow::<XF, YF>(dst, src, stride, w, h, max) };
     }
@@ -274,17 +316,33 @@ unsafe fn qpel_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[
     }
 }
 
-unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     unsafe {
         let s = src.as_ptr();
         let maxv = i16x8_splat(max as i16);
         let row = |r: usize, x: usize| tap6_narrow(s.add(r * stride + x), 1);
         for c in 0..w.div_ceil(8) {
             let x = c * 8;
-            let mut win = [row(0, x), row(1, x), row(2, x), row(3, x), row(4, x), row(5, x)];
+            let mut win = [
+                row(0, x),
+                row(1, x),
+                row(2, x),
+                row(3, x),
+                row(4, x),
+                row(5, x),
+            ];
             for y in 0..h {
                 let j = j_narrow(&win, maxv);
-                let hh = |col: usize| half_narrow(tap6_narrow(s.add(y * stride + col + x), stride), maxv);
+                let hh = |col: usize| {
+                    half_narrow(tap6_narrow(s.add(y * stride + col + x), stride), maxv)
+                };
                 let v = match (XF, YF) {
                     (2, 2) => j,
                     (2, 1) => u16x8_avgr(half_narrow(win[2], maxv), j),
@@ -302,7 +360,14 @@ unsafe fn qpel_centre_narrow<const XF: usize, const YF: usize>(dst: &mut [u16], 
     }
 }
 
-unsafe fn qpel_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_wide<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     if matches!((XF, YF), (2, 2) | (2, 1) | (2, 3) | (1, 2) | (3, 2)) {
         return unsafe { qpel_centre_wide::<XF, YF>(dst, src, stride, w, h, max) };
     }
@@ -337,17 +402,32 @@ unsafe fn qpel_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u1
     }
 }
 
-unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, max: i32) {
+unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(
+    dst: &mut [u16],
+    src: &[u16],
+    stride: usize,
+    w: usize,
+    h: usize,
+    max: i32,
+) {
     unsafe {
         let s = src.as_ptr();
         let maxv = i16x8_splat(max as i16);
         let row = |r: usize, x: usize| tap6_wide(s.add(r * stride + x), 1);
         for c in 0..w.div_ceil(8) {
             let x = c * 8;
-            let mut win = [row(0, x), row(1, x), row(2, x), row(3, x), row(4, x), row(5, x)];
+            let mut win = [
+                row(0, x),
+                row(1, x),
+                row(2, x),
+                row(3, x),
+                row(4, x),
+                row(5, x),
+            ];
             for y in 0..h {
                 let j = j_wide(&win, maxv);
-                let hh = |col: usize| half_wide(tap6_wide(s.add(y * stride + col + x), stride), maxv);
+                let hh =
+                    |col: usize| half_wide(tap6_wide(s.add(y * stride + col + x), stride), maxv);
                 let v = match (XF, YF) {
                     (2, 2) => j,
                     (2, 1) => u16x8_avgr(half_wide(win[2], maxv), j),
@@ -370,12 +450,27 @@ unsafe fn qpel_centre_wide<const XF: usize, const YF: usize>(dst: &mut [u16], sr
 // ----------------------------------------------------------------------
 
 fn chroma(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
-    if src.len() < h * stride + 9 || dst.len() < h * PRED_STRIDE || w > 8 || !(0..8).contains(&xf) || !(0..8).contains(&yf) {
+    if src.len() < h * stride + 9
+        || dst.len() < h * PRED_STRIDE
+        || w > 8
+        || !(0..8).contains(&xf)
+        || !(0..8).contains(&yf)
+    {
         return (H264Dsp::<u16>::SCALAR.chroma)(dst, src, stride, w, h, xf, yf);
     }
     unsafe {
-        let (wa, wb, wc, wd) = (((8 - xf) * (8 - yf)) as i16, (xf * (8 - yf)) as i16, ((8 - xf) * yf) as i16, (xf * yf) as i16);
-        let mul = [i16x8_splat(wa), i16x8_splat(wb), i16x8_splat(wc), i16x8_splat(wd)];
+        let (wa, wb, wc, wd) = (
+            ((8 - xf) * (8 - yf)) as i16,
+            (xf * (8 - yf)) as i16,
+            ((8 - xf) * yf) as i16,
+            (xf * yf) as i16,
+        );
+        let mul = [
+            i16x8_splat(wa),
+            i16x8_splat(wb),
+            i16x8_splat(wc),
+            i16x8_splat(wd),
+        ];
         let k0 = i32x4_splat(pair(wa, wb));
         let k1 = i32x4_splat(pair(wc, wd));
         let s = src.as_ptr();
@@ -385,15 +480,35 @@ fn chroma(dst: &mut [u16], src: &[u16], stride: usize, w: usize, h: usize, xf: i
             let (a, b, c, d) = (load8(r0), load8(r0.add(1)), load8(r1), load8(r1.add(1)));
             let seen = v128_or(v128_or(a, b), v128_or(c, d));
             let v = if !v128_any_true(v128_and(seen, i16x8_splat(!1023))) {
-                let sum = i16x8_add(i16x8_add(i16x8_mul(a, mul[0]), i16x8_mul(b, mul[1])), i16x8_add(i16x8_mul(c, mul[2]), i16x8_mul(d, mul[3])));
+                let sum = i16x8_add(
+                    i16x8_add(i16x8_mul(a, mul[0]), i16x8_mul(b, mul[1])),
+                    i16x8_add(i16x8_mul(c, mul[2]), i16x8_mul(d, mul[3])),
+                );
                 u16x8_shr(i16x8_add(sum, i16x8_splat(32)), 6)
             } else if !v128_any_true(v128_and(seen, i16x8_splat(i16::MIN))) {
                 let r = i32x4_splat(32);
-                let lo = i32x4_add(i32x4_dot_i16x8(zip_lo16(a, b), k0), i32x4_dot_i16x8(zip_lo16(c, d), k1));
-                let hi = i32x4_add(i32x4_dot_i16x8(zip_hi16(a, b), k0), i32x4_dot_i16x8(zip_hi16(c, d), k1));
-                i16x8_narrow_i32x4(i32x4_shr(i32x4_add(lo, r), 6), i32x4_shr(i32x4_add(hi, r), 6))
+                let lo = i32x4_add(
+                    i32x4_dot_i16x8(zip_lo16(a, b), k0),
+                    i32x4_dot_i16x8(zip_lo16(c, d), k1),
+                );
+                let hi = i32x4_add(
+                    i32x4_dot_i16x8(zip_hi16(a, b), k0),
+                    i32x4_dot_i16x8(zip_hi16(c, d), k1),
+                );
+                i16x8_narrow_i32x4(
+                    i32x4_shr(i32x4_add(lo, r), 6),
+                    i32x4_shr(i32x4_add(hi, r), 6),
+                )
             } else {
-                (H264Dsp::<u16>::SCALAR.chroma)(&mut dst[y * PRED_STRIDE..], &src[y * stride..], stride, w, 1, xf, yf);
+                (H264Dsp::<u16>::SCALAR.chroma)(
+                    &mut dst[y * PRED_STRIDE..],
+                    &src[y * stride..],
+                    stride,
+                    w,
+                    1,
+                    xf,
+                    yf,
+                );
                 continue;
             };
             store8(dst.as_mut_ptr().add(y * PRED_STRIDE), v);
@@ -413,7 +528,10 @@ fn copy(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize) {
                     store8(d.add(8), load8(s.add(8)));
                 }
                 8 => store8(d, load8(s)),
-                4 => std::ptr::write_unaligned(d as *mut u64, std::ptr::read_unaligned(s as *const u64)),
+                4 => std::ptr::write_unaligned(
+                    d as *mut u64,
+                    std::ptr::read_unaligned(s as *const u64),
+                ),
                 _ => std::ptr::copy_nonoverlapping(s, d, w),
             }
         }
@@ -421,13 +539,26 @@ fn copy(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize) {
 }
 
 fn avg(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h: usize) {
-    assert!(h == 0 || ((h - 1) * stride + w <= dst.len() && h * PRED_STRIDE <= a.len().min(b.len()) && w <= 16));
+    assert!(
+        h == 0
+            || ((h - 1) * stride + w <= dst.len()
+                && h * PRED_STRIDE <= a.len().min(b.len())
+                && w <= 16)
+    );
     unsafe {
         for y in 0..h {
-            let (pa, pb, d) = (a.as_ptr().add(y * PRED_STRIDE), b.as_ptr().add(y * PRED_STRIDE), dst.as_mut_ptr().add(y * stride));
+            let (pa, pb, d) = (
+                a.as_ptr().add(y * PRED_STRIDE),
+                b.as_ptr().add(y * PRED_STRIDE),
+                dst.as_mut_ptr().add(y * stride),
+            );
             store_n(d, u16x8_avgr(load8(pa), load8(pb)), w.min(8));
             if w > 8 {
-                store_n(d.add(8), u16x8_avgr(load8(pa.add(8)), load8(pb.add(8))), w - 8);
+                store_n(
+                    d.add(8),
+                    u16x8_avgr(load8(pa.add(8)), load8(pb.add(8))),
+                    w - 8,
+                );
             }
         }
     }
@@ -440,7 +571,17 @@ fn combine_fits(dst: &[u16], stride: usize, src: &[u16], w: usize, h: usize) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_uni(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, max: i32) {
+fn weighted_uni(
+    dst: &mut [u16],
+    stride: usize,
+    src: &[u16],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    wt: i32,
+    o: i32,
+    max: i32,
+) {
     if !weights_in_range(log_wd, [wt, 0], [o, 0], max) || !combine_fits(dst, stride, src, w, h) {
         return (H264Dsp::<u16>::SCALAR.weighted_uni)(dst, stride, src, w, h, log_wd, wt, o, max);
     }
@@ -452,7 +593,13 @@ fn weighted_uni(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize,
         let maxv = i16x8_splat(max as i16);
         let scale = |s: v128| {
             let q = |p: v128| i32x4_add(i32x4_shr(i32x4_add(p, round), sh), ov);
-            clip(i16x8_narrow_i32x4(q(i32x4_extmul_low_i16x8(s, wv)), q(i32x4_extmul_high_i16x8(s, wv))), maxv)
+            clip(
+                i16x8_narrow_i32x4(
+                    q(i32x4_extmul_low_i16x8(s, wv)),
+                    q(i32x4_extmul_high_i16x8(s, wv)),
+                ),
+                maxv,
+            )
         };
         for y in 0..h {
             let p = src.as_ptr().add(y * PRED_STRIDE);
@@ -466,9 +613,27 @@ fn weighted_uni(dst: &mut [u16], stride: usize, src: &[u16], w: usize, h: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, max: i32) {
-    if !weights_in_range(log_wd, [w0, w1], [o0, o1], max) || !combine_fits(dst, stride, a, w, h) || !combine_fits(dst, stride, b, w, h) {
-        return (H264Dsp::<u16>::SCALAR.weighted_bi)(dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1, max);
+fn weighted_bi(
+    dst: &mut [u16],
+    stride: usize,
+    a: &[u16],
+    b: &[u16],
+    w: usize,
+    h: usize,
+    log_wd: i32,
+    w0: i32,
+    w1: i32,
+    o0: i32,
+    o1: i32,
+    max: i32,
+) {
+    if !weights_in_range(log_wd, [w0, w1], [o0, o1], max)
+        || !combine_fits(dst, stride, a, w, h)
+        || !combine_fits(dst, stride, b, w, h)
+    {
+        return (H264Dsp::<u16>::SCALAR.weighted_bi)(
+            dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1, max,
+        );
     }
     unsafe {
         let wv = i32x4_splat(pair(w0 as i16, w1 as i16));
@@ -477,11 +642,19 @@ fn weighted_bi(dst: &mut [u16], stride: usize, a: &[u16], b: &[u16], w: usize, h
         let sh = (log_wd + 1) as u32;
         let maxv = i16x8_splat(max as i16);
         let eight = |va: v128, vb: v128| {
-            let q = |v: v128| i32x4_add(i32x4_shr(i32x4_add(i32x4_dot_i16x8(v, wv), round), sh), off);
-            clip(i16x8_narrow_i32x4(q(zip_lo16(va, vb)), q(zip_hi16(va, vb))), maxv)
+            let q =
+                |v: v128| i32x4_add(i32x4_shr(i32x4_add(i32x4_dot_i16x8(v, wv), round), sh), off);
+            clip(
+                i16x8_narrow_i32x4(q(zip_lo16(va, vb)), q(zip_hi16(va, vb))),
+                maxv,
+            )
         };
         for y in 0..h {
-            let (pa, pb, d) = (a.as_ptr().add(y * PRED_STRIDE), b.as_ptr().add(y * PRED_STRIDE), dst.as_mut_ptr().add(y * stride));
+            let (pa, pb, d) = (
+                a.as_ptr().add(y * PRED_STRIDE),
+                b.as_ptr().add(y * PRED_STRIDE),
+                dst.as_mut_ptr().add(y * stride),
+            );
             store_n(d, eight(load8(pa), load8(pb)), w.min(8));
             if w > 8 {
                 store_n(d.add(8), eight(load8(pa.add(8)), load8(pb.add(8))), w - 8);
@@ -509,12 +682,21 @@ fn luma_filter_normal(v: &mut LumaLines, alpha: i32, beta: i32, tc0v: v128, maxv
     let beta = i16x8_splat(beta as i16);
     let zero = i16x8_splat(0);
     let bs_on = i16x8_gt(tc0v, i16x8_splat(-1));
-    let mask = v128_and(v128_and(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), v128_and(diff_lt(q1, q0, beta), bs_on));
+    let mask = v128_and(
+        v128_and(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+        v128_and(diff_lt(q1, q0, beta), bs_on),
+    );
     let ap = diff_lt(p2, p0, beta);
     let aq = diff_lt(q2, q0, beta);
     let tc = i16x8_sub(i16x8_sub(tc0v, ap), aq);
     // ((q0 − p0) + ((p1 − q1 + 4) >> 2)) >> 1: the standard's delta, inside i16.
-    let d = i16x8_shr(i16x8_add(i16x8_sub(q0, p0), i16x8_shr(i16x8_add(i16x8_sub(p1, q1), i16x8_splat(4)), 2)), 1);
+    let d = i16x8_shr(
+        i16x8_add(
+            i16x8_sub(q0, p0),
+            i16x8_shr(i16x8_add(i16x8_sub(p1, q1), i16x8_splat(4)), 2),
+        ),
+        1,
+    );
     let d = i16x8_min(i16x8_max(d, i16x8_sub(zero, tc)), tc);
     let np0 = i16x8_add(p0, d);
     let nq0 = i16x8_sub(q0, d);
@@ -537,7 +719,10 @@ fn luma_filter_intra(v: &mut LumaLines, alpha: i32, beta: i32) {
     let [p3, p2, p1, p0, q0, q1, q2, q3] = *v;
     let alphav = i16x8_splat(alpha as i16);
     let beta = i16x8_splat(beta as i16);
-    let mask = v128_and(v128_and(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)), diff_lt(q1, q0, beta));
+    let mask = v128_and(
+        v128_and(diff_lt(p0, q0, alphav), diff_lt(p1, p0, beta)),
+        diff_lt(q1, q0, beta),
+    );
     let strong = diff_lt(p0, q0, i16x8_splat(((alpha >> 2) + 2) as i16));
     let ap = v128_and(diff_lt(p2, p0, beta), strong);
     let aq = v128_and(diff_lt(q2, q0, beta), strong);
@@ -633,7 +818,15 @@ unsafe fn store_transposed_8x8(data: *mut u16, stride: usize, v: &LumaLines) {
     }
 }
 
-fn deblock_luma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_luma_v(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -652,7 +845,15 @@ fn deblock_luma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta:
     }
 }
 
-fn deblock_luma8_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_luma8_v(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -668,7 +869,14 @@ fn deblock_luma8_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta
     }
 }
 
-fn deblock_luma8_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_luma8_v_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
         return (H264Dsp::<u16>::SCALAR.deblock_luma8_v_intra)(data, off, stride, alpha, beta, max);
     }
@@ -681,7 +889,14 @@ fn deblock_luma8_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32
     }
 }
 
-fn deblock_luma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_luma_v_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
         return (H264Dsp::<u16>::SCALAR.deblock_luma_v_intra)(data, off, stride, alpha, beta, max);
     }
@@ -696,7 +911,15 @@ fn deblock_luma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32,
     }
 }
 
-fn deblock_luma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_luma_h(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -720,7 +943,14 @@ fn deblock_luma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta:
     }
 }
 
-fn deblock_luma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_luma_h_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
         return (H264Dsp::<u16>::SCALAR.deblock_luma_h_intra)(data, off, stride, alpha, beta, max);
     }
@@ -748,9 +978,18 @@ fn chroma_filter_normal(v: &mut ChromaLines, alpha: i32, beta: i32, tc0v: v128, 
     let beta = i16x8_splat(beta as i16);
     let zero = i16x8_splat(0);
     let bs_on = i16x8_gt(tc0v, i16x8_splat(-1));
-    let mask = v128_and(v128_and(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), v128_and(diff_lt(q1, q0, beta), bs_on));
+    let mask = v128_and(
+        v128_and(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+        v128_and(diff_lt(q1, q0, beta), bs_on),
+    );
     let tc = i16x8_add(tc0v, i16x8_splat(1));
-    let d = i16x8_shr(i16x8_add(i16x8_sub(q0, p0), i16x8_shr(i16x8_add(i16x8_sub(p1, q1), i16x8_splat(4)), 2)), 1);
+    let d = i16x8_shr(
+        i16x8_add(
+            i16x8_sub(q0, p0),
+            i16x8_shr(i16x8_add(i16x8_sub(p1, q1), i16x8_splat(4)), 2),
+        ),
+        1,
+    );
     let d = i16x8_min(i16x8_max(d, i16x8_sub(zero, tc)), tc);
     v[1] = sel(p0, clip(i16x8_add(p0, d), maxv), mask);
     v[2] = sel(q0, clip(i16x8_sub(q0, d), maxv), mask);
@@ -761,10 +1000,19 @@ fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
     let [p1, p0, q0, q1] = *v;
     let alpha = i16x8_splat(alpha as i16);
     let beta = i16x8_splat(beta as i16);
-    let mask = v128_and(v128_and(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)), diff_lt(q1, q0, beta));
+    let mask = v128_and(
+        v128_and(diff_lt(p0, q0, alpha), diff_lt(p1, p0, beta)),
+        diff_lt(q1, q0, beta),
+    );
     let two = i16x8_splat(2);
-    let np0 = u16x8_shr(i16x8_add(i16x8_add(i16x8_shl(p1, 1), p0), i16x8_add(q1, two)), 2);
-    let nq0 = u16x8_shr(i16x8_add(i16x8_add(i16x8_shl(q1, 1), q0), i16x8_add(p1, two)), 2);
+    let np0 = u16x8_shr(
+        i16x8_add(i16x8_add(i16x8_shl(p1, 1), p0), i16x8_add(q1, two)),
+        2,
+    );
+    let nq0 = u16x8_shr(
+        i16x8_add(i16x8_add(i16x8_shl(q1, 1), q0), i16x8_add(p1, two)),
+        2,
+    );
     v[1] = sel(p0, np0, mask);
     v[2] = sel(q0, nq0, mask);
 }
@@ -781,7 +1029,12 @@ unsafe fn load_transposed_8x4(data: *const u16, stride: usize) -> ChromaLines {
         let b1 = zip_hi32(a0, a1);
         let b2 = zip_lo32(a2, a3);
         let b3 = zip_hi32(a2, a3);
-        [zip_lo64(b0, b2), zip_hi64(b0, b2), zip_lo64(b1, b3), zip_hi64(b1, b3)]
+        [
+            zip_lo64(b0, b2),
+            zip_hi64(b0, b2),
+            zip_lo64(b1, b3),
+            zip_hi64(b1, b3),
+        ]
     }
 }
 
@@ -797,7 +1050,15 @@ unsafe fn store_transposed_8x4(data: *mut u16, stride: usize, v: &ChromaLines) {
     }
 }
 
-fn deblock_chroma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_chroma_v(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -813,9 +1074,18 @@ fn deblock_chroma_v(data: &mut [u16], off: usize, stride: usize, alpha: i32, bet
     }
 }
 
-fn deblock_chroma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_chroma_v_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
-        return (H264Dsp::<u16>::SCALAR.deblock_chroma_v_intra)(data, off, stride, alpha, beta, max);
+        return (H264Dsp::<u16>::SCALAR.deblock_chroma_v_intra)(
+            data, off, stride, alpha, beta, max,
+        );
     }
     assert!(off >= 2 && off + 7 * stride + 2 <= data.len());
     unsafe {
@@ -826,7 +1096,15 @@ fn deblock_chroma_v_intra(data: &mut [u16], off: usize, stride: usize, alpha: i3
     }
 }
 
-fn deblock_chroma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], max: i32) {
+fn deblock_chroma_h(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i16; 4],
+    max: i32,
+) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -836,21 +1114,40 @@ fn deblock_chroma_h(data: &mut [u16], off: usize, stride: usize, alpha: i32, bet
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe {
         let d = data.as_mut_ptr().add(off);
-        let mut v: ChromaLines = [load8(d.sub(2 * stride)), load8(d.sub(stride)), load8(d), load8(d.add(stride))];
+        let mut v: ChromaLines = [
+            load8(d.sub(2 * stride)),
+            load8(d.sub(stride)),
+            load8(d),
+            load8(d.add(stride)),
+        ];
         chroma_filter_normal(&mut v, alpha, beta, tc0_pairs(tc0), i16x8_splat(max as i16));
         store8(d.sub(stride), v[1]);
         store8(d, v[2]);
     }
 }
 
-fn deblock_chroma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i32, beta: i32, max: i32) {
+fn deblock_chroma_h_intra(
+    data: &mut [u16],
+    off: usize,
+    stride: usize,
+    alpha: i32,
+    beta: i32,
+    max: i32,
+) {
     if !strong_in_range(alpha, beta, max) {
-        return (H264Dsp::<u16>::SCALAR.deblock_chroma_h_intra)(data, off, stride, alpha, beta, max);
+        return (H264Dsp::<u16>::SCALAR.deblock_chroma_h_intra)(
+            data, off, stride, alpha, beta, max,
+        );
     }
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe {
         let d = data.as_mut_ptr().add(off);
-        let mut v: ChromaLines = [load8(d.sub(2 * stride)), load8(d.sub(stride)), load8(d), load8(d.add(stride))];
+        let mut v: ChromaLines = [
+            load8(d.sub(2 * stride)),
+            load8(d.sub(stride)),
+            load8(d),
+            load8(d.add(stride)),
+        ];
         chroma_filter_intra(&mut v, alpha, beta);
         store8(d.sub(stride), v[1]);
         store8(d, v[2]);
@@ -865,7 +1162,10 @@ fn deblock_chroma_h_intra(data: &mut [u16], off: usize, stride: usize, alpha: i3
 unsafe fn add8(dst: *mut u16, lo: v128, hi: v128, maxv: v128) {
     unsafe {
         let r = i32x4_splat(32);
-        let v = i16x8_narrow_i32x4(i32x4_shr(i32x4_add(lo, r), 6), i32x4_shr(i32x4_add(hi, r), 6));
+        let v = i16x8_narrow_i32x4(
+            i32x4_shr(i32x4_add(lo, r), 6),
+            i32x4_shr(i32x4_add(hi, r), 6),
+        );
         store8(dst, clip(i16x8_add_sat(load8(dst), v), maxv));
     }
 }
@@ -885,7 +1185,12 @@ fn transpose4(r: [v128; 4]) -> [v128; 4] {
     let t1 = zip_lo32(r[2], r[3]);
     let t2 = zip_hi32(r[0], r[1]);
     let t3 = zip_hi32(r[2], r[3]);
-    [zip_lo64(t0, t1), zip_hi64(t0, t1), zip_lo64(t2, t3), zip_hi64(t2, t3)]
+    [
+        zip_lo64(t0, t1),
+        zip_hi64(t0, t1),
+        zip_lo64(t2, t3),
+        zip_hi64(t2, t3),
+    ]
 }
 
 #[inline]
@@ -896,7 +1201,12 @@ unsafe fn idct4_rows(dst: *mut u16, stride: usize, rows: [v128; 4], maxv: v128) 
         let e1 = i32x4_sub(c0, c2);
         let e2 = i32x4_sub(i32x4_shr(c1, 1), c3);
         let e3 = i32x4_add(c1, i32x4_shr(c3, 1));
-        let [r0, r1, r2, r3] = transpose4([i32x4_add(e0, e3), i32x4_add(e1, e2), i32x4_sub(e1, e2), i32x4_sub(e0, e3)]);
+        let [r0, r1, r2, r3] = transpose4([
+            i32x4_add(e0, e3),
+            i32x4_add(e1, e2),
+            i32x4_sub(e1, e2),
+            i32x4_sub(e0, e3),
+        ]);
         let g0 = i32x4_add(r0, r2);
         let g1 = i32x4_sub(r0, r2);
         let g2 = i32x4_sub(i32x4_shr(r1, 1), r3);
@@ -930,7 +1240,16 @@ fn idct8_pass(d: &[v128; 8]) -> [v128; 8] {
     let b7 = sub(a7, sh2(a1));
     let b3 = add(a3, sh2(a5));
     let b5 = sub(sh2(a3), a5);
-    [add(b0, b7), add(b2, b5), add(b4, b3), add(b6, b1), sub(b6, b1), sub(b4, b3), sub(b2, b5), sub(b0, b7)]
+    [
+        add(b0, b7),
+        add(b2, b5),
+        add(b4, b3),
+        add(b6, b1),
+        sub(b6, b1),
+        sub(b4, b3),
+        sub(b2, b5),
+        sub(b0, b7),
+    ]
 }
 
 unsafe fn idct8_rows(dst: *mut u16, stride: usize, rows: &[[v128; 2]; 8], maxv: v128) {
@@ -973,8 +1292,15 @@ fn idct4_add(dst: &mut [u16], stride: usize, coeffs: &[i16; 16], max: i32) {
     }
     assert!(3 * stride + 4 <= dst.len());
     unsafe {
-        let ld = |i: usize| i32x4_extend_low_i16x8(v128_load64_zero(coeffs.as_ptr().add(4 * i) as *const u64));
-        idct4_rows(dst.as_mut_ptr(), stride, [ld(0), ld(1), ld(2), ld(3)], i16x8_splat(max as i16));
+        let ld = |i: usize| {
+            i32x4_extend_low_i16x8(v128_load64_zero(coeffs.as_ptr().add(4 * i) as *const u64))
+        };
+        idct4_rows(
+            dst.as_mut_ptr(),
+            stride,
+            [ld(0), ld(1), ld(2), ld(3)],
+            i16x8_splat(max as i16),
+        );
     }
 }
 
@@ -1034,9 +1360,17 @@ fn residual4(dst: &mut [u16], stride: usize, coefs: &[i32; 16], dc: i32, max: i3
             c[0] = dc;
         }
         let p = c.as_ptr();
-        let rows = [v128_load(p as *const v128), v128_load(p.add(4) as *const v128), v128_load(p.add(8) as *const v128), v128_load(p.add(12) as *const v128)];
+        let rows = [
+            v128_load(p as *const v128),
+            v128_load(p.add(4) as *const v128),
+            v128_load(p.add(8) as *const v128),
+            v128_load(p.add(12) as *const v128),
+        ];
         // `v128_andnot(a, b)` is `a & !b`.
-        let ac = v128_or(v128_or(v128_andnot(rows[0], i32x4(-1, 0, 0, 0)), rows[1]), v128_or(rows[2], rows[3]));
+        let ac = v128_or(
+            v128_or(v128_andnot(rows[0], i32x4(-1, 0, 0, 0)), rows[1]),
+            v128_or(rows[2], rows[3]),
+        );
         if !v128_any_true(ac) {
             if c[0] != 0 {
                 dc_add_impl(dst.as_mut_ptr(), stride, c[0], 4, max);
@@ -1054,7 +1388,12 @@ fn residual8(dst: &mut [u16], stride: usize, coefs: &[i32; 64], max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe {
         let p = coefs.as_ptr();
-        let rows: [[v128; 2]; 8] = std::array::from_fn(|i| [v128_load(p.add(8 * i) as *const v128), v128_load(p.add(8 * i + 4) as *const v128)]);
+        let rows: [[v128; 2]; 8] = std::array::from_fn(|i| {
+            [
+                v128_load(p.add(8 * i) as *const v128),
+                v128_load(p.add(8 * i + 4) as *const v128),
+            ]
+        });
         let mut ac = v128_or(v128_andnot(rows[0][0], i32x4(-1, 0, 0, 0)), rows[0][1]);
         for r in &rows[1..] {
             ac = v128_or(ac, v128_or(r[0], r[1]));
