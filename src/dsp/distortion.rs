@@ -466,3 +466,30 @@ mod tests {
         assert_eq!(satd_scalar(&a, 64, &b, 64, 64, 64), 256 * ((16 * 1023 + 1) >> 1));
     }
 }
+#[cfg(test)]
+mod wp_bench {
+    use super::*;
+
+    /// ms per 1080p 8-bit plane, the scalar references against the host's
+    /// table. `cargo test --release wp_kernel_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing, not a check"]
+    fn wp_kernel_bench() {
+        let (w, h) = (1920usize, 1080usize);
+        let a: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
+        let b: Vec<u8> = (0..w * h).map(|i| (i * 13 % 247) as u8).collect();
+        for (name, d) in [("scalar", DistortionDsp::<u8>::scalar()), ("host", DistortionDsp::<u8>::new(Cpu::detect()))] {
+            let t = std::time::Instant::now();
+            for _ in 0..10 {
+                std::hint::black_box((d.wp_moments)(&a, w, &b, w, w, h));
+            }
+            let m = t.elapsed().as_secs_f64() * 100.0;
+            let t = std::time::Instant::now();
+            for _ in 0..10 {
+                std::hint::black_box((d.weighted_sad)(&a, w, &b, w, w, h, 70, 6, 3, 255));
+            }
+            let s = t.elapsed().as_secs_f64() * 100.0;
+            eprintln!("{name}: moments {m:.3} ms, weighted_sad {s:.3} ms (1080p plane)");
+        }
+    }
+}
