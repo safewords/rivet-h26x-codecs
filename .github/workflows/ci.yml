@@ -36,6 +36,14 @@ jobs:
         run: cargo test --release
         env:
           H26X_REQUIRE_DOTPROD: ${{ matrix.require == 'dotprod' && '1' || '' }}
+      - name: Tests on the scalar reference
+        # The kernel tests compare every rung with the scalar reference
+        # explicitly; this runs the decoders and encoders themselves with
+        # the SIMD tables off (H26X_NO_SIMD), so the scalar paths decode
+        # the vendored streams to their recorded hashes too.
+        run: cargo test --release
+        env:
+          H26X_NO_SIMD: "1"
 
   msrv:
     name: MSRV (1.99)
