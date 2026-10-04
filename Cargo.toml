@@ -30,5 +30,5 @@ default = []
 # harness, so this is the only way to check that the decoder decodes there
 # rather than merely compiles.
 [[example]]
-name = "wasm_probe"
+name = "h26x_wasm_probe"
 crate-type = ["cdylib"]

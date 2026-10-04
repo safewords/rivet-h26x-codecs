@@ -14,7 +14,7 @@
 //!   by the pairwise add), i32 one tile a vector otherwise.
 //!
 //! One rung, compiled only with `+simd128`; the sweep that checks it
-//! (`super::u16_sweep`) runs inside the module, from `examples/wasm_probe.rs`.
+//! (`super::u16_sweep`) runs inside the module, from `examples/h26x_wasm_probe.rs`.
 
 #![cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 

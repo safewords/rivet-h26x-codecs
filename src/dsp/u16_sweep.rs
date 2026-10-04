@@ -13,7 +13,7 @@
 //!
 //! One sweep serves every architecture: the x86 rungs' unit tests, the NEON
 //! tests the arm64 CI runners execute, and the wasm probe
-//! (`examples/wasm_probe.rs`), which has no test harness to run a
+//! (`examples/h26x_wasm_probe.rs`), which has no test harness to run a
 //! `#[cfg(test)]` module in. That is why this module is public — the probe is
 //! a separate crate — and why it is hidden from the documentation: it is a
 //! test, not an interface.

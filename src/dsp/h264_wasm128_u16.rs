@@ -11,7 +11,7 @@
 //!
 //! One rung, compiled only with `+simd128`. `wasm32-unknown-unknown` has no
 //! test harness, so the sweeps that check this tier (`super::u16_sweep`) run
-//! inside the module: `examples/wasm_probe.rs` calls them and
+//! inside the module: `examples/h26x_wasm_probe.rs` calls them and
 //! `tools/wasm.sh` drives it.
 
 #![cfg(all(target_arch = "wasm32", target_feature = "simd128"))]

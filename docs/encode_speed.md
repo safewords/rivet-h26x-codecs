@@ -364,7 +364,7 @@ three tiers cannot disagree with the reference about a coefficient.
 ### wasm, verified inside the module (`tools/wasm.sh`, node 22)
 
 `cargo test` does not run on wasm32, so the x86 modules' randomised sweeps
-were exported from `examples/wasm_probe` (`h26x_enc_dsp_check`) and run
+were exported from `examples/h26x_wasm_probe` (`h26x_enc_dsp_check`) and run
 inside both builds, and an encode → decode round trip (`h26x_encode`)
 hashes bitstream, decoded pictures and the encoder's reconstruction
 inside the module. What a run prints:

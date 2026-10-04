@@ -52,12 +52,12 @@ build() { # build <rustflags> <dest>
   # "no such file", which is a worse message about a different problem.
   local log="$TMP/build.log"
   if ! RUSTFLAGS="$1" cargo build --release --target wasm32-unknown-unknown \
-       --example wasm_probe --target-dir "$TMP/target" > "$log" 2>&1; then
+       --example h26x_wasm_probe --target-dir "$TMP/target" > "$log" 2>&1; then
     echo "wasm.sh: build failed ($2)"
     tail -20 "$log" >&2
     exit 1
   fi
-  cp "$TMP/target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm" "$2"
+  cp "$TMP/target/wasm32-unknown-unknown/release/examples/h26x_wasm_probe.wasm" "$2"
 }
 
 echo "== building =="

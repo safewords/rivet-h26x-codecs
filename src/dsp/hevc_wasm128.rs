@@ -92,7 +92,7 @@
 //!
 //! Verification: `wasm32-unknown-unknown` has no test harness, so the
 //! bit-exactness sweep that would be a `#[cfg(test)]` module in the x86
-//! files lives where it can run — `examples/wasm_probe.rs` exports
+//! files lives where it can run — `examples/h26x_wasm_probe.rs` exports
 //! `h26x_hevc_dsp_check`, a randomized comparison of every entry of both
 //! tables — the u16 one at bit depths 10 and 12 — against the scalar
 //! reference over all the block shapes the dispatch serves, driven inside

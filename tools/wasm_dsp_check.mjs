@@ -1,5 +1,5 @@
 // wasm_dsp_check.mjs <module.wasm> — run the randomized HEVC kernel sweep
-// inside the module (`h26x_hevc_dsp_check` in examples/wasm_probe.rs) and
+// inside the module (`h26x_hevc_dsp_check` in examples/h26x_wasm_probe.rs) and
 // print "<rung>: OK" or the number of comparisons that disagreed.
 //
 // This is the wasm stand-in for the `#[cfg(test)]` modules the x86 kernel
