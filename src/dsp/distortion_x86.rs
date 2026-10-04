@@ -393,12 +393,154 @@ pub(crate) mod avx {
 pub(crate) mod avx2 {
     use std::arch::x86_64::*;
 
-    use crate::dsp::distortion::DistortionDsp;
+    use crate::dsp::distortion::{DistortionDsp, WpMoments};
 
     pub(crate) fn install(d: &mut DistortionDsp<u8>) {
         d.sad = sad;
         d.satd = satd;
         d.ssd = ssd;
+        d.wp_moments = wp_moments;
+        d.weighted_sad = weighted_sad;
+    }
+
+    // ------------------------------------------------------------------
+    // Weighted-prediction fit: moments and weighted SAD (8-bit)
+    // ------------------------------------------------------------------
+
+    /// Four u64 lanes summed.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn hsum_u64(v: __m256i) -> u64 {
+        let s = _mm_add_epi64(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+        (_mm_cvtsi128_si64(s) as u64).wrapping_add(_mm_extract_epi64::<1>(s) as u64)
+    }
+
+    /// Eight i32 lanes, each non-negative, widened and added into four
+    /// u64 lanes.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn widen_add(acc: __m256i, v: __m256i) -> __m256i {
+        let z = _mm256_setzero_si256();
+        _mm256_add_epi64(acc, _mm256_add_epi64(_mm256_unpacklo_epi32(v, z), _mm256_unpackhi_epi32(v, z)))
+    }
+
+    pub(crate) fn wp_moments(cur: &[u8], cur_stride: usize, refp: &[u8], ref_stride: usize, w: usize, h: usize) -> WpMoments {
+        if w == 0 || h == 0 {
+            return WpMoments::default();
+        }
+        assert!(cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w, "region out of range");
+        // SAFETY: `install` only installs this for a CPU with AVX2, and
+        // every row's loads are inside the `w` samples checked above.
+        unsafe { wp_moments_impl(cur.as_ptr(), cur_stride, refp.as_ptr(), ref_stride, w, h) }
+    }
+
+    /// 32 samples a step: `psadbw` against zero sums `r` and `c`, against
+    /// each other the SAD; `pmaddwd` of the zero-extended words gives
+    /// `r * r` and `r * c` in pairs (each pair at most 2 * 255^2). Those
+    /// i32 lanes are widened into u64 once a row: a row of up to 2^14
+    /// samples puts at most 2^9 pairs, under 2^26, in a lane.
+    #[target_feature(enable = "avx2")]
+    unsafe fn wp_moments_impl(cur: *const u8, cur_stride: usize, refp: *const u8, ref_stride: usize, w: usize, h: usize) -> WpMoments {
+        unsafe {
+            let z = _mm256_setzero_si256();
+            let (mut sr, mut sc, mut sad, mut srr, mut src) = (z, z, z, z, z);
+            let mut m = WpMoments::default();
+            let wide = if w <= 1 << 14 { w & !31 } else { 0 };
+            for y in 0..h {
+                let (c, r) = (cur.add(y * cur_stride), refp.add(y * ref_stride));
+                let (mut rr, mut rc) = (z, z);
+                let mut x = 0;
+                while x < wide {
+                    let vc = _mm256_loadu_si256(c.add(x) as *const __m256i);
+                    let vr = _mm256_loadu_si256(r.add(x) as *const __m256i);
+                    sr = _mm256_add_epi64(sr, _mm256_sad_epu8(vr, z));
+                    sc = _mm256_add_epi64(sc, _mm256_sad_epu8(vc, z));
+                    sad = _mm256_add_epi64(sad, _mm256_sad_epu8(vr, vc));
+                    let (rl, rh) = (_mm256_unpacklo_epi8(vr, z), _mm256_unpackhi_epi8(vr, z));
+                    let (cl, ch) = (_mm256_unpacklo_epi8(vc, z), _mm256_unpackhi_epi8(vc, z));
+                    rr = _mm256_add_epi32(rr, _mm256_add_epi32(_mm256_madd_epi16(rl, rl), _mm256_madd_epi16(rh, rh)));
+                    rc = _mm256_add_epi32(rc, _mm256_add_epi32(_mm256_madd_epi16(rl, cl), _mm256_madd_epi16(rh, ch)));
+                    x += 32;
+                }
+                srr = widen_add(srr, rr);
+                src = widen_add(src, rc);
+                while x < w {
+                    let (r, c) = (u64::from(*r.add(x)), u64::from(*c.add(x)));
+                    m.sr += r;
+                    m.sc += c;
+                    m.srr += r * r;
+                    m.src += r * c;
+                    m.sad += r.abs_diff(c);
+                    x += 1;
+                }
+            }
+            m.sr += hsum_u64(sr);
+            m.sc += hsum_u64(sc);
+            m.sad += hsum_u64(sad);
+            m.srr += hsum_u64(srr);
+            m.src += hsum_u64(src);
+            m
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn weighted_sad(cur: &[u8], cur_stride: usize, refp: &[u8], ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32, max: i32) -> u64 {
+        if w == 0 || h == 0 {
+            return 0;
+        }
+        assert!(cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w, "region out of range");
+        // The word pairs below hold the weight and the rounding term as
+        // i16, and the clip assumes an 8-bit ceiling; anything else (no
+        // caller passes it) takes the reference.
+        if !(-32768..=32767).contains(&weight) || shift > 14 || max != 255 {
+            return crate::dsp::distortion::weighted_sad_scalar(cur, cur_stride, refp, ref_stride, w, h, weight, shift, offset, max);
+        }
+        // SAFETY: AVX2 as above; the loads stay inside the checked rows.
+        unsafe { weighted_sad_impl(cur.as_ptr(), cur_stride, refp.as_ptr(), ref_stride, w, h, weight, shift, offset) }
+    }
+
+    /// 16 samples a step: the reference words interleaved with ones, so one
+    /// `pmaddwd` against `(weight, round)` is `r * weight + round` in i32;
+    /// then the arithmetic shift, the offset, the clip to 0..=255 and the
+    /// absolute difference, all in i32 as the reference has them. The sums
+    /// (at most 255 a sample) are widened into u64 once a row.
+    #[allow(clippy::too_many_arguments)]
+    #[target_feature(enable = "avx2")]
+    unsafe fn weighted_sad_impl(cur: *const u8, cur_stride: usize, refp: *const u8, ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32) -> u64 {
+        unsafe {
+            let round = if shift >= 1 { 1i32 << (shift - 1) } else { 0 };
+            let wr = _mm256_set1_epi32((weight & 0xffff) | (round << 16));
+            let ones = _mm256_set1_epi16(1);
+            let sh = _mm_cvtsi32_si128(shift as i32);
+            let off = _mm256_set1_epi32(offset);
+            let (lo, hi) = (_mm256_setzero_si256(), _mm256_set1_epi32(255));
+            let mut acc = _mm256_setzero_si256();
+            let mut total = 0u64;
+            let wide = if w <= 1 << 20 { w & !15 } else { 0 };
+            let predict = |r: __m256i| _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(_mm256_sra_epi32(_mm256_madd_epi16(r, wr), sh), off), lo), hi);
+            for y in 0..h {
+                let (c, r) = (cur.add(y * cur_stride), refp.add(y * ref_stride));
+                let mut row = _mm256_setzero_si256();
+                let mut x = 0;
+                while x < wide {
+                    // Sixteen samples as words, in the lane order
+                    // `cvtepu8` leaves them: 0-7 low, 8-15 high.
+                    let vr = _mm256_cvtepu8_epi16(_mm_loadu_si128(r.add(x) as *const __m128i));
+                    let vc = _mm256_cvtepu8_epi16(_mm_loadu_si128(c.add(x) as *const __m128i));
+                    let (pa, pb) = (predict(_mm256_unpacklo_epi16(vr, ones)), predict(_mm256_unpackhi_epi16(vr, ones)));
+                    let (ca, cb) = (_mm256_unpacklo_epi16(vc, lo), _mm256_unpackhi_epi16(vc, lo));
+                    row = _mm256_add_epi32(row, _mm256_add_epi32(_mm256_abs_epi32(_mm256_sub_epi32(pa, ca)), _mm256_abs_epi32(_mm256_sub_epi32(pb, cb))));
+                    x += 16;
+                }
+                acc = widen_add(acc, row);
+                while x < w {
+                    let p = ((i32::from(*r.add(x)) * weight + round) >> shift) + offset;
+                    total += u64::from(p.clamp(0, 255).abs_diff(i32::from(*c.add(x))));
+                    x += 1;
+                }
+            }
+            total + hsum_u64(acc)
+        }
     }
 
     /// Sixteen bytes at `p`, zero-extended to sixteen i16.
