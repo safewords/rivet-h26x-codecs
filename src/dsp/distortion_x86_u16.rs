@@ -554,7 +554,7 @@ pub(crate) mod avx2 {
     }
 
     fn sad(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u32 {
-        if w % 16 != 0 || h == 0 {
+        if !w.is_multiple_of(16) || h == 0 {
             return super::avx::sad(a, a_stride, b, b_stride, w, h);
         }
         assert!(
@@ -597,7 +597,7 @@ pub(crate) mod avx2 {
     }
 
     fn ssd(a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) -> u64 {
-        if w % 16 != 0 || h == 0 {
+        if !w.is_multiple_of(16) || h == 0 {
             return super::avx::ssd(a, a_stride, b, b_stride, w, h);
         }
         assert!(

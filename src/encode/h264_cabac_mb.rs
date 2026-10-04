@@ -383,7 +383,6 @@ pub fn write_intra_picture_cabac<S: Sample>(
         });
         e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
     });
-    drop(e);
     w.align_zero();
     fmbs
 }
@@ -486,7 +485,6 @@ pub fn write_p_picture_cabac<S: Sample>(
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
         },
     );
-    drop(e);
     w.align_zero();
     fmbs
 }
@@ -596,7 +594,6 @@ pub fn write_b_picture_cabac<S: Sample>(
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
         },
     );
-    drop(e);
     w.align_zero();
     fmbs
 }
@@ -1058,7 +1055,6 @@ pub fn write_skip_picture_cabac(w: &mut BitWriter, g: &Geometry, qp: u8, is_b: b
         st.prev_qp_delta_nonzero = false;
         e.encode_terminate((idx + 1 == total) as u32); // end_of_slice_flag
     }
-    drop(e);
     w.align_zero();
 }
 

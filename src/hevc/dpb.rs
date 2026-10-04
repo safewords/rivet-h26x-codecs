@@ -133,14 +133,14 @@ impl<S: Sample> PendingOutput<S> {
     pub fn into_picture(self, pool: &crate::picture::OutputPool) -> (Picture, bool) {
         let f = self.frame.wait_and_get();
         let mut ok = true;
-        if let Some(h) = self.frame.hash.lock().unwrap().take() {
-            if let Err(msg) = super::hash::verify(f, &h) {
-                eprintln!(
-                    "h26x: picture poc={} decode_index={}: {msg}",
-                    self.frame.poc, self.decode_index
-                );
-                ok = false;
-            }
+        if let Some(h) = self.frame.hash.lock().unwrap().take()
+            && let Err(msg) = super::hash::verify(f, &h)
+        {
+            eprintln!(
+                "h26x: picture poc={} decode_index={}: {msg}",
+                self.frame.poc, self.decode_index
+            );
+            ok = false;
         }
         (
             f.to_picture(self.crop, self.frame.poc, self.decode_index, pool),

@@ -3793,7 +3793,7 @@ mod tests {
                     // used-with-a-vector; intra when both unused.
                     let mut used_any = false;
                     for l in 0..2 {
-                        if lcg(&mut seed) % 3 != 0 {
+                        if !lcg(&mut seed).is_multiple_of(3) {
                             let mv = Mv::new(
                                 (lcg(&mut seed) % 33) as i16 - 16,
                                 (lcg(&mut seed) % 33) as i16 - 16,

@@ -359,7 +359,7 @@ impl Cpb {
     /// forgiving start; a smaller one is legal and only makes conformance
     /// harder.
     pub fn initial_removal_delay_90k(&self) -> u32 {
-        ((self.size * 90_000) / self.bit_rate).min(((1u64 << DELAY_LENGTH) - 1) as u64) as u32
+        ((self.size * 90_000) / self.bit_rate).min((1u64 << DELAY_LENGTH) - 1) as u32
     }
 }
 

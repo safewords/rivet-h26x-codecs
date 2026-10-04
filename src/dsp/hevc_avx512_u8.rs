@@ -95,7 +95,7 @@ pub(super) unsafe fn store_i16(dst: *mut i16, v: __m512i, n: usize) {
         if n >= 32 {
             _mm512_storeu_si512(dst as *mut __m512i, v);
         } else {
-            _mm512_mask_storeu_epi16(dst as *mut i16, mask32(n), v);
+            _mm512_mask_storeu_epi16(dst, mask32(n), v);
         }
     }
 }

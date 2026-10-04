@@ -141,19 +141,20 @@ impl<'a, S: Sample> SliceRefs<'a, S> {
         if let Some(t) = self.explicit {
             return explicit_weighting(t, self.bit_depth, r0, r1, field_mb);
         }
-        if self.implicit.is_some() {
-            if r0 >= 0 && r1 >= 0 {
-                let (w0, w1) = if field_mb {
-                    self.implicit_weight_field(r0, r1, mb_parity)
-                } else {
-                    self.implicit.as_ref().unwrap()[r0 as usize][r1 as usize]
-                };
-                return Weighting::Weighted {
-                    log_wd: [5; 3],
-                    w: [[w0, w1]; 3],
-                    o: [[0; 2]; 3],
-                };
-            }
+        if let Some(implicit) = self.implicit.as_ref()
+            && r0 >= 0
+            && r1 >= 0
+        {
+            let (w0, w1) = if field_mb {
+                self.implicit_weight_field(r0, r1, mb_parity)
+            } else {
+                implicit[r0 as usize][r1 as usize]
+            };
+            return Weighting::Weighted {
+                log_wd: [5; 3],
+                w: [[w0, w1]; 3],
+                o: [[0; 2]; 3],
+            };
         }
         Weighting::Default
     }
@@ -300,7 +301,8 @@ fn mb_geom<S: Sample>(
     let mbx = addr % info.mb_width;
     let mby = addr / info.mb_width;
     let field_mb = ctx.mbaff && layer.field;
-    let geom = if field_mb {
+
+    if field_mb {
         let (pr, parity) = (mby / 2, mby % 2);
         MbGeom {
             x: mbx * 16,
@@ -319,8 +321,7 @@ fn mb_geom<S: Sample>(
             step: 1,
             parity: refs.cur_parity,
         }
-    };
-    geom
+    }
 }
 
 #[cfg(test)]
@@ -440,7 +441,7 @@ pub fn derive<S: Sample>(
                 nb.c,
                 nb.d,
                 layer.ref_idx,
-                &layer.dc[0]
+                layer.dc[0]
             );
         }
     }
@@ -1661,29 +1662,27 @@ fn direct_partitions<S: Sample>(
     // The colocated macroblock's motion is read: wait for its rows (in
     // frame rows of the colocated frame; a field's row is two frame rows).
     let mby = addr / info.mb_width;
-    if col_avail {
-        if let Some(cs) = refs.col_shared {
-            let col = refs.col.unwrap();
-            let (wait_parity, frow_end) = if cur_field {
-                (
-                    if col.field_coded {
-                        refs.col_parity
-                    } else {
-                        PARITY_FRAME
-                    },
-                    2 * mby + 2,
-                )
-            } else if cur.mbaff {
-                // Frame macroblocks read the closer field, field macroblocks
-                // their own parity: wait for both.
-                (PARITY_FRAME, (mby / 2) * 2 + 2)
-            } else if col.field_coded {
-                (col_field_of_frame(refs, col), (mby / 2) * 2 + 2)
-            } else {
-                (PARITY_FRAME, mby + 1)
-            };
-            cs.wait_derived(wait_parity, (frow_end * 16) as i32);
-        }
+    if col_avail && let Some(cs) = refs.col_shared {
+        let col = refs.col.unwrap();
+        let (wait_parity, frow_end) = if cur_field {
+            (
+                if col.field_coded {
+                    refs.col_parity
+                } else {
+                    PARITY_FRAME
+                },
+                2 * mby + 2,
+            )
+        } else if cur.mbaff {
+            // Frame macroblocks read the closer field, field macroblocks
+            // their own parity: wait for both.
+            (PARITY_FRAME, (mby / 2) * 2 + 2)
+        } else if col.field_coded {
+            (col_field_of_frame(refs, col), (mby / 2) * 2 + 2)
+        } else {
+            (PARITY_FRAME, mby + 1)
+        };
+        cs.wait_derived(wait_parity, (frow_end * 16) as i32);
     }
     if ctx.direct_spatial {
         let mut ref_idx = spatial_direct_ref_idx(cache, mot);

@@ -41,6 +41,15 @@
 //! it is the right structure; the code follows the standard.
 
 #![warn(missing_docs)]
+// Style lints that are pervasive in codec internals; rewriting them is churn, not a fix.
+#![allow(
+    // Kernels and syntax walks index several parallel arrays by one position, as the spec does.
+    clippy::needless_range_loop,
+    // Kernel and syntax-element functions take the spec's parameters one by one.
+    clippy::too_many_arguments,
+    // Test tables and kernel-sweep signatures spell out their tuple types where used.
+    clippy::type_complexity
+)]
 
 // The public surface is deliberately small: the two decoders, the Annex B
 // splitter that feeds them, and the picture they hand back. Everything below

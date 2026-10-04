@@ -1884,8 +1884,6 @@ fn child_structure_bins(cat: u32, log2_cu: u32, deeper: bool) -> u32 {
 /// a `cu_transquant_bypass` block. Returns the count of nonzero levels;
 /// the TU's cbf is that count being nonzero, and the count itself feeds
 /// the structure decision's rate placeholder.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn code_residual<S: Sample>(
     ctx: &IntraCtx<'_, S>,
     plane: &mut Plane16<S>,
@@ -4220,7 +4218,7 @@ mod tests {
                 scratch,
                 ..
             } = &mut pic;
-            let cands = mpm_candidates(geo, &modes, None, 0, 0);
+            let cands = mpm_candidates(geo, modes, None, 0, 0);
             // An angular mode, so the prediction really propagates
             // neighbour samples rather than averaging them away.
             let mode = 26u8;
@@ -4413,7 +4411,7 @@ mod tests {
                 scratch,
                 ..
             } = &mut pic;
-            let cands = mpm_candidates(geo, &modes, None, 0, 0);
+            let cands = mpm_candidates(geo, modes, None, 0, 0);
             let mode = 26u8;
             let mut d = CuDecision {
                 log2_cu,
@@ -4533,7 +4531,7 @@ mod tests {
                 scratch,
                 ..
             } = &mut pic;
-            let cands = mpm_candidates(geo, &modes, None, 0, 0);
+            let cands = mpm_candidates(geo, modes, None, 0, 0);
             let mode = 10u8;
             let mut d = CuDecision {
                 log2_cu,
@@ -4602,7 +4600,7 @@ mod tests {
                 scratch,
                 ..
             } = &mut pic;
-            let cands = mpm_candidates(geo, &modes, None, 0, 0);
+            let cands = mpm_candidates(geo, modes, None, 0, 0);
             let mode = 1u8; // DC; any legal mode serves
             let mut d = CuDecision {
                 log2_cu,
@@ -4721,7 +4719,7 @@ mod tests {
                     // With a split, each TB is predicted afresh from the
                     // reconstruction as it stands — the decoder's per-TB
                     // behaviour, and the thing this replay anchors.
-                    let cands = mpm_candidates(geo, &modes, None, x0, y0);
+                    let cands = mpm_candidates(geo, modes, None, x0, y0);
                     let mode = mode_from_syntax(d.luma_syntax[0], cands);
                     assert_eq!(
                         mode, d.luma_modes[0] as u32,

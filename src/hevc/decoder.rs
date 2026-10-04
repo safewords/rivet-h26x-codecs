@@ -700,7 +700,7 @@ fn run_substream<S: Sample>(
                 // slot per (CTB row, tile column).
                 // SAFETY: the slot is written by this task only.
                 unsafe {
-                    *pic.wpp_ctx[ry * pic.wpp_cols + tile_col_idx(&pps, rx)].get() =
+                    *pic.wpp_ctx[ry * pic.wpp_cols + tile_col_idx(pps, rx)].get() =
                         Some(dec.cx.clone())
                 };
             }
@@ -708,7 +708,7 @@ fn run_substream<S: Sample>(
             // The row below may start once we are two CTBs in (its first CTB
             // needs our second): hand its substream to the pool now, so tasks
             // start when their dependencies are met instead of blocking.
-            if pps.entropy_coding_sync && rx >= tile_col_start(ctb_addr_rs) + 1 {
+            if pps.entropy_coding_sync && rx > tile_col_start(ctb_addr_rs) {
                 spawn_substream(pic_arc, seg_arc, sub + 1);
             }
             // The filters advance from whichever task completes a row — as
@@ -1257,14 +1257,14 @@ impl<S: Sample> HevcDecoderImpl<S> {
             }
             nal_type::SEI_SUFFIX => {
                 // A decoded picture hash for the picture being decoded.
-                if super::hash::verify_enabled() {
-                    if let Some(cur) = &self.cur {
-                        let rbsp = unescape_rbsp(nal);
-                        if let Some(h) =
-                            super::hash::parse_sei(&rbsp[2..], cur.shared.sps.chroma_format_idc)
-                        {
-                            *cur.shared.frame.hash.lock().unwrap() = Some(h);
-                        }
+                if super::hash::verify_enabled()
+                    && let Some(cur) = &self.cur
+                {
+                    let rbsp = unescape_rbsp(nal);
+                    if let Some(h) =
+                        super::hash::parse_sei(&rbsp[2..], cur.shared.sps.chroma_format_idc)
+                    {
+                        *cur.shared.frame.hash.lock().unwrap() = Some(h);
                     }
                 }
             }

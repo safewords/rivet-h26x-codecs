@@ -551,6 +551,8 @@ impl Default for InterCuDecision {
 /// coefficient slots) and it is the rarer by far; an unboxed enum would
 /// double the memory of every P picture for the variant that seldom
 /// fires.
+// Inter is the common variant and stays inline; Intra is the rare one and is boxed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum PCuDecision {
     /// An inter CU: skip, merge or AMVP.

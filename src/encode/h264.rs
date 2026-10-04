@@ -3023,7 +3023,7 @@ mod tests {
     #[test]
     fn a_wrong_sized_picture_is_rejected_by_size_not_by_luck() {
         let mut e = H264Encoder::new(cfg(64, 64, ChromaFormat::Yuv420, 8)).unwrap();
-        let err = e.push(&vec![0u8; 100]).unwrap_err();
+        let err = e.push(&[0u8; 100]).unwrap_err();
         assert!(format!("{err}").contains("expected"), "{err}");
     }
 
@@ -3329,7 +3329,9 @@ mod tests {
                 let max = (1u32 << bit_depth) - 1;
                 let deep = |bytes: &[u8]| {
                     bytes
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .any(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) > 255)
                 };
                 assert!(
@@ -3338,7 +3340,9 @@ mod tests {
                 );
                 assert!(
                     frames[0]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .all(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) <= max)
                 );
 
@@ -3758,7 +3762,9 @@ mod tests {
                     let got: Vec<i64> = if shift == 0 {
                         rec.iter().map(|&v| v as i64).collect()
                     } else {
-                        rec.chunks_exact(2)
+                        rec.as_chunks::<2>()
+                            .0
+                            .iter()
                             .map(|p| u16::from_le_bytes([p[0], p[1]]) as i64)
                             .collect()
                     };

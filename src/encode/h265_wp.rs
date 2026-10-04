@@ -2,8 +2,8 @@
 //! from a least-squares fit of the source against the reference.
 //!
 //! H.265's explicit weighting (`pred_weight_table`, 8.5.3.3.4.3) scales
-//! and shifts a reference before it predicts: `Clip(((ref * w) >> denom)
-//! + o)`. Motion compensation cannot express a change of brightness —
+//! and shifts a reference before it predicts:
+//! `Clip(((ref * w) >> denom) + o)`. Motion compensation cannot express a change of brightness —
 //! every vector predicts a block at the reference's own level — so on a
 //! fade every inter block carries the level difference as residual, and a
 //! stream with weighting carries it once per slice in the table instead.

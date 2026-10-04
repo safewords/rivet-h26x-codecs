@@ -4557,7 +4557,7 @@ mod tests {
                     .collect();
                 let beta = [(lcg(&mut seed) % 64) as i32, (lcg(&mut seed) % 64) as i32];
                 let tc = [(lcg(&mut seed) % 20) as i32, (lcg(&mut seed) % 20) as i32];
-                let bl = |v: u32| v % 2 == 0;
+                let bl = |v: u32| v.is_multiple_of(2);
                 let no_p = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
                 let no_q = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
                 let tc4 = [
@@ -4767,7 +4767,7 @@ mod tests {
                     .collect();
                 let beta = [(lcg(&mut seed) % 64) as i32, (lcg(&mut seed) % 64) as i32];
                 let tc = [(lcg(&mut seed) % 20) as i32, (lcg(&mut seed) % 20) as i32];
-                let bl = |v: u32| v % 2 == 0;
+                let bl = |v: u32| v.is_multiple_of(2);
                 let no_p = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
                 let no_q = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
                 let tc4 = [

@@ -1133,7 +1133,7 @@ fn decode_abs_level_remaining(cabac: &mut Cabac, rice: u32) -> Result<i32> {
         }
     }
     v += cabac.bypass_bits(k) as i32;
-    Ok((4 << rice) as i32 + v)
+    Ok((4 << rice) + v)
 }
 
 /// `coeff_abs_level_remaining` under `extended_precision_processing_flag`

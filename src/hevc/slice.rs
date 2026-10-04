@@ -75,7 +75,7 @@ pub mod nal_type {
     }
     /// A sub-layer non-reference picture (even types below 16, except reserved).
     pub fn is_sub_layer_non_ref(t: u8) -> bool {
-        t < 16 && t % 2 == 0
+        t < 16 && t.is_multiple_of(2)
     }
     /// A VCL NAL unit (a slice segment) this decoder handles.
     pub fn is_slice(t: u8) -> bool {

@@ -33,7 +33,7 @@ pub fn predict_4x4<S: Sample>(
     // Gather neighbours: top[0..8] = p[x,-1] x=0..7, left[0..4], corner.
     let mut top = [0i32; 8];
     let mut left = [0i32; 4];
-    let corner: i32;
+
     if av.top {
         for x in 0..4 {
             top[x] = p.data[off - stride + x].to_i32();
@@ -53,7 +53,7 @@ pub fn predict_4x4<S: Sample>(
             left[y] = p.data[off + y * stride - 1].to_i32();
         }
     }
-    corner = if av.top_left {
+    let corner: i32 = if av.top_left {
         p.data[off - stride - 1].to_i32()
     } else {
         0

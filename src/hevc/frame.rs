@@ -385,7 +385,7 @@ impl<S: Sample> Frame<S> {
                         )
                     };
                 } else {
-                    for (d, s) in dst.chunks_exact_mut(2).zip(src) {
+                    for (d, s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(src) {
                         d.copy_from_slice(&(s.to_i32() as u16).to_le_bytes());
                     }
                 }

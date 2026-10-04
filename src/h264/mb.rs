@@ -653,7 +653,7 @@ impl MbNeighbours {
         let x = addr % w;
         let frow = addr / w;
         let pr = frow / 2;
-        let is_top = frow % 2 == 0;
+        let is_top = frow.is_multiple_of(2);
         // A pair is available when its top macroblock is decoded in this
         // slice (both macroblocks of a pair are).
         let pair_at = |px: isize, ppr: isize| -> Option<usize> {

@@ -637,7 +637,7 @@ impl Config {
                 "encode: a frame rate numerator above 2^31 - 1 in lowest terms (H.264's field clock doubles it into a 32-bit time_scale)",
             ));
         }
-        if !(self.aq_strength >= 0.0) || self.aq_strength > 4.0 {
+        if !(0.0..=4.0).contains(&self.aq_strength) {
             return Err(crate::Error::unsupported(
                 "encode: aq_strength outside 0.0..=4.0",
             ));
@@ -697,7 +697,7 @@ pub(crate) fn unpack_samples<S: crate::sample::Sample>(
     }
     let max = (1u32 << bit_depth) - 1;
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([pair[0], pair[1]]);
         if u32::from(v) > max {
             return Err(crate::Error::bitstream(format!(

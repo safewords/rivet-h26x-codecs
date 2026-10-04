@@ -652,7 +652,7 @@ pub fn sao_picture<S: Sample>(
     // `cMax` of `sao_offset_abs`: 7 at 8 bits, 31 from 10 up, the same
     // derivation `write_sao_for` spells and the reader applies. Luma's
     // depth serves chroma too: this encoder writes one depth for both.
-    let cmax = ((1i64 << (sps.bit_depth_luma.min(10) - 5)) - 1) as i64;
+    let cmax = (1i64 << (sps.bit_depth_luma.min(10) - 5)) - 1;
     // Priced against SSD, so the deep-sample scale is the squared one.
     let lam = lambda(ctx.qp) * ssd_lambda_scale(ctx.bit_depth);
 

@@ -2009,7 +2009,7 @@ mod tests {
                 assert_eq!(d1, d2, "bi {w}x{h} bd={bd}");
                 for &(log2_wd, wt, o) in &[
                     (6 + 14 - bd as i32, 128, 0),
-                    (0 + 14 - bd as i32, 1, 5),
+                    (14 - bd as i32, 1, 5),
                     (7 + 14 - bd as i32, -20, -3),
                     (3 + 14 - bd as i32, 255, 127),
                 ] {
@@ -2078,12 +2078,12 @@ mod tests {
                 };
                 for y in 0..=my {
                     for x in 0..=mx {
-                        if lcg(&mut seed) % 2 == 0 {
+                        if lcg(&mut seed).is_multiple_of(2) {
                             c[y * n + x] = (lcg(&mut seed) as i32 % 65536 - 32768) as i16;
                         }
                     }
                 }
-                let bd_shift = 20 - 8 - (trial % 3) as i32 * 2;
+                let bd_shift = 20 - 8 - (trial % 3) * 2;
                 let mut a = c.clone();
                 let mut b = c.clone();
                 (s.idct[(log2 - 2) as usize])(&mut a, bd_shift, mx, my);

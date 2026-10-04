@@ -197,7 +197,7 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_le_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let m: [u32; 16] = std::array::from_fn(|i| {
             u32::from_le_bytes([
                 chunk[4 * i],

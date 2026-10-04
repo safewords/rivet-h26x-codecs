@@ -357,7 +357,7 @@ fn residual_block_inner<const DQ: bool>(
             if sl0 == 0 {
                 14 + r.bits(4) as i32
             } else {
-                (14 << sl0) as i32 + r.bits(sl0) as i32
+                (14 << sl0) + r.bits(sl0) as i32
             }
         } else {
             // prefix >= 15: a (prefix - 3)-bit suffix, escape from 15 (and
@@ -386,7 +386,7 @@ fn residual_block_inner<const DQ: bool>(
             let level_code: i32 = if prefix < 15 {
                 ((prefix << suffix_length) + r.bits(suffix_length as u32)) as i32
             } else {
-                let mut lc = (15 << suffix_length) as i32;
+                let mut lc = 15 << suffix_length;
                 if prefix >= 16 {
                     lc += (1i32 << (prefix - 3)) - 4096;
                 }
@@ -679,7 +679,7 @@ pub fn b_mb_type(t: u32, layer: &mut MbLayer) -> Result<()> {
         4..=21 => {
             let i = ((t - 4) / 2) as usize;
             let (d0, d1) = B2[i];
-            if (t - 4) % 2 == 0 {
+            if (t - 4).is_multiple_of(2) {
                 layer.kind = MbKind::Inter16x8;
                 layer.pred_dir = [d0, d0, d1, d1];
             } else {
@@ -884,7 +884,7 @@ pub fn parse_mb_cavlc(
                 for blk in 0..16 {
                     let raster = super::mb::raster_of_blk(blk);
                     let (bx, by) = (raster % 4, raster / 4);
-                    let pred = predicted_intra_mode(info, &layer, nb, ctx, bx, by, false);
+                    let pred = predicted_intra_mode(info, layer, nb, ctx, bx, by, false);
                     let mode = if r.flag() {
                         pred
                     } else {
@@ -911,7 +911,7 @@ pub fn parse_mb_cavlc(
             MbKind::I8x8 => {
                 for blk8 in 0..4 {
                     let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
-                    let pred = predicted_intra_mode(info, &layer, nb, ctx, bx, by, true);
+                    let pred = predicted_intra_mode(info, layer, nb, ctx, bx, by, true);
                     let mode = if r.flag() {
                         pred
                     } else {

@@ -117,6 +117,7 @@ pub extern "C" fn h26x_decode(ptr: *const u8, len: usize, hevc: u32, out_hash: *
 
 /// The push / drain / flush / drain sequence, shared by the two decoders
 /// because it is the same sequence and only the types differ.
+#[allow(clippy::too_many_arguments)]
 fn run<D>(
     data: &[u8],
     frames: &mut u32,
@@ -370,12 +371,12 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             };
             for y in 0..=my {
                 for x in 0..=mx {
-                    if lcg(&mut seed) % 2 == 0 {
+                    if lcg(&mut seed).is_multiple_of(2) {
                         c[y * n + x] = (lcg(&mut seed) as i32 % 65536 - 32768) as i16;
                     }
                 }
             }
-            let bd_shift = 12 - (trial % 3) as i32 * 2;
+            let bd_shift = 12 - (trial % 3) * 2;
             if n == 4 {
                 // The 4x4 DST (intra luma), over the same blocks.
                 let mut a = c.clone();
@@ -475,7 +476,7 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             .collect();
         let beta = [(lcg(&mut seed) % 64) as i32, (lcg(&mut seed) % 64) as i32];
         let tc = [(lcg(&mut seed) % 20) as i32, (lcg(&mut seed) % 20) as i32];
-        let bl = |v: u32| v % 2 == 0;
+        let bl = |v: u32| v.is_multiple_of(2);
         let no_p = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
         let no_q = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
         let tc4 = [
@@ -735,7 +736,7 @@ pub extern "C" fn h26x_hevc_dsp_check() -> u32 {
             let v = |seed: &mut u64, n: u32| ((lcg(seed) % n) as i32) << sh;
             let beta = [v(&mut seed, 64), v(&mut seed, 64)];
             let tc = [v(&mut seed, 25), v(&mut seed, 25)];
-            let bl = |x: u32| x % 2 == 0;
+            let bl = |x: u32| x.is_multiple_of(2);
             let no_p = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
             let no_q = [bl(lcg(&mut seed)), bl(lcg(&mut seed))];
             let tc4 = [tc[0], tc[1], v(&mut seed, 25), v(&mut seed, 25)];
@@ -1439,13 +1440,15 @@ pub extern "C" fn h26x_encode(
 ) -> u32 {
     use h26x::encode::{Config, RateControl};
     let data = unsafe { std::slice::from_raw_parts(ptr, len) };
-    let mut cfg = Config::default();
-    cfg.width = w;
-    cfg.height = h;
-    cfg.rate = RateControl::ConstantQp(qp as u8);
-    cfg.gop = gop;
-    cfg.bframes = bframes;
-    cfg.threads = 1;
+    let cfg = Config {
+        width: w,
+        height: h,
+        rate: RateControl::ConstantQp(qp as u8),
+        gop,
+        bframes,
+        threads: 1,
+        ..Config::default()
+    };
     let fb = (w * h + 2 * (w.div_ceil(2) * h.div_ceil(2))) as usize;
     if fb == 0 || data.len() < fb {
         return u32::MAX;

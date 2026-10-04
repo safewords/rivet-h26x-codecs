@@ -366,7 +366,7 @@ impl Pps {
         for j in 0..rows {
             row_bd[j + 1] = row_bd[j] + row_heights[j];
         }
-        if col_widths.iter().any(|&w| w == 0) || row_heights.iter().any(|&h| h == 0) {
+        if col_widths.contains(&0) || row_heights.contains(&0) {
             return Err(Error::bitstream("empty tile"));
         }
         self.col_bd = col_bd;

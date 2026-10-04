@@ -193,7 +193,7 @@ impl<'a> BitReader<'a> {
     pub fn se(&mut self) -> i32 {
         let k = self.ue() as u64;
         if k & 1 == 1 {
-            ((k + 1) / 2) as i32
+            k.div_ceil(2) as i32
         } else {
             -((k / 2) as i32)
         }
@@ -206,7 +206,7 @@ impl<'a> BitReader<'a> {
 
     /// Whether the reader is at a byte boundary.
     pub fn byte_aligned(&self) -> bool {
-        self.position() % 8 == 0
+        self.position().is_multiple_of(8)
     }
 
     /// Advance to the next byte boundary (no-op if already aligned).

@@ -374,7 +374,7 @@ impl<S: Sample> PictureDecoder<S> {
                 let info: &mut PicInfo = info!();
                 let cur: &mut Frame<S> = cur_main.plane_frame_mut(plane);
                 let sa = store(addr);
-                let is_top = !mbaff || addr % 2 == 0;
+                let is_top = !mbaff || addr.is_multiple_of(2);
                 if mbaff && is_top {
                     pair_field = infer_field(info, sa);
                 }
@@ -483,7 +483,7 @@ impl<S: Sample> PictureDecoder<S> {
                         let info: &mut PicInfo = info!();
                         let cur: &mut Frame<S> = cur_main.plane_frame_mut(plane);
                         let sa = store(addr);
-                        let is_top = !mbaff || addr % 2 == 0;
+                        let is_top = !mbaff || addr.is_multiple_of(2);
                         if mbaff && is_top {
                             pair_field = infer_field(info, sa);
                             // The last skipped macroblock is a top one whose
@@ -517,7 +517,7 @@ impl<S: Sample> PictureDecoder<S> {
                 let info: &mut PicInfo = info!();
                 let cur: &mut Frame<S> = cur_main.plane_frame_mut(plane);
                 let sa = store(addr);
-                let is_top = !mbaff || addr % 2 == 0;
+                let is_top = !mbaff || addr.is_multiple_of(2);
                 // The pair's flag comes with a coded top macroblock, or with
                 // the bottom when the top was skipped (unless the skip run
                 // already read it).
@@ -962,10 +962,11 @@ impl<S: Sample> H264DecoderImpl<S> {
                 let rbsp = unescape_rbsp(&nal[1..]);
                 let sps = Sps::parse(&rbsp)?;
                 let id = sps.id as usize;
-                if let Some(old) = &self.sps[id] {
-                    if *old != sps && self.cur.is_some() {
-                        self.finish_picture()?;
-                    }
+                if let Some(old) = &self.sps[id]
+                    && *old != sps
+                    && self.cur.is_some()
+                {
+                    self.finish_picture()?;
                 }
                 self.sps[id] = Some(sps);
                 // The tables derive from the parameter sets' scaling lists,
@@ -978,10 +979,11 @@ impl<S: Sample> H264DecoderImpl<S> {
                 let sps_tab = &self.sps;
                 let pps = Pps::parse(&rbsp, &|id| sps_tab.get(id as usize).cloned().flatten())?;
                 let id = pps.id as usize;
-                if let Some(old) = &self.pps[id] {
-                    if **old != pps && self.cur.is_some() {
-                        self.finish_picture()?;
-                    }
+                if let Some(old) = &self.pps[id]
+                    && **old != pps
+                    && self.cur.is_some()
+                {
+                    self.finish_picture()?;
                 }
                 self.pps[id] = Some(Arc::new(pps));
                 self.dequant_cache = None;
@@ -991,13 +993,13 @@ impl<S: Sample> H264DecoderImpl<S> {
                 self.parse_sei(&unescape_rbsp(&nal[1..]));
                 Ok(())
             }
-            9 | 10 | 11 => {
+            9..=11 => {
                 if self.cur.is_some() {
                     self.finish_picture()?;
                 }
                 Ok(())
             }
-            2 | 3 | 4 => Err(Error::unsupported(
+            2..=4 => Err(Error::unsupported(
                 "H.264 slice data partitioning (nal_unit_type 2..4)",
             )),
             20 | 21 => Ok(()),
@@ -1326,16 +1328,16 @@ impl<S: Sample> H264DecoderImpl<S> {
                     }
                 }
             }
-            if hdr.slice_type.is_b() {
-                if let Some(&e) = rl.lists[1].first() {
-                    col = entry(&self.dpb, e);
-                }
+            if hdr.slice_type.is_b()
+                && let Some(&e) = rl.lists[1].first()
+            {
+                col = entry(&self.dpb, e);
             }
         }
 
         let fmo = self.slice_group_map(&pps, &sps, &hdr)?;
         let cur = self.cur.as_mut().unwrap();
-        if hdr.marking.ops.iter().any(|o| *o == Mmco::UnmarkAll) {
+        if hdr.marking.ops.contains(&Mmco::UnmarkAll) {
             cur.had_mmco5 = true;
         }
         if hdr.first_mb_in_slice == 0 {
@@ -1354,12 +1356,12 @@ impl<S: Sample> H264DecoderImpl<S> {
         };
         if let Some(tx) = &cur.tx {
             let _ = tx.send(job);
-        } else if let Some(pd) = cur.inline.as_mut() {
-            if let Err(e) = pd.decode_slice(job) {
-                pd.frame.set_error();
-                self.warnings.fetch_add(1, Ordering::Relaxed);
-                return Err(e);
-            }
+        } else if let Some(pd) = cur.inline.as_mut()
+            && let Err(e) = pd.decode_slice(job)
+        {
+            pd.frame.set_error();
+            self.warnings.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
         }
         Ok(())
     }
@@ -1623,10 +1625,10 @@ impl<S: Sample> H264DecoderImpl<S> {
             non_existing: false,
             decode_index: cur.decode_index,
         };
-        if cur.had_mmco5 {
-            if let Some(of) = &mut self.open_field {
-                of.frame_num = 0;
-            }
+        if cur.had_mmco5
+            && let Some(of) = &mut self.open_field
+        {
+            of.frame_num = 0;
         }
         self.dpb.store(pic, &hdr, &sps, cur.had_mmco5, parity)?;
         Ok(())

@@ -412,7 +412,7 @@ pub(crate) mod avx2 {
         offset: i32,
     ) -> u32 {
         let n2 = n * n;
-        if n2 % 16 != 0 || !(0..=32767).contains(&scale) || offset < 0 || qbits > 31 {
+        if !n2.is_multiple_of(16) || !(0..=32767).contains(&scale) || offset < 0 || qbits > 31 {
             return quant_scalar(coeffs, levels, n, scale, qbits, offset);
         }
         assert!(coeffs.len() >= n2 && levels.len() >= n2, "block too small");

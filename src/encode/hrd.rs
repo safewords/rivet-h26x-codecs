@@ -376,10 +376,11 @@ fn schedule_from_stream(annexb: &[u8]) -> Result<Schedule> {
         let rbsp = crate::nal::unescape_rbsp(&nal[2..]);
         if t == 33 && sps.is_none() {
             sps = Sps::parse(&rbsp).ok();
-        } else if t == 39 && initial_delay.is_none() {
-            if let Some(s) = sps.as_ref() {
-                initial_delay = buffering_period_delay(&rbsp, s);
-            }
+        } else if t == 39
+            && initial_delay.is_none()
+            && let Some(s) = sps.as_ref()
+        {
+            initial_delay = buffering_period_delay(&rbsp, s);
         }
     }
     let sps =

@@ -1047,7 +1047,7 @@ fn deblock_mbaff_pairs<S: Sample>(
                                     stride,
                                     chroma422,
                                     u32::from_le_bytes(bs),
-                                    &t,
+                                    t,
                                     max,
                                 );
                             }
@@ -1249,7 +1249,7 @@ fn deblock_mbaff_pairs<S: Sample>(
                             };
                             let base = plane.offset((xc0 + 4) as isize, yc_p as isize);
                             let stride = plane.stride * dy;
-                            chroma_v_edge(dsp, plane, base, stride, chroma422, bs, &t, max);
+                            chroma_v_edge(dsp, plane, base, stride, chroma422, bs, t, max);
                         }
                     }
                 }

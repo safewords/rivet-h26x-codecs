@@ -1706,7 +1706,7 @@ fn decode_qp_delta(c: &mut Cabac, st: &mut CabacState, bit_depth: u32) -> Result
         }
     }
     let v = if k & 1 == 1 {
-        ((k + 1) / 2) as i32
+        k.div_ceil(2) as i32
     } else {
         -((k / 2) as i32)
     };
@@ -3088,7 +3088,7 @@ pub fn parse_mb_cabac(
                 let ri = if n <= 1 {
                     0
                 } else {
-                    decode_ref_idx(c, st, info, &layer, nb, frame_motion, list, bx, by)?
+                    decode_ref_idx(c, st, info, layer, nb, frame_motion, list, bx, by)?
                 };
                 if ri as u32 >= n.max(1) {
                     return Err(Error::bitstream("ref_idx out of range"));
@@ -3105,7 +3105,7 @@ pub fn parse_mb_cabac(
                 for sub in 0..shape.count() {
                     let (x, y, w, h) = sub_partition_rect(part, shape, sub);
                     let (bx, by) = ((x / 4) as i32, (y / 4) as i32);
-                    let (mx, my) = decode_mvd(c, st, info, &layer, nb, list, bx, by)?;
+                    let (mx, my) = decode_mvd(c, st, info, layer, nb, list, bx, by)?;
                     // The mvd applies to every 4x4 of the sub-partition (for
                     // later neighbours' contexts).
                     for yy in y / 4..(y + h) / 4 {
@@ -3128,7 +3128,7 @@ pub fn parse_mb_cabac(
                 for blk in 0..16 {
                     let raster = super::mb::raster_of_blk(blk);
                     let (bx, by) = (raster % 4, raster / 4);
-                    let pred = predicted_intra_mode(info, &layer, nb, ctx, bx, by, false);
+                    let pred = predicted_intra_mode(info, layer, nb, ctx, bx, by, false);
                     layer.intra_modes[raster] = decode_intra_pred_mode(c, st, pred);
                 }
                 if ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2 {
@@ -3138,7 +3138,7 @@ pub fn parse_mb_cabac(
             MbKind::I8x8 => {
                 for blk8 in 0..4 {
                     let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
-                    let pred = predicted_intra_mode(info, &layer, nb, ctx, bx, by, true);
+                    let pred = predicted_intra_mode(info, layer, nb, ctx, bx, by, true);
                     let mode = decode_intra_pred_mode(c, st, pred);
                     for dy in 0..2 {
                         for dx in 0..2 {
@@ -3173,7 +3173,7 @@ pub fn parse_mb_cabac(
                                 c,
                                 st,
                                 info,
-                                &layer,
+                                layer,
                                 nb,
                                 frame_motion,
                                 list,
@@ -3198,7 +3198,7 @@ pub fn parse_mb_cabac(
                             continue;
                         }
                         let (bx, by) = ((x / 4) as i32, (y / 4) as i32);
-                        let (mx, my) = decode_mvd(c, st, info, &layer, nb, list, bx, by)?;
+                        let (mx, my) = decode_mvd(c, st, info, layer, nb, list, bx, by)?;
                         for yy in y / 4..(y + h) / 4 {
                             for xx in x / 4..(x + w) / 4 {
                                 layer.mvd[yy * 4 + xx].mvd[list] = Mv::new(mx, my);
@@ -3562,7 +3562,7 @@ mod mb_round_trip {
             1 => {
                 let len = 1 + (rng() as usize) % (hi - lo);
                 for i in lo..lo + len {
-                    out[i] = if rng() % 2 == 0 { 1 } else { -1 };
+                    out[i] = if rng().is_multiple_of(2) { 1 } else { -1 };
                 }
                 len
             }
@@ -3570,9 +3570,9 @@ mod mb_round_trip {
             2 => {
                 let mut n = 0;
                 for i in lo..hi {
-                    if rng() % 4 == 0 {
+                    if rng().is_multiple_of(4) {
                         let mag = [1, 1, 2, 3, 13, 14, 15, 40][(rng() % 8) as usize];
-                        out[i] = if rng() % 2 == 0 { mag } else { -mag };
+                        out[i] = if rng().is_multiple_of(2) { mag } else { -mag };
                         n += 1;
                     }
                 }
@@ -3583,16 +3583,16 @@ mod mb_round_trip {
             // raster index of the span).
             3 => {
                 let mag = [1, 14, 17][(rng() % 3) as usize];
-                out[hi - 1] = if rng() % 2 == 0 { mag } else { -mag };
+                out[hi - 1] = if rng().is_multiple_of(2) { mag } else { -mag };
                 1
             }
             // Dense ±1 with a sprinkling of 2s: drives both level counters.
             _ => {
                 let mut n = 0;
                 for i in lo..hi {
-                    if rng() % 8 != 0 {
-                        let v = if rng() % 4 == 0 { 2 } else { 1 };
-                        out[i] = if rng() % 2 == 0 { v } else { -v };
+                    if !rng().is_multiple_of(8) {
+                        let v = if rng().is_multiple_of(4) { 2 } else { 1 };
+                        out[i] = if rng().is_multiple_of(2) { v } else { -v };
                         n += 1;
                     }
                 }
@@ -3611,7 +3611,7 @@ mod mb_round_trip {
         force: Option<IntraKind>,
     ) -> MbDecision {
         let mut d = MbDecision::default();
-        d.kind = force.unwrap_or(if rng() % 2 == 0 {
+        d.kind = force.unwrap_or(if rng().is_multiple_of(2) {
             IntraKind::I4x4
         } else {
             IntraKind::I16x16
@@ -3625,7 +3625,7 @@ mod mb_round_trip {
             // into the decoder's view.
             IntraKind::I8x8 => {
                 for &raster in &[0usize, 2, 8, 10] {
-                    let m = if rng() % 2 == 0 {
+                    let m = if rng().is_multiple_of(2) {
                         PredMode {
                             use_predicted: true,
                             rem: 0,
@@ -3666,7 +3666,7 @@ mod mb_round_trip {
             }
             IntraKind::I4x4 => {
                 for r in 0..16 {
-                    d.luma_pred[r] = if rng() % 2 == 0 {
+                    d.luma_pred[r] = if rng().is_multiple_of(2) {
                         PredMode {
                             use_predicted: true,
                             rem: 0,
@@ -3694,12 +3694,12 @@ mod mb_round_trip {
             }
             IntraKind::I16x16 => {
                 d.intra16_mode = (rng() % 4) as u8;
-                if rng() % 3 != 0 {
+                if !rng().is_multiple_of(3) {
                     let mut b = [0i16; 16];
                     let _ = fill_block(rng, &mut b, 0, 16);
                     d.luma_dc = b;
                 }
-                d.cbp_luma = if rng() % 2 == 0 { 15 } else { 0 };
+                d.cbp_luma = if rng().is_multiple_of(2) { 15 } else { 0 };
                 if d.cbp_luma != 0 {
                     for raster in 0..16 {
                         let mut b = [0i16; 16];
@@ -3741,7 +3741,7 @@ mod mb_round_trip {
     fn fill_block8(rng: &mut impl FnMut() -> u32, out: &mut [i16; 64]) {
         for o in out.iter_mut() {
             *o = match rng() % 6 {
-                0 | 1 | 2 => 0,
+                0..=2 => 0,
                 3 => 1,
                 4 => -1,
                 _ => {
@@ -3751,7 +3751,7 @@ mod mb_round_trip {
                         2 => 15 + (rng() % 200) as i16,
                         _ => 1 + (rng() % 3000) as i16,
                     };
-                    if rng() % 2 == 0 { mag } else { -mag }
+                    if rng().is_multiple_of(2) { mag } else { -mag }
                 }
             };
         }
@@ -3805,7 +3805,7 @@ mod mb_round_trip {
                         // A plane's 8x8 may legitimately be empty in
                         // 4:4:4: its coded_block_flag is coded, not
                         // inferred. Let a third of them be.
-                        if rng() % 3 == 0 {
+                        if rng().is_multiple_of(3) {
                             b = [0; 64];
                         }
                         d.chroma_ac[comp].as_flattened_mut()[blk8 * 64..blk8 * 64 + 64]
@@ -3868,7 +3868,7 @@ mod mb_round_trip {
             3 => 9 + (rng() % 8) as i16,
             _ => 200 + (rng() % 2000) as i16,
         };
-        if rng() % 2 == 0 { mag } else { -mag }
+        if rng().is_multiple_of(2) { mag } else { -mag }
     }
 
     /// A pseudo-random P macroblock, internally consistent the way
@@ -3876,7 +3876,7 @@ mod mb_round_trip {
     /// the levels, and the reference index respects the list length.
     fn synth_inter(rng: &mut impl FnMut() -> u32, cfi: u32, num_ref: u32) -> InterDecision {
         let mut d = InterDecision::default();
-        if rng() % 4 == 0 {
+        if rng().is_multiple_of(4) {
             d.kind = InterMbKind::PSkip;
             return d;
         }
@@ -4708,7 +4708,7 @@ mod mb_round_trip {
             }
             let mut pcm: Option<&[u16]> = None;
             while i < total {
-                let left = (i % mb_width > 0).then(|| &coded[i - 1]);
+                let left = (!i.is_multiple_of(mb_width)).then(|| &coded[i - 1]);
                 let above = (i >= mb_width).then(|| &coded[i - mb_width]);
                 if p_slice {
                     // Every macroblock of a P slice codes mb_skip_flag,
@@ -4802,7 +4802,6 @@ mod mb_round_trip {
                     }
                 }
             }
-            drop(e);
             if let Some(samples) = pcm {
                 w.align_zero(); // pcm_alignment_zero_bit
                 for &s in samples {
@@ -5086,13 +5085,15 @@ mod mb_round_trip {
         for mode in 0..4u8 {
             for cbp_chroma in 0..3u8 {
                 for cbp_luma in [0u8, 15] {
-                    let mut d = MbDecision::default();
-                    d.kind = IntraKind::I16x16;
-                    d.intra16_mode = mode;
-                    d.cbp_luma = cbp_luma;
-                    d.cbp_chroma = cbp_chroma;
-                    d.chroma_mode = (mode + 1) % 4;
-                    d.qp_delta = *qpd.next().unwrap();
+                    let mut d = MbDecision {
+                        kind: IntraKind::I16x16,
+                        intra16_mode: mode,
+                        cbp_luma,
+                        cbp_chroma,
+                        chroma_mode: (mode + 1) % 4,
+                        qp_delta: *qpd.next().unwrap(),
+                        ..MbDecision::default()
+                    };
                     if mode != 1 {
                         for i in 0..6 {
                             d.luma_dc[i] = if i % 2 == 0 { 1 } else { -1 };
@@ -5155,7 +5156,6 @@ mod mb_round_trip {
             }
             e.encode_decision(&mut st.ctx[CTX_MB_QP_DELTA + if k == 1 { 2 } else { 3 }], 0);
             e.encode_terminate(1);
-            drop(e);
             w.align_zero();
             w.into_rbsp()
         }
@@ -5305,8 +5305,8 @@ mod mb_round_trip {
             let mut rng = lcg(0x5151 ^ seed);
             let mut mbs = Vec::new();
             for _ in 0..w_mb * h_mb {
-                if rng() % 4 == 0 {
-                    let force = if rng() % 2 == 0 {
+                if rng().is_multiple_of(4) {
+                    let force = if rng().is_multiple_of(2) {
                         IntraKind::I8x8
                     } else {
                         IntraKind::I4x4
@@ -5319,7 +5319,7 @@ mod mb_round_trip {
                     continue;
                 }
                 let mut d = synth_inter(&mut rng, cfi, num_ref);
-                if d.kind == InterMbKind::P16x16 && d.cbp_luma != 0 && rng() % 2 == 0 {
+                if d.kind == InterMbKind::P16x16 && d.cbp_luma != 0 && rng().is_multiple_of(2) {
                     make_inter_8x8(&mut rng, &mut d, cfi);
                 }
                 if d.cbp_luma != 0 || d.cbp_chroma != 0 {
@@ -5362,7 +5362,7 @@ mod mb_round_trip {
                     }
                     let mut b = [0i16; 64];
                     fill_block8(rng, &mut b);
-                    if rng() % 3 == 0 {
+                    if rng().is_multiple_of(3) {
                         b = [0; 64];
                     }
                     d.chroma_ac[comp].as_flattened_mut()[blk8 * 64..blk8 * 64 + 64]
@@ -5528,14 +5528,16 @@ mod mb_round_trip {
                     // A macroblock with a nonzero qp_delta directly before
                     // the forced skips: the carry must clear across them.
                     4 => {
-                        let mut d = InterDecision::default();
-                        // One 16x16 partition: the same mvd on all sixteen blocks.
-                        d.mvd = [Mv::new(7, -3); 16];
-                        d.cbp_luma = 1;
+                        let mut d = InterDecision {
+                            // One 16x16 partition: the same mvd on all sixteen blocks.
+                            mvd: [Mv::new(7, -3); 16],
+                            cbp_luma: 1,
+                            qp_delta: 3,
+                            ..InterDecision::default()
+                        };
                         d.luma[0][0] = 4;
                         d.luma[0][5] = -1;
                         d.nz_luma[0] = 2;
-                        d.qp_delta = 3;
                         mbs.push(TestMb::Inter(d));
                     }
                     // A run of skips (the second sees a skipped left

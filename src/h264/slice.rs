@@ -447,14 +447,14 @@ impl SliceHeader {
             }
         }
         let mut slice_group_change_cycle = 0;
-        if let Some(sg) = &pps.slice_groups {
-            if (3..=5).contains(&sg.map_type) {
-                let bits = super::fmo::change_cycle_bits(
-                    sps.pic_width_in_mbs * sps.pic_height_in_map_units,
-                    sg.change_rate,
-                );
-                slice_group_change_cycle = r.bits(bits);
-            }
+        if let Some(sg) = &pps.slice_groups
+            && (3..=5).contains(&sg.map_type)
+        {
+            let bits = super::fmo::change_cycle_bits(
+                sps.pic_width_in_mbs * sps.pic_height_in_map_units,
+                sg.change_rate,
+            );
+            slice_group_change_cycle = r.bits(bits);
         }
         r.finish("slice header")?;
 

@@ -266,10 +266,10 @@ pub fn merge_candidate<S: Sample>(
     } else {
         neighbour_pb(info, cur, &ac, &pu, xb1, yb1).map(to_cand)
     };
-    if let Some(c) = b1 {
-        if !a1.is_some_and(|a| a.same_motion(&c)) {
-            list.push(c);
-        }
+    if let Some(c) = b1
+        && !a1.is_some_and(|a| a.same_motion(&c))
+    {
+        list.push(c);
     }
     // B0
     let (xb0, yb0) = (x_pb + w, y_pb - 1);
@@ -278,10 +278,10 @@ pub fn merge_candidate<S: Sample>(
     } else {
         neighbour_pb(info, cur, &ac, &pu, xb0, yb0).map(to_cand)
     };
-    if let Some(c) = b0 {
-        if !b1.is_some_and(|b| b.same_motion(&c)) {
-            list.push(c);
-        }
+    if let Some(c) = b0
+        && !b1.is_some_and(|b| b.same_motion(&c))
+    {
+        list.push(c);
     }
     // A0
     let (xa0, ya0) = (x_pb - 1, y_pb + h);
@@ -290,10 +290,10 @@ pub fn merge_candidate<S: Sample>(
     } else {
         neighbour_pb(info, cur, &ac, &pu, xa0, ya0).map(to_cand)
     };
-    if let Some(c) = a0 {
-        if !a1.is_some_and(|a| a.same_motion(&c)) {
-            list.push(c);
-        }
+    if let Some(c) = a0
+        && !a1.is_some_and(|a| a.same_motion(&c))
+    {
+        list.push(c);
     }
     // B2 (only if fewer than four so far)
     if list.len() < 4 {
@@ -303,10 +303,11 @@ pub fn merge_candidate<S: Sample>(
         } else {
             neighbour_pb(info, cur, &ac, &pu, xb2, yb2).map(to_cand)
         };
-        if let Some(c) = b2 {
-            if !a1.is_some_and(|a| a.same_motion(&c)) && !b1.is_some_and(|b| b.same_motion(&c)) {
-                list.push(c);
-            }
+        if let Some(c) = b2
+            && !a1.is_some_and(|a| a.same_motion(&c))
+            && !b1.is_some_and(|b| b.same_motion(&c))
+        {
+            list.push(c);
         }
     }
     if list.len() > merge_idx {
@@ -552,15 +553,15 @@ pub fn amvp<S: Sample>(
     if let Some(a) = mv_a {
         cands.push(a);
     }
-    if let Some(b) = mv_b {
-        if !(mv_a == Some(b)) {
-            cands.push(b);
-        }
+    if let Some(b) = mv_b
+        && !(mv_a == Some(b))
+    {
+        cands.push(b);
     }
-    if cands.len() < 2 {
-        if let Some(t) = temporal_mv(refs, info, pu, list, ref_idx) {
-            cands.push(t);
-        }
+    if cands.len() < 2
+        && let Some(t) = temporal_mv(refs, info, pu, list, ref_idx)
+    {
+        cands.push(t);
     }
     while cands.len() < 2 {
         cands.push(Mv::ZERO);

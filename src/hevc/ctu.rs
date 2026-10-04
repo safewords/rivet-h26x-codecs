@@ -1088,13 +1088,16 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 .wait_done(need);
         }
         let weighting = self.weighting_for(cand.ref_idx);
-        if let Some((tx, ty)) = self.trace.pu {
-            if tx >= x_pb && tx < x_pb + w && ty >= y_pb && ty < y_pb + h {
-                eprintln!(
-                    "pu poc={} x={x_pb} y={y_pb} w={w} h={h} merged={merged} mv={:?} ref_idx={:?} ref_delta={:?} weighting={:?}",
-                    self.refs.cur_poc, cand.mv, cand.ref_idx, mi.ref_delta, weighting
-                );
-            }
+        if let Some((tx, ty)) = self.trace.pu
+            && tx >= x_pb
+            && tx < x_pb + w
+            && ty >= y_pb
+            && ty < y_pb + h
+        {
+            eprintln!(
+                "pu poc={} x={x_pb} y={y_pb} w={w} h={h} merged={merged} mv={:?} ref_idx={:?} ref_delta={:?} weighting={:?}",
+                self.refs.cur_poc, cand.mv, cand.ref_idx, mi.ref_delta, weighting
+            );
         }
         let f0 = if cand.ref_idx[0] >= 0 {
             Some((self.ref_frames[0][cand.ref_idx[0] as usize], cand.mv[0]))
@@ -1407,7 +1410,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         cbf_c: [[bool; 2]; 2],
     ) -> Result<()> {
         let n = 1usize << log2;
-        let (pw, ph) = (self.frame.width as usize, self.frame.height as usize);
+        let (pw, ph) = (self.frame.width, self.frame.height);
         // Transform block edges + cbf for the deblocking filter.
         {
             let w4 = self.info.w4;
@@ -2889,6 +2892,30 @@ pub(crate) const MODE_422: [u32; 35] = [
     26, 27, 27, 28, 28, 29, 29, 30, 31,
 ];
 
+/// The coding unit facts the transform tree needs.
+pub struct CuCtx {
+    /// CB position.
+    pub x0: i32,
+    /// See `x0`.
+    pub y0: i32,
+    /// `log2CbSize`.
+    pub log2_cb: u32,
+    /// Intra?
+    pub intra: bool,
+    /// Partition mode.
+    pub part_mode: PartMode,
+    /// `IntraSplitFlag`.
+    pub intra_split: bool,
+    /// `MaxTrafoDepth`.
+    pub max_depth: u32,
+    /// `IntraPredModeC` per prediction block (all equal unless 4:4:4 NxN).
+    pub chroma_modes: [u32; 4],
+    /// `intra_chroma_pred_mode` syntax per prediction block (4 = from luma).
+    pub chroma_syntax: [u32; 4],
+    /// `cu_transquant_bypass_flag`.
+    pub bypass: bool,
+}
+
 #[cfg(test)]
 mod write_round_trip {
     use super::*;
@@ -3046,8 +3073,8 @@ mod write_round_trip {
             let (xq, yq) = self.qg;
             let ctb_x0 = (xq >> self.log2_ctb) << self.log2_ctb;
             let ctb_y0 = (yq >> self.log2_ctb) << self.log2_ctb;
-            let qa = (xq - 1 >= ctb_x0).then(|| self.exp_qp[self.idx4(xq - 1, yq)] as i32);
-            let qb = (yq - 1 >= ctb_y0).then(|| self.exp_qp[self.idx4(xq, yq - 1)] as i32);
+            let qa = (xq > ctb_x0).then(|| self.exp_qp[self.idx4(xq - 1, yq)] as i32);
+            let qb = (yq > ctb_y0).then(|| self.exp_qp[self.idx4(xq, yq - 1)] as i32);
             qp_y_pred_from(qa, qb, self.qg_qp_prev)
         }
 
@@ -3164,18 +3191,18 @@ mod write_round_trip {
             // group's size — the reader's reset of `IsCuQpDeltaCoded`,
             // `CuQpDeltaVal` and `qPY_PREV` at the top of
             // `coding_quadtree`.
-            if let Some(log2_qg) = self.qp_delta {
-                if log2_cb >= log2_qg {
-                    self.is_cu_qp_delta_coded = false;
-                    self.cu_qp_delta_val = 0;
-                    self.qg = (x0, y0);
-                    self.qg_qp_prev = if self.first_qg {
-                        self.slice_qp
-                    } else {
-                        self.qp_y_prev
-                    };
-                    self.first_qg = false;
-                }
+            if let Some(log2_qg) = self.qp_delta
+                && log2_cb >= log2_qg
+            {
+                self.is_cu_qp_delta_coded = false;
+                self.cu_qp_delta_val = 0;
+                self.qg = (x0, y0);
+                self.qg_qp_prev = if self.first_qg {
+                    self.slice_qp
+                } else {
+                    self.qp_y_prev
+                };
+                self.first_qg = false;
             }
             if split {
                 let half = size / 2;
@@ -5113,28 +5140,4 @@ mod write_round_trip {
             });
         }
     }
-}
-
-/// The coding unit facts the transform tree needs.
-pub struct CuCtx {
-    /// CB position.
-    pub x0: i32,
-    /// See `x0`.
-    pub y0: i32,
-    /// `log2CbSize`.
-    pub log2_cb: u32,
-    /// Intra?
-    pub intra: bool,
-    /// Partition mode.
-    pub part_mode: PartMode,
-    /// `IntraSplitFlag`.
-    pub intra_split: bool,
-    /// `MaxTrafoDepth`.
-    pub max_depth: u32,
-    /// `IntraPredModeC` per prediction block (all equal unless 4:4:4 NxN).
-    pub chroma_modes: [u32; 4],
-    /// `intra_chroma_pred_mode` syntax per prediction block (4 = from luma).
-    pub chroma_syntax: [u32; 4],
-    /// `cu_transquant_bypass_flag`.
-    pub bypass: bool,
 }

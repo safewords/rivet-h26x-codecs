@@ -1376,7 +1376,7 @@ impl<S: Sample> Core<S> {
     fn retain_reference(&mut self, c: &Coded, mut frame: crate::hevc::frame::Frame<S>) {
         let want = self.refs_after(c);
         if c.reference {
-            frame.poc = c.poc as i32;
+            frame.poc = c.poc;
             frame.extend_rows(0, frame.height);
             self.refs.push(frame);
             while self.refs.len() > self.refs_kept() {
@@ -1498,7 +1498,7 @@ impl<S: Sample> Core<S> {
         // before releasing the B pictures between them, so both are here by
         // the time one of those codes — and the retention below keeps them
         // until the last picture that can reference them has been coded.
-        let cur = c.poc as i32;
+        let cur = c.poc;
         // RefPicList0: the past references, nearest first, capped by what
         // the configuration asks for (`max_refs`, 1 by default) and what
         // the SPS sized the decoded picture buffer to hold. Nearest first
@@ -1548,7 +1548,7 @@ impl<S: Sample> Core<S> {
         };
         // The reconstruction takes its sample depth from the parsed SPS —
         // the same field a decoder of this stream sizes its frames by.
-        let mut pic = InterPicture::<S>::new(&sps, &pps, c.poc as i32);
+        let mut pic = InterPicture::<S>::new(&sps, &pps, c.poc);
         pic.parts = self.cfg.inter_parts;
 
         // Weighted prediction, for a P slice under `weighted_pred_flag` and
@@ -1790,45 +1790,43 @@ impl<S: Sample> Core<S> {
         // for it — a test holds that on a fade, and the census line
         // reports it on every clip.
         let mut wp_stats = (0u64, 0u64, 0u64);
-        if let Some((_, fits)) = &wp {
-            if fits.iter().flatten().any(|f| f[0].used()) {
-                wp_stats.0 = 1;
-                for cu in &cus {
-                    let PCuDecision::Inter(d) = &cu.d else {
-                        continue;
-                    };
-                    // A CU counts when a list it predicts from carries a
-                    // chosen luma fit; a bi CU is scored as the pair.
-                    let ref_idx = [d.ref_idx, d.ref_idx_l1];
-                    let fitted = |list: usize| {
-                        ref_idx[list] >= 0 && fits[list][ref_idx[list] as usize][0].used()
-                    };
-                    if !fitted(0) && !fitted(1) {
-                        continue;
-                    }
-                    let (plain, weighted) = match refs {
-                        TreeRefs::B(r0, r1) => pic.weighting_gain_b(
-                            &mctx,
-                            r0,
-                            r1,
-                            cu.x0,
-                            cu.y0,
-                            cu.log2,
-                            &py,
-                            cw,
-                            [d.mv, d.mv_l1],
-                            ref_idx,
-                        ),
-                        TreeRefs::P(_) => {
-                            let r = d.ref_idx as usize;
-                            pic.weighting_gain(
-                                &mctx, l0[r], r, cu.x0, cu.y0, cu.log2, &py, cw, d.mv,
-                            )
-                        }
-                    };
-                    wp_stats.1 += u64::from(weighted < plain);
-                    wp_stats.2 += u64::from(weighted > plain);
+        if let Some((_, fits)) = &wp
+            && fits.iter().flatten().any(|f| f[0].used())
+        {
+            wp_stats.0 = 1;
+            for cu in &cus {
+                let PCuDecision::Inter(d) = &cu.d else {
+                    continue;
+                };
+                // A CU counts when a list it predicts from carries a
+                // chosen luma fit; a bi CU is scored as the pair.
+                let ref_idx = [d.ref_idx, d.ref_idx_l1];
+                let fitted = |list: usize| {
+                    ref_idx[list] >= 0 && fits[list][ref_idx[list] as usize][0].used()
+                };
+                if !fitted(0) && !fitted(1) {
+                    continue;
                 }
+                let (plain, weighted) = match refs {
+                    TreeRefs::B(r0, r1) => pic.weighting_gain_b(
+                        &mctx,
+                        r0,
+                        r1,
+                        cu.x0,
+                        cu.y0,
+                        cu.log2,
+                        &py,
+                        cw,
+                        [d.mv, d.mv_l1],
+                        ref_idx,
+                    ),
+                    TreeRefs::P(_) => {
+                        let r = d.ref_idx as usize;
+                        pic.weighting_gain(&mctx, l0[r], r, cu.x0, cu.y0, cu.log2, &py, cw, d.mv)
+                    }
+                };
+                wp_stats.1 += u64::from(weighted < plain);
+                wp_stats.2 += u64::from(weighted > plain);
             }
         }
         // After the whole picture reconstructs and before the crop, for
@@ -4780,11 +4778,9 @@ mod tests {
                     break;
                 }
             }
-            if !named {
-                if let Err(err) = e.flush() {
-                    assert!(format!("{err}").contains(want));
-                    named = true;
-                }
+            if !named && let Err(err) = e.flush() {
+                assert!(format!("{err}").contains(want));
+                named = true;
             }
             assert!(named, "never reached the {want:?} hole");
         }
@@ -5991,7 +5987,9 @@ mod tests {
                 let max = (1u32 << bit_depth) - 1;
                 let deep = |bytes: &[u8]| {
                     bytes
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .any(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) > 255)
                 };
                 assert!(
@@ -6000,7 +5998,9 @@ mod tests {
                 );
                 assert!(
                     frames[0]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .all(|p| u32::from(u16::from_le_bytes([p[0], p[1]])) <= max)
                 );
 

@@ -675,7 +675,7 @@ unsafe fn luma_filter_intra(v: &mut LumaLines, alpha: i32, beta: i32) {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn tc0_luma(tc0: &[i16; 4]) -> __m256i {
-    let t = |k: usize| tc0[k] as i16;
+    let t = |k: usize| tc0[k];
     _mm256_setr_epi16(
         t(0),
         t(0),
@@ -996,7 +996,7 @@ unsafe fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn tc0_chroma(tc0: &[i16; 4]) -> __m128i {
-    let t = |k: usize| tc0[k] as i16;
+    let t = |k: usize| tc0[k];
     _mm_setr_epi16(t(0), t(0), t(1), t(1), t(2), t(2), t(3), t(3))
 }
 

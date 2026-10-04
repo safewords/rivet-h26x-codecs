@@ -342,6 +342,10 @@ impl<S: Sample> Frame<S> {
 
     /// See [`Self::plane_frame`].
     #[inline]
+    // `if let Some(p) = self.colour_planes.as_mut() { return .. }` followed by
+    // `self` is the borrow checker's conditional-return limitation; is_some
+    // then unwrap is the form it accepts.
+    #[allow(clippy::unnecessary_unwrap)]
     pub fn plane_frame_mut(&mut self, k: usize) -> &mut Frame<S> {
         if (1..=2).contains(&k) && self.colour_planes.is_some() {
             return &mut self.colour_planes.as_mut().unwrap()[k - 1];
@@ -654,7 +658,7 @@ impl<S: Sample> Frame<S> {
                         )
                     };
                 } else {
-                    for (d, s) in dst.chunks_exact_mut(2).zip(src) {
+                    for (d, s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(src) {
                         d.copy_from_slice(&(s.to_i32() as u16).to_le_bytes());
                     }
                 }

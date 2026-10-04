@@ -15,6 +15,8 @@ fn md5_hex(data: &[u8]) -> String {
 }
 
 /// The two decoders behind one face.
+// One per run: the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum Dec {
     H264(h26x::h264::H264Decoder),
     Hevc(h26x::hevc::HevcDecoder),

@@ -1223,132 +1223,6 @@ fn sao_edge_scalar<S: Sample>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The plain matrix product the butterfly must equal.
-    fn idct_matrix(n: usize, coeffs: &[i16], bd_shift: i32) -> Vec<i16> {
-        let step = 32 / n;
-        let mut tmp = vec![0i32; n * n];
-        for x in 0..n {
-            for i in 0..n {
-                let mut s = 0i64;
-                for j in 0..n {
-                    s += TRANSFORM32[j * step][i] as i64 * coeffs[j * n + x] as i64;
-                }
-                tmp[i * n + x] = ((s + 64) >> 7).clamp(-32768, 32767) as i32;
-            }
-        }
-        let mut out = vec![0i16; n * n];
-        let round = 1i64 << (bd_shift - 1);
-        for y in 0..n {
-            for i in 0..n {
-                let mut s = 0i64;
-                for j in 0..n {
-                    s += TRANSFORM32[j * step][i] as i64 * tmp[y * n + j] as i64;
-                }
-                out[y * n + i] = ((s + round) >> bd_shift).clamp(-32768, 32767) as i16;
-            }
-        }
-        out
-    }
-
-    fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (*seed >> 33) as u32
-    }
-
-    /// The wide kernels are the `i16` ones wherever both ranges hold: the
-    /// same random blocks through both, at `log2TransformRange = 15`.
-    #[test]
-    fn wide_transforms_equal_the_i16_kernels_in_range() {
-        let mut seed = 11u64;
-        for &(n, log2) in &[(4usize, 2u32), (8, 3), (16, 4), (32, 5)] {
-            for trial in 0..100 {
-                let mut c = vec![0i16; n * n];
-                let (mx, my) = if trial % 3 == 0 {
-                    (n - 1, n - 1)
-                } else {
-                    ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n)
-                };
-                for y in 0..=my {
-                    for x in 0..=mx {
-                        if lcg(&mut seed) % 3 == 0 {
-                            // Small enough that the i16 kernel's output clip never bites.
-                            c[y * n + x] = (lcg(&mut seed) as i32 % 2048 - 1024) as i16;
-                        }
-                    }
-                }
-                let bd_shift = 20 - 8 - (trial % 3) as i32 * 2;
-                let mut want = c.clone();
-                (HevcDsp::<u16>::SCALAR.idct[(log2 - 2) as usize])(&mut want, bd_shift, mx, my);
-                let mut got: Vec<i32> = c.iter().map(|&v| v as i32).collect();
-                idct_wide(&mut got, log2, 15, bd_shift, mx, my);
-                assert_eq!(
-                    got,
-                    want.iter().map(|&v| v as i32).collect::<Vec<_>>(),
-                    "n={n} trial={trial}"
-                );
-                if n == 4 {
-                    let mut want = c.clone();
-                    (HevcDsp::<u16>::SCALAR.idst4)(&mut want, bd_shift, mx, my);
-                    let mut got: Vec<i32> = c.iter().map(|&v| v as i32).collect();
-                    idst4_wide(&mut got, 15, bd_shift);
-                    assert_eq!(
-                        got,
-                        want.iter().map(|&v| v as i32).collect::<Vec<_>>(),
-                        "dst trial={trial}"
-                    );
-                }
-            }
-        }
-        // add_residual: clipping at both ends, 16-bit samples.
-        let mut a = vec![100u16, 65535, 0, 30000];
-        let mut b = a.clone();
-        let res16 = [-200i16, 5, -1, 32767];
-        let res32: Vec<i32> = res16.iter().map(|&v| v as i32).collect();
-        (HevcDsp::<u16>::SCALAR.add_residual)(&mut a, 2, &res16, 2, 65535);
-        add_residual_wide(&mut b, 2, &res32, 2, 65535);
-        assert_eq!(a, b);
-        assert_eq!(a, [0, 65535, 0, 62767]);
-        // And what only the wide one can express: a residual beyond i16.
-        let mut c = vec![1000u16; 4];
-        add_residual_wide(&mut c, 2, &[60000, -60000, 70000, -1], 2, 65535);
-        assert_eq!(c, [61000, 0, 65535, 999]);
-    }
-
-    #[test]
-    fn butterfly_equals_matrix() {
-        let mut seed = 7u64;
-        for &(n, log2) in &[(4usize, 2u32), (8, 3), (16, 4), (32, 5)] {
-            for trial in 0..200 {
-                let mut c = vec![0i16; n * n];
-                // Sparse blocks with a bounding box, plus dense ones.
-                let (mx, my) = if trial % 3 == 0 {
-                    (n - 1, n - 1)
-                } else {
-                    ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n)
-                };
-                for y in 0..=my {
-                    for x in 0..=mx {
-                        if lcg(&mut seed) % 3 == 0 {
-                            c[y * n + x] = (lcg(&mut seed) as i32 % 65536 - 32768) as i16;
-                        }
-                    }
-                }
-                let bd_shift = 20 - 8 - (trial % 3) as i32 * 2;
-                let want = idct_matrix(n, &c, bd_shift);
-                let mut got = c.clone();
-                (HevcDsp::<u16>::SCALAR.idct[(log2 - 2) as usize])(&mut got, bd_shift, mx, my);
-                assert_eq!(got, want, "n={n} trial={trial}");
-            }
-        }
-    }
-}
-
 // ----------------------------------------------------------------------
 // Deblocking (scalar)
 // ----------------------------------------------------------------------
@@ -1533,5 +1407,131 @@ fn deblock_chroma_scalar<S: Sample>(
             no_q[seg],
             max,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The plain matrix product the butterfly must equal.
+    fn idct_matrix(n: usize, coeffs: &[i16], bd_shift: i32) -> Vec<i16> {
+        let step = 32 / n;
+        let mut tmp = vec![0i32; n * n];
+        for x in 0..n {
+            for i in 0..n {
+                let mut s = 0i64;
+                for j in 0..n {
+                    s += TRANSFORM32[j * step][i] as i64 * coeffs[j * n + x] as i64;
+                }
+                tmp[i * n + x] = ((s + 64) >> 7).clamp(-32768, 32767) as i32;
+            }
+        }
+        let mut out = vec![0i16; n * n];
+        let round = 1i64 << (bd_shift - 1);
+        for y in 0..n {
+            for i in 0..n {
+                let mut s = 0i64;
+                for j in 0..n {
+                    s += TRANSFORM32[j * step][i] as i64 * tmp[y * n + j] as i64;
+                }
+                out[y * n + i] = ((s + round) >> bd_shift).clamp(-32768, 32767) as i16;
+            }
+        }
+        out
+    }
+
+    fn lcg(seed: &mut u64) -> u32 {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*seed >> 33) as u32
+    }
+
+    /// The wide kernels are the `i16` ones wherever both ranges hold: the
+    /// same random blocks through both, at `log2TransformRange = 15`.
+    #[test]
+    fn wide_transforms_equal_the_i16_kernels_in_range() {
+        let mut seed = 11u64;
+        for &(n, log2) in &[(4usize, 2u32), (8, 3), (16, 4), (32, 5)] {
+            for trial in 0..100 {
+                let mut c = vec![0i16; n * n];
+                let (mx, my) = if trial % 3 == 0 {
+                    (n - 1, n - 1)
+                } else {
+                    ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n)
+                };
+                for y in 0..=my {
+                    for x in 0..=mx {
+                        if lcg(&mut seed).is_multiple_of(3) {
+                            // Small enough that the i16 kernel's output clip never bites.
+                            c[y * n + x] = (lcg(&mut seed) as i32 % 2048 - 1024) as i16;
+                        }
+                    }
+                }
+                let bd_shift = 20 - 8 - (trial % 3) * 2;
+                let mut want = c.clone();
+                (HevcDsp::<u16>::SCALAR.idct[(log2 - 2) as usize])(&mut want, bd_shift, mx, my);
+                let mut got: Vec<i32> = c.iter().map(|&v| v as i32).collect();
+                idct_wide(&mut got, log2, 15, bd_shift, mx, my);
+                assert_eq!(
+                    got,
+                    want.iter().map(|&v| v as i32).collect::<Vec<_>>(),
+                    "n={n} trial={trial}"
+                );
+                if n == 4 {
+                    let mut want = c.clone();
+                    (HevcDsp::<u16>::SCALAR.idst4)(&mut want, bd_shift, mx, my);
+                    let mut got: Vec<i32> = c.iter().map(|&v| v as i32).collect();
+                    idst4_wide(&mut got, 15, bd_shift);
+                    assert_eq!(
+                        got,
+                        want.iter().map(|&v| v as i32).collect::<Vec<_>>(),
+                        "dst trial={trial}"
+                    );
+                }
+            }
+        }
+        // add_residual: clipping at both ends, 16-bit samples.
+        let mut a = vec![100u16, 65535, 0, 30000];
+        let mut b = a.clone();
+        let res16 = [-200i16, 5, -1, 32767];
+        let res32: Vec<i32> = res16.iter().map(|&v| v as i32).collect();
+        (HevcDsp::<u16>::SCALAR.add_residual)(&mut a, 2, &res16, 2, 65535);
+        add_residual_wide(&mut b, 2, &res32, 2, 65535);
+        assert_eq!(a, b);
+        assert_eq!(a, [0, 65535, 0, 62767]);
+        // And what only the wide one can express: a residual beyond i16.
+        let mut c = vec![1000u16; 4];
+        add_residual_wide(&mut c, 2, &[60000, -60000, 70000, -1], 2, 65535);
+        assert_eq!(c, [61000, 0, 65535, 999]);
+    }
+
+    #[test]
+    fn butterfly_equals_matrix() {
+        let mut seed = 7u64;
+        for &(n, log2) in &[(4usize, 2u32), (8, 3), (16, 4), (32, 5)] {
+            for trial in 0..200 {
+                let mut c = vec![0i16; n * n];
+                // Sparse blocks with a bounding box, plus dense ones.
+                let (mx, my) = if trial % 3 == 0 {
+                    (n - 1, n - 1)
+                } else {
+                    ((lcg(&mut seed) as usize) % n, (lcg(&mut seed) as usize) % n)
+                };
+                for y in 0..=my {
+                    for x in 0..=mx {
+                        if lcg(&mut seed).is_multiple_of(3) {
+                            c[y * n + x] = (lcg(&mut seed) as i32 % 65536 - 32768) as i16;
+                        }
+                    }
+                }
+                let bd_shift = 20 - 8 - (trial % 3) * 2;
+                let want = idct_matrix(n, &c, bd_shift);
+                let mut got = c.clone();
+                (HevcDsp::<u16>::SCALAR.idct[(log2 - 2) as usize])(&mut got, bd_shift, mx, my);
+                assert_eq!(got, want, "n={n} trial={trial}");
+            }
+        }
     }
 }

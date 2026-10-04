@@ -286,7 +286,7 @@ mod tests {
         let mut expect = vec![1u8; 16];
         expect[2 * 4 + 2] = 0;
         expect[2 * 4 + 1] = 0;
-        expect[1 * 4 + 1] = 0;
+        expect[4 + 1] = 0;
         assert_eq!(m, expect);
         // Everything in group 0 once the cycle covers the picture.
         assert!(

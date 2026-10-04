@@ -353,7 +353,10 @@ pub(crate) fn satd_scalar<S: Sample>(
     w: usize,
     h: usize,
 ) -> u32 {
-    debug_assert!(w % 4 == 0 && h % 4 == 0, "SATD wants a multiple of four");
+    debug_assert!(
+        w.is_multiple_of(4) && h.is_multiple_of(4),
+        "SATD wants a multiple of four"
+    );
     let mut total = 0u32;
     for by in (0..h).step_by(4) {
         for bx in (0..w).step_by(4) {

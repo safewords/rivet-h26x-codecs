@@ -817,7 +817,7 @@ impl Sps {
         let log2_ctb_size = log2_min_cb_size + r.ue();
         let log2_min_tb_size = r.ue() + 2;
         let log2_max_tb_size = log2_min_tb_size + r.ue();
-        if log2_ctb_size > 6 || log2_ctb_size < 4 || log2_min_cb_size > log2_ctb_size {
+        if !(4..=6).contains(&log2_ctb_size) || log2_min_cb_size > log2_ctb_size {
             return Err(Error::bitstream("coding block sizes out of range"));
         }
         if log2_max_tb_size > 5
