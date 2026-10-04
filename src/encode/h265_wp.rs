@@ -166,7 +166,6 @@ pub(crate) const H264_WEIGHTS: (i32, i32) = (-128, 127);
 /// [`fit_plane`] over any reference layout, with the weight held to
 /// `weights` — the range the caller's table syntax carries.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn fit_samples<S: Sample>(dist: &DistortionDsp<S>, cur: &[S], cur_stride: usize, refp: RefSamples<'_, S>, w: usize, h: usize, bit_depth: u32, weights: (i32, i32)) -> PlaneFit {
     fit_samples_at(dist, &plane_sums(dist, cur, cur_stride, refp, w, h), cur, cur_stride, refp, w, h, bit_depth, weights, LOG2_DENOM)
 }

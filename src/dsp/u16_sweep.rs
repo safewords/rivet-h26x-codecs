@@ -258,7 +258,7 @@ const BI: [(i32, i32, i32, i32, i32); 7] =
 /// Copy, average and weighted combination.
 pub fn h264_combine(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
     let s = H264Dsp::<u16>::SCALAR;
-    let mut rng = Rng(0xc0b1_ae);
+    let mut rng = Rng(0x00c0_b1ae);
     let mut n = 0;
     for bd in H264_DEPTHS {
         let max = (1i32 << bd) - 1;
@@ -341,7 +341,7 @@ fn deblock_plane(rng: &mut Rng, kind: u32, max: i32, alpha: i32, beta: i32, stri
 /// vertical and horizontal, and the MBAFF eight-line luma edges.
 pub fn h264_deblock(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
     let s = H264Dsp::<u16>::SCALAR;
-    let mut rng = Rng(0xdeb1_0c);
+    let mut rng = Rng(0x00de_b10c);
     let mut n = 0;
     let stride = 48;
     let off = 8 * stride + 8;
@@ -391,7 +391,7 @@ pub fn h264_deblock(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
 /// Inverse transforms, the DC-only adds and the residual paths.
 pub fn h264_transforms(tables: &[(&str, H264Dsp<u16>)]) -> Result<u64, String> {
     let s = H264Dsp::<u16>::SCALAR;
-    let mut rng = Rng(0x1dc7_8);
+    let mut rng = Rng(0x0001_dc78);
     let mut n = 0;
     let stride = 24;
     for bd in H264_DEPTHS {
