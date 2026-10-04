@@ -52,6 +52,10 @@ pub struct IntraScratch {
     filtered: Option<bool>,
     /// `ref[]` of the angular predictor, biased by `n` (see [`REF_LEN`]).
     ref_buf: [u16; REF_LEN],
+    /// What `ref_buf` holds, so the encoder's 35 trials of one block
+    /// assemble it once per family of modes instead of once per mode;
+    /// [`prepare`] clears it. See [`RefKey`].
+    ref_key: Option<RefKey>,
     /// Which reference samples may be used.
     pub avail: RefAvail,
 }
@@ -67,9 +71,25 @@ impl Default for IntraScratch {
             fc: 0,
             filtered: None,
             ref_buf: [0; REF_LEN],
+            ref_key: None,
             avail: RefAvail { corner: false, left: [false; 64], top: [false; 64] },
         }
     }
+}
+
+/// Everything the contents of `IntraScratch::ref_buf` depend on, for the
+/// block [`prepare`] last gathered: its size, which references fed it (the
+/// smoothed ones, and for which strong-filter eligibility, or the plain
+/// ones), which side is the main one, and — for a negative angle, whose
+/// extension projects the other side through `invAngle` — the mode. Two
+/// predictions with the same key read the same `ref[]` (a non-negative
+/// angle's extension is the main side's second half whatever the angle).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RefKey {
+    n: usize,
+    smoothed: Option<bool>,
+    main_is_top: bool,
+    negative_mode: Option<u32>,
 }
 
 /// Availability of each reference sample of a block: `left[0..2n]` for
@@ -117,8 +137,9 @@ pub fn predict<S: Sample>(
 /// follow: a prediction writes only inside the block, and its references
 /// are all outside it.
 pub fn prepare<S: Sample>(plane: &Plane16<S>, sc: &mut IntraScratch, x0: usize, y0: usize, n: usize, bit_depth: u32) {
-    let IntraScratch { left, top, corner, filtered, avail, .. } = sc;
+    let IntraScratch { left, top, corner, filtered, avail, ref_key, .. } = sc;
     *filtered = None;
+    *ref_key = None;
     let stride = plane.stride;
     let base = plane.offset(x0 as isize, y0 as isize);
     let n2 = 2 * n;
@@ -265,7 +286,7 @@ pub fn predict_prepared<S: Sample>(
     }
     let stride = plane.stride;
     let base = plane.offset(x0 as isize, y0 as isize);
-    let IntraScratch { left, top, corner, fl, ft, fc, ref_buf, .. } = sc;
+    let IntraScratch { left, top, corner, fl, ft, fc, ref_buf, ref_key, filtered, .. } = sc;
     let (left, top, corner) = if smoothed { (&*fl, &*ft, *fc) } else { (&*left, &*top, *corner) };
     let dst = &mut plane.data[base..];
     match mode {
@@ -276,21 +297,29 @@ pub fn predict_prepared<S: Sample>(
             // ref[] of 8.4.4.2.6, biased by n so negative indices work:
             // the side the mode points at, extended by the other side's
             // projection (negative angles) or by its own second half.
+            // Built only when the last build was for other references:
+            // besides the copying, a fresh build right before the kernel
+            // reads it costs the kernel's wide loads a failed store
+            // forwarding each, which was most of a 4x4 prediction.
+            let key = RefKey { n, smoothed: if smoothed { *filtered } else { None }, main_is_top: mode >= 18, negative_mode: (angle < 0).then_some(mode) };
             let (main, side) = if mode >= 18 { (top, left) } else { (left, top) };
-            ref_buf[n] = corner;
-            ref_buf[n + 1..=2 * n].copy_from_slice(&main[..n]);
-            if angle < 0 {
-                let last = (n as i32 * angle) >> 5;
-                if last < -1 {
-                    let inv = INV_ANGLE[(mode - 11) as usize];
-                    for x in last..=-1 {
-                        // ref[x] = p[-1][-1 + ((x*invAngle+128)>>8)] (or its transpose)
-                        let idx = -1 + ((x * inv + 128) >> 8);
-                        ref_buf[(x + n as i32) as usize] = if idx < 0 { corner } else { side[idx as usize] };
+            if *ref_key != Some(key) {
+                *ref_key = Some(key);
+                ref_buf[n] = corner;
+                ref_buf[n + 1..=2 * n].copy_from_slice(&main[..n]);
+                if angle < 0 {
+                    let last = (n as i32 * angle) >> 5;
+                    if last < -1 {
+                        let inv = INV_ANGLE[(mode - 11) as usize];
+                        for x in last..=-1 {
+                            // ref[x] = p[-1][-1 + ((x*invAngle+128)>>8)] (or its transpose)
+                            let idx = -1 + ((x * inv + 128) >> 8);
+                            ref_buf[(x + n as i32) as usize] = if idx < 0 { corner } else { side[idx as usize] };
+                        }
                     }
+                } else {
+                    ref_buf[2 * n + 1..=3 * n].copy_from_slice(&main[n..2 * n]);
                 }
-            } else {
-                ref_buf[2 * n + 1..=3 * n].copy_from_slice(&main[n..2 * n]);
             }
             // Horizontal-ish modes run along columns: the kernel predicts
             // the transposed block.

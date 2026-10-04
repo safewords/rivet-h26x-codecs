@@ -47,6 +47,7 @@ pub fn install(d: &mut HevcDsp<u8>) {
     d.deblock_luma_h = deblock_luma_h_avx2;
     d.deblock_chroma_v = deblock_chroma_v_avx2;
     d.deblock_chroma_h = deblock_chroma_h_avx2;
+    d.intra_angular = intra_angular_avx2;
 }
 
 // ----------------------------------------------------------------------
@@ -1133,6 +1134,220 @@ unsafe fn deblock_chroma_h_impl(data: *mut u8, stride: usize, tc: [i32; 4], no_p
     }
 }
 
+// ----------------------------------------------------------------------
+// Intra prediction: the angular modes (8.4.4.2.6)
+// ----------------------------------------------------------------------
+//
+// `((32 - f) * ref[x + i + 1] + f * ref[x + i + 2] + 16) >> 5` is one
+// `pmaddubsw` of the interleaved neighbour bytes against the byte pair
+// `(32 - f, f)` — both weights fit a signed byte and the sum, at most
+// 32 * 255, an i16 — and the rounding shift one `pmulhrsw` by 1 << 10:
+// `(s * 1024 + (1 << 14)) >> 15 = (s + 16) >> 5` for every such `s`. A
+// zero fraction weighs the pair `(32, 0)`, which is the copy the standard
+// asks for, so no row needs its own path. A row of 32 samples is two
+// multiplies, where the 16-bit-sample kernel the 8-bit table used before
+// took eight. The references are packed to bytes once per call (they are
+// u16 for both tables); the rows go out 32, 16 x 2 or 8 x 2 a vector
+// depending on the block size, and a 4x4 block's four in one.
+
+/// Angular prediction of an `n x n` 8-bit block (`n` 4 to 32) from `refs`
+/// (`ref[k]` at `refs[k + n]`), as [`HevcDsp::intra_angular`].
+fn intra_angular_avx2(dst: &mut [u8], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
+    let reach = angular_pack_len(n);
+    let fits = n >= 4 && (n - 1) * stride + n <= dst.len();
+    if n == 4 {
+        if refs.len() < 16 || !fits || !(-32..=32).contains(&angle) {
+            return (HevcDsp::<u8>::SCALAR.intra_angular)(dst, stride, refs, n, angle, transposed);
+        }
+        // SAFETY: AVX2 as above; `refs` holds 16 elements and `dst` the
+        // block's last sample.
+        return unsafe { intra_angular4_impl(dst.as_mut_ptr(), stride, refs, angle, transposed) };
+    }
+    if !matches!(n, 8 | 16 | 32) || !fits || refs.len() < reach || !(-32..=32).contains(&angle) {
+        return (HevcDsp::<u8>::SCALAR.intra_angular)(dst, stride, refs, n, angle, transposed);
+    }
+    // SAFETY: `install` only puts this kernel in a table built for a CPU
+    // with AVX2. `refs` holds `reach` elements and `dst` the block's last
+    // sample (checked above); every load and store in the kernel is inside
+    // those, as its documentation says.
+    unsafe { intra_angular_impl(dst.as_mut_ptr(), stride, refs, n, angle, transposed) }
+}
+
+/// How many references the kernel packs to bytes: `ref[]` spans
+/// `refs[0..3n + 2]`, and the last row's vector loads, `max(n, 8)` bytes
+/// from `refs[2n + 1]` and `refs[2n + 2]`, reach `2n + 2 + max(n, 8)`;
+/// eight at a time.
+fn angular_pack_len(n: usize) -> usize {
+    (3 * n + 2).max(2 * n + 2 + n.max(8)).next_multiple_of(8)
+}
+
+/// A 4x4 block in one vector, with no per-row scalar work. Its fourteen
+/// references fit one register as bytes, so row `y`'s pairs `(r[s + x],
+/// r[s + x + 1])`, `s = 5 + iIdx`, are one `pshufb` whose control is a
+/// fixed pattern plus `s` broadcast over the row's eight bytes, and its
+/// weights the `(32 - f, f)` pair broadcast likewise; `iIdx` and `f` for
+/// the four rows come out of one multiply of `(1, 2, 3, 4)` by the angle.
+/// Every byte the shuffles select is one of `r[1..=13]`.
+///
+/// # Safety
+/// AVX2. `refs` holds at least 16 elements, `|angle| <= 32`, and `dst` is
+/// writable for a 4x4 block at row pitch `stride`.
+#[target_feature(enable = "avx2")]
+unsafe fn intra_angular4_impl(dst: *mut u8, stride: usize, refs: &[u16], angle: i32, transposed: bool) {
+    unsafe {
+        let p = refs.as_ptr() as *const __m128i;
+        let r = _mm256_broadcastsi128_si256(_mm_packus_epi16(_mm_loadu_si128(p), _mm_loadu_si128(p.add(1))));
+        // (y + 1) * angle for rows 0-3, in the low four 16-bit lanes.
+        let pos = _mm_mullo_epi16(_mm_setr_epi16(1, 2, 3, 4, 0, 0, 0, 0), _mm_set1_epi16(angle as i16));
+        let start = _mm_add_epi16(_mm_srai_epi16::<5>(pos), _mm_set1_epi16(5));
+        let f = _mm_and_si128(pos, _mm_set1_epi16(31));
+        // `(32 - f) | f << 8`: the byte pair `pmaddubsw` wants.
+        let w = _mm_or_si128(_mm_sub_epi16(_mm_set1_epi16(32), f), _mm_slli_epi16::<8>(f));
+        // Each row's start byte over its eight control bytes, plus the
+        // pair pattern; each row's weight pair over its four pairs.
+        let spread = |lo: i8, hi: i8| _mm_setr_epi8(lo, lo, lo, lo, lo, lo, lo, lo, hi, hi, hi, hi, hi, hi, hi, hi);
+        let pattern = _mm_setr_epi8(0, 1, 1, 2, 2, 3, 3, 4, 0, 1, 1, 2, 2, 3, 3, 4);
+        let ctl = _mm256_setr_m128i(
+            _mm_add_epi8(_mm_shuffle_epi8(start, spread(0, 2)), pattern),
+            _mm_add_epi8(_mm_shuffle_epi8(start, spread(4, 6)), pattern),
+        );
+        let wpair = |a: i8, b: i8| _mm_setr_epi8(a, a + 1, a, a + 1, a, a + 1, a, a + 1, b, b + 1, b, b + 1, b, b + 1, b, b + 1);
+        let wts = _mm256_setr_m128i(_mm_shuffle_epi8(w, wpair(0, 2)), _mm_shuffle_epi8(w, wpair(4, 6)));
+        let v = angular_madd(_mm256_shuffle_epi8(r, ctl), wts);
+        // Rows 0, 1 in the low lane's first eight bytes, 2, 3 in the high's.
+        let v = _mm256_packus_epi16(v, v);
+        let mut b = _mm_unpacklo_epi64(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+        if transposed {
+            b = _mm_shuffle_epi8(b, _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15));
+        }
+        for (y, q) in [b, _mm_srli_si128::<4>(b), _mm_srli_si128::<8>(b), _mm_srli_si128::<12>(b)].into_iter().enumerate() {
+            std::ptr::write_unaligned(dst.add(y * stride) as *mut u32, _mm_cvtsi128_si32(q) as u32);
+        }
+    }
+}
+
+/// Eight interleaved `(ref[k], ref[k + 1])` byte pairs per 128-bit lane
+/// times `w` (the `(32 - f, f)` pair in every 16-bit lane), rounded and
+/// shifted: sixteen predictions as i16, eight a lane.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn angular_madd(pairs: __m256i, w: __m256i) -> __m256i {
+    _mm256_mulhrs_epi16(_mm256_maddubs_epi16(pairs, w), _mm256_set1_epi16(1 << 10))
+}
+
+/// The weight pair of row `y` and the offset of its first reference,
+/// `n + iIdx + 1`, into the packed references.
+#[inline(always)]
+fn angular_row(y: usize, n: usize, angle: i32) -> (i16, usize) {
+    let pos = (y as i32 + 1) * angle;
+    let (i, f) = (pos >> 5, pos & 31);
+    (pair8((32 - f) as i8, f as i8), (n as i32 + i + 1) as usize)
+}
+
+/// # Safety
+/// AVX2. `refs` holds at least `angular_pack_len(n)` elements,
+/// `n` is 8, 16 or 32, `|angle| <= 32`, and `dst` is writable for an
+/// `n x n` block at row pitch `stride`.
+#[target_feature(enable = "avx2")]
+unsafe fn intra_angular_impl(dst: *mut u8, stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
+    unsafe {
+        // The references as bytes. Row `y` reads `r[s..=s + n]` with
+        // `s = n + iIdx + 1` in `1..=2n + 1`, so at most `r[3n + 1]`. The
+        // vector loads of a row reach `r[s + max(n, 8)]` at most, which
+        // `angular_pack_len` covers, so every byte loaded was written here
+        // first; whatever lies past `3n + 1` lands in lanes no store keeps.
+        // A u8 table's references are all below 256, so `packus` only
+        // narrows.
+        let mut r = std::mem::MaybeUninit::<[u8; 104]>::uninit();
+        let rp = r.as_mut_ptr() as *mut u8;
+        let mut k = 0;
+        while k < angular_pack_len(n) {
+            let v = _mm_loadu_si128(refs.as_ptr().add(k) as *const __m128i);
+            _mm_storel_epi64(rp.add(k) as *mut __m128i, _mm_packus_epi16(v, v));
+            k += 8;
+        }
+        let rp = rp as *const u8;
+        // Transposed (the horizontal modes): predict into a scratch block
+        // of pitch `n`, then transpose it into place.
+        // Every byte of its `n x n` corner is written before the transpose
+        // reads it, and nothing else of it is read, so it is not cleared:
+        // clearing a kilobyte a call costs a 4x4 block more than predicting it.
+        let mut tmp = std::mem::MaybeUninit::<[u8; 32 * 32]>::uninit();
+        let (out, pitch) = if transposed { (tmp.as_mut_ptr() as *mut u8, n) } else { (dst, stride) };
+        match n {
+            32 => {
+                for y in 0..32 {
+                    let (w, s) = angular_row(y, n, angle);
+                    let a = _mm256_loadu_si256(rp.add(s) as *const __m256i);
+                    let b = _mm256_loadu_si256(rp.add(s + 1) as *const __m256i);
+                    let w = _mm256_set1_epi16(w);
+                    let lo = angular_madd(_mm256_unpacklo_epi8(a, b), w);
+                    let hi = angular_madd(_mm256_unpackhi_epi8(a, b), w);
+                    // Within each 128-bit lane `lo` holds samples 0-7
+                    // (16-23) and `hi` 8-15 (24-31): the in-lane pack puts
+                    // them back in order.
+                    _mm256_storeu_si256(out.add(y * pitch) as *mut __m256i, _mm256_packus_epi16(lo, hi));
+                }
+            }
+            16 => {
+                // Two rows a vector, one per 128-bit lane.
+                for y in (0..16).step_by(2) {
+                    let (w0, s0) = angular_row(y, n, angle);
+                    let (w1, s1) = angular_row(y + 1, n, angle);
+                    let a = _mm256_loadu2_m128i(rp.add(s1) as *const __m128i, rp.add(s0) as *const __m128i);
+                    let b = _mm256_loadu2_m128i(rp.add(s1 + 1) as *const __m128i, rp.add(s0 + 1) as *const __m128i);
+                    let w = _mm256_setr_m128i(_mm_set1_epi16(w0), _mm_set1_epi16(w1));
+                    let lo = angular_madd(_mm256_unpacklo_epi8(a, b), w);
+                    let hi = angular_madd(_mm256_unpackhi_epi8(a, b), w);
+                    let v = _mm256_packus_epi16(lo, hi);
+                    _mm_storeu_si128(out.add(y * pitch) as *mut __m128i, _mm256_castsi256_si128(v));
+                    _mm_storeu_si128(out.add((y + 1) * pitch) as *mut __m128i, _mm256_extracti128_si256::<1>(v));
+                }
+            }
+            8 => {
+                for y in (0..8).step_by(2) {
+                    let (w0, s0) = angular_row(y, n, angle);
+                    let (w1, s1) = angular_row(y + 1, n, angle);
+                    let a = _mm256_setr_m128i(_mm_loadl_epi64(rp.add(s0) as *const __m128i), _mm_loadl_epi64(rp.add(s1) as *const __m128i));
+                    let b = _mm256_setr_m128i(_mm_loadl_epi64(rp.add(s0 + 1) as *const __m128i), _mm_loadl_epi64(rp.add(s1 + 1) as *const __m128i));
+                    let w = _mm256_setr_m128i(_mm_set1_epi16(w0), _mm_set1_epi16(w1));
+                    let v = angular_madd(_mm256_unpacklo_epi8(a, b), w);
+                    let v = _mm256_packus_epi16(v, v);
+                    _mm_storel_epi64(out.add(y * pitch) as *mut __m128i, _mm256_castsi256_si128(v));
+                    _mm_storel_epi64(out.add((y + 1) * pitch) as *mut __m128i, _mm256_extracti128_si256::<1>(v));
+                }
+            }
+            _ => unreachable!("angular {n}x{n} is not this kernel's"),
+        }
+        if !transposed {
+            return;
+        }
+        let t = tmp.as_ptr() as *const u8;
+        // 8x8 byte tiles: three rounds of unpacks turn eight rows into
+        // eight columns.
+        for by in (0..n).step_by(8) {
+            for bx in (0..n).step_by(8) {
+                let ld = |j: usize| _mm_loadl_epi64(t.add((by + j) * n + bx) as *const __m128i);
+                let t0 = _mm_unpacklo_epi8(ld(0), ld(1));
+                let t1 = _mm_unpacklo_epi8(ld(2), ld(3));
+                let t2 = _mm_unpacklo_epi8(ld(4), ld(5));
+                let t3 = _mm_unpacklo_epi8(ld(6), ld(7));
+                let u0 = _mm_unpacklo_epi16(t0, t1);
+                let u1 = _mm_unpackhi_epi16(t0, t1);
+                let u2 = _mm_unpacklo_epi16(t2, t3);
+                let u3 = _mm_unpackhi_epi16(t2, t3);
+                // Columns 0-1, 2-3, 4-5 and 6-7 of the tile, eight bytes each.
+                let cols = [_mm_unpacklo_epi32(u0, u2), _mm_unpackhi_epi32(u0, u2), _mm_unpacklo_epi32(u1, u3), _mm_unpackhi_epi32(u1, u3)];
+                for (j, c) in cols.into_iter().enumerate() {
+                    let o = dst.add((bx + 2 * j) * stride + by);
+                    _mm_storel_epi64(o as *mut __m128i, c);
+                    _mm_storel_epi64(o.add(stride) as *mut __m128i, _mm_unpackhi_epi64(c, c));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,6 +1366,81 @@ mod tests {
         let mut d = HevcDsp::<u8>::SCALAR;
         install(&mut d);
         Some(d)
+    }
+
+    /// The angular predictor against the scalar reference on its own: every
+    /// angle the kernel accepts (not only the 33 the standard uses), both
+    /// orientations, every size, random and extreme references, and a
+    /// destination pitch wider than the block whose padding must survive.
+    #[test]
+    fn intra_angular_matches_scalar_u8() {
+        let Some(d) = avx2() else { return };
+        let s = HevcDsp::<u8>::SCALAR;
+        let mut seed = 0x5eed_u64;
+        let mut checked = 0;
+        for trial in 0..4 {
+            for n in [4usize, 8, 16, 32] {
+                // As `predict_prepared` sizes it: `3n + 2` references plus
+                // the slack the SIMD kernels may read.
+                let refs: Vec<u16> = (0..super::angular_pack_len(n))
+                    .map(|_| match trial {
+                        0 | 1 => (lcg(&mut seed) & 255) as u16,
+                        2 => [0u16, 255][(lcg(&mut seed) & 1) as usize],
+                        _ => 255,
+                    })
+                    .collect();
+                for angle in -32..=32 {
+                    for transposed in [false, true] {
+                        for stride in [n, n + 5, 64] {
+                            let mut a = vec![0x5au8; stride * n + 8];
+                            let mut b = a.clone();
+                            (s.intra_angular)(&mut a, stride, &refs, n, angle, transposed);
+                            (d.intra_angular)(&mut b, stride, &refs, n, angle, transposed);
+                            assert_eq!(a, b, "{n}x{n} angle {angle} transposed {transposed} stride {stride} trial {trial}");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 4 * 4 * 65 * 2 * 3);
+    }
+
+    /// ns per call, scalar against the 128-bit AVX table and this one, over
+    /// every mode the encoder's search tries. `cargo test --release
+    /// intra_angular_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing, not a check"]
+    fn intra_angular_bench() {
+        let Some(d) = avx2() else { return };
+        let s = HevcDsp::<u8>::SCALAR;
+        let avx = HevcDsp::<u8>::new(crate::dsp::Cpu { avx2: false, avx512: false, avx512vnni: false, ..crate::dsp::Cpu::detect() });
+        let mut seed = 9u64;
+        let refs: Vec<u16> = (0..3 * 32 + 2 + 8).map(|_| (lcg(&mut seed) & 255) as u16).collect();
+        let angles: [i32; 33] = [32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32];
+        for n in [4usize, 8, 16, 32] {
+            let mut dst = vec![0u8; 64 * 32];
+            let mut row = Vec::new();
+            for (name, t) in [("scalar", &s), ("avx", &avx), ("avx2", &d)] {
+                let reps = 20_000 / n;
+                let t0 = std::time::Instant::now();
+                let mut refs = refs.clone();
+                let src = refs.clone();
+                for _ in 0..reps {
+                    for (m, &angle) in angles.iter().enumerate() {
+                        // As `predict_prepared` does before every call: the
+                        // main side and the corner rewritten, so the
+                        // kernel's loads meet fresh, narrower stores.
+                        refs[n] = src[n];
+                        refs[n + 1..=2 * n].copy_from_slice(&src[n + 1..=2 * n]);
+                        (t.intra_angular)(&mut dst, 64, &refs, n, angle, m + 2 < 18);
+                    }
+                    std::hint::black_box(&mut dst);
+                }
+                row.push(format!("{name} {:.1}", t0.elapsed().as_nanos() as f64 / (reps * angles.len()) as f64));
+            }
+            eprintln!("intra_angular {n}x{n}: ns per call {}", row.join(", "));
+        }
     }
 
     #[test]
