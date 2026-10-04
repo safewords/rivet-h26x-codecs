@@ -153,10 +153,27 @@ into `umlal` pairs.
 the ladder one rung at a time, which is how one machine checks that every rung
 decodes to the same bytes — `tools/verify.sh` does exactly that on every run
 and fails if any two rungs disagree. Every SIMD kernel is also checked
-bit-exact against the scalar reference by the crate's tests, on both
-architectures in CI. `h26xdec --rung` (or [`dsp::Cpu::rung`]) prints which rung
+bit-exact against the scalar reference by the crate's tests: on x86-64
+in CI, on aarch64 by hand (see "NEON on ARM hardware"). `h26xdec --rung` (or [`dsp::Cpu::rung`]) prints which rung
 was selected, which is worth knowing before quoting a number from this
 machine or any other. `H26X_PROF=1` prints where the time went.
+
+### NEON on ARM hardware
+
+CI runs on x86-64 Linux only, so the NEON (aarch64) code paths are not tested
+there. They are verified by hand on ARM hardware (an aarch64 Linux machine,
+or Apple silicon) after a change to them and before a release:
+
+```sh
+cargo test --release
+H26X_NO_SIMD=1 cargo test --release
+# on a CPU with the dot-product extension (Apple M-series, Graviton 3, ...):
+H26X_REQUIRE_DOTPROD=1 cargo test --release
+```
+
+The first run checks every NEON kernel bit-exact against the scalar
+reference; the second decodes and encodes everything again on the scalar
+code; the third fails, rather than skips, if the `dotprod` rung is missing.
 
 ## Performance
 
@@ -339,7 +356,7 @@ loop filters, and since 2026-08-27 have SIMD tiers of their own for the
 kernels an encode profile actually spends its time in: the distortion
 metrics (SAD, SATD, SSD), the H.265 forward transforms and quantiser, and
 (since 2026-09-18) the H.264 forward transforms and quantisers, each on the same three architectures as the decode kernels — SSE2 to
-AVX2, NEON (bit-exact on the CI arm64 runners) and wasm `simd128`
+AVX2, NEON (bit-exact, checked by hand on ARM hardware) and wasm `simd128`
 (bit-exact and round-tripped inside the module by `tools/wasm.sh`) — and
 `tools/verify_enc_ladder.sh` holds every `H26X_MAX_SIMD` rung of an encode
 to the scalar reference's bytes. The CABAC encoder's

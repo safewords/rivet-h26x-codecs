@@ -11,11 +11,10 @@ env:
 
 # Every job runs on the safewords org's self-hosted runners
 # (`safewords-runners`), pull requests from forks included: an outside
-# contributor's workflow runs only once a maintainer approves it. arm64 is
-# covered on the same x86-64 runners: cross-compiled for
-# aarch64-unknown-linux-gnu and run under QEMU's user-mode emulator, so the
-# NEON kernels are still checked against the scalar ones. No Windows or macOS
-# CI: the code stays portable, but nothing here tests it there.
+# contributor's workflow runs only once a maintainer approves it. CI is
+# x86-64 Linux only. No Windows, macOS or arm64 jobs: the code stays
+# portable, and the NEON (aarch64) paths are checked by hand on ARM hardware
+# (README, "NEON on ARM hardware").
 
 jobs:
   test:
@@ -26,40 +25,17 @@ jobs:
       matrix:
         include:
           # The SIMD kernels are checked bit-exact against the scalar
-          # reference on every host: AVX2 on x86-64, NEON on arm64.
-          # `require` names a SIMD rung the host is expected to have, so the
-          # tests for it fail rather than skip if a runner ever loses it —
-          # a skipped kernel test is indistinguishable from a passing one.
+          # reference: AVX2 on x86-64 (NEON, and its dotprod rung, are
+          # checked by hand on ARM hardware, see the README).
           - { name: linux x86-64 (AVX2), os: safewords-runners }
-          - { name: linux arm64 (NEON) under QEMU,  os: safewords-runners, target: aarch64-unknown-linux-gnu, require: dotprod }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: aarch64 cross toolchain and QEMU
-        # The arm64 entry: cargo builds for aarch64-unknown-linux-gnu and runs
-        # every test binary under qemu-aarch64. The runner image has these;
-        # the install is a fallback for an image that predates them.
-        if: matrix.target
-        run: |
-          if ! command -v qemu-aarch64 >/dev/null || ! command -v aarch64-linux-gnu-gcc >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
-          fi
-          {
-            echo "CARGO_BUILD_TARGET=${{ matrix.target }}"
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=qemu-aarch64 -L /usr/aarch64-linux-gnu"
-            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
-          } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: Build (lib + examples)
         run: cargo build --release --examples
       - name: Tests
         run: cargo test --release
-        env:
-          H26X_REQUIRE_DOTPROD: ${{ matrix.require == 'dotprod' && '1' || '' }}
       - name: Tests on the scalar reference
         # The kernel tests compare every rung with the scalar reference
         # explicitly; this runs the decoders and encoders themselves with
