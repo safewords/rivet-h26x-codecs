@@ -119,7 +119,7 @@ impl BitWriter {
         self.zeros(zeros);
         // `k` has `zeros + 1` significant bits, which is 33 for the largest
         // `u32` and so does not fit one write.
-        if zeros + 1 <= 32 {
+        if zeros < 32 {
             self.bits(zeros + 1, k as u32);
         } else {
             self.bits(zeros + 1 - 32, (k >> 32) as u32);

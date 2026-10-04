@@ -62,6 +62,38 @@ pub type SaoEdgeStatsFn<S> = fn(
     near: &mut Vec<(u8, u16, i32)>,
 );
 
+/// The integer moments of a weighted-prediction fit (the encoders'
+/// `h265_wp`) over a `w x h` region: the sums of the reference samples `r`,
+/// the source samples `c`, `r * r` and `r * c`, and the zero-motion SAD
+/// `|c - r|`. Integer, so lane order cannot change them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WpMoments {
+    /// Sum of `r`.
+    pub sr: u64,
+    /// Sum of `c`.
+    pub sc: u64,
+    /// Sum of `r * r`.
+    pub srr: u64,
+    /// Sum of `r * c`.
+    pub src: u64,
+    /// Sum of `|c - r|`.
+    pub sad: u64,
+}
+
+/// [`WpMoments`] of the source `cur` (stride `cur_stride`) against the
+/// reference `refp` (stride `ref_stride`), both starting at the region's
+/// first sample.
+pub type WpMomentsFn<S> = fn(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize) -> WpMoments;
+
+/// The zero-motion SAD of `cur` against `refp` weighted the way both
+/// standards' explicit weighting predicts a whole-sample vector:
+/// `|c - Clip(((r * weight + round) >> shift) + offset)|` summed, with
+/// `round = 1 << (shift - 1)` (0 at a shift of 0) and the clip to
+/// `0..=max`. `weight` is within -128..=255, `round` and `offset` are the
+/// caller's (`offset` already scaled to the sample depth), `shift` is at
+/// most 7.
+pub type WeightedSadFn<S> = fn(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32, max: i32) -> u64;
+
 /// The distortion kernels, filled at run time from what the CPU has.
 #[derive(Clone)]
 pub struct DistortionDsp<S: Sample = u8> {
@@ -75,6 +107,10 @@ pub struct DistortionDsp<S: Sample = u8> {
     pub ssd: SsdFn<S>,
     /// SAO edge-offset statistics.
     pub sao_edge_stats: SaoEdgeStatsFn<S>,
+    /// A weighted-prediction fit's moments, one pass over a plane.
+    pub wp_moments: WpMomentsFn<S>,
+    /// A weighted-prediction fit's weighted zero-motion SAD.
+    pub weighted_sad: WeightedSadFn<S>,
 }
 
 impl<S: Sample> DistortionDsp<S> {
@@ -87,6 +123,8 @@ impl<S: Sample> DistortionDsp<S> {
             satd: satd_scalar::<S>,
             ssd: ssd_scalar::<S>,
             sao_edge_stats: sao_edge_stats_scalar::<S>,
+            wp_moments: wp_moments_scalar::<S>,
+            weighted_sad: weighted_sad_scalar::<S>,
         }
     }
 
@@ -140,6 +178,36 @@ impl<S: Sample> Default for DistortionDsp<S> {
     fn default() -> Self {
         Self::scalar()
     }
+}
+
+pub(crate) fn wp_moments_scalar<S: Sample>(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize) -> WpMoments {
+    let mut m = WpMoments::default();
+    for y in 0..h {
+        let (rr, cr) = (&refp[y * ref_stride..][..w], &cur[y * cur_stride..][..w]);
+        for (&r, &c) in rr.iter().zip(cr) {
+            let (r, c) = (r.to_i32() as u64, c.to_i32() as u64);
+            m.sr += r;
+            m.sc += c;
+            m.srr += r * r;
+            m.src += r * c;
+            m.sad += r.abs_diff(c);
+        }
+    }
+    m
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn weighted_sad_scalar<S: Sample>(cur: &[S], cur_stride: usize, refp: &[S], ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32, max: i32) -> u64 {
+    let round = if shift >= 1 { 1 << (shift - 1) } else { 0 };
+    let mut sad = 0u64;
+    for y in 0..h {
+        let (rr, cr) = (&refp[y * ref_stride..][..w], &cur[y * cur_stride..][..w]);
+        for (&r, &c) in rr.iter().zip(cr) {
+            let p = ((r.to_i32() * weight + round) >> shift) + offset;
+            sad += u64::from(p.clamp(0, max).abs_diff(c.to_i32()));
+        }
+    }
+    sad
 }
 
 pub(crate) fn sad_scalar<S: Sample>(a: &[S], a_stride: usize, b: &[S], b_stride: usize, w: usize, h: usize) -> u32 {
@@ -248,6 +316,56 @@ pub(crate) fn satd_scalar<S: Sample>(a: &[S], a_stride: usize, b: &[S], b_stride
 mod tests {
     use super::*;
 
+    /// The weighted-prediction kernels of the host's table against the
+    /// scalar references, 8- and 16-bit: random planes, rails, every weight
+    /// either standard's table carries at every denominator, offsets at
+    /// both ends, odd widths that leave a tail, and strides wider than the
+    /// region. Holds on every architecture CI runs (AVX2 on x86-64, NEON on
+    /// AArch64).
+    #[test]
+    fn weighted_prediction_kernels_match_scalar() {
+        fn run<S: Sample>(max: i32) {
+            let d = DistortionDsp::<S>::new(Cpu::detect());
+            let s = DistortionDsp::<S>::scalar();
+            let mut seed = 0x77u64;
+            let mut checked = 0;
+            for trial in 0..4 {
+                for &(w, h) in &[(1usize, 1usize), (7, 3), (16, 2), (31, 5), (32, 4), (33, 3), (64, 9), (100, 7), (200, 3)] {
+                    let stride = w + 13;
+                    let plane = |seed: &mut u64| -> Vec<S> {
+                        (0..stride * h)
+                            .map(|_| {
+                                let v = match trial {
+                                    0 | 1 => (lcg(seed) % (max as u64 + 1)) as i32,
+                                    2 => [0, max][(lcg(seed) & 1) as usize],
+                                    _ => max,
+                                };
+                                S::from_i32(v)
+                            })
+                            .collect()
+                    };
+                    let (cur, refp) = (plane(&mut seed), plane(&mut seed));
+                    assert_eq!((d.wp_moments)(&cur, stride, &refp, stride, w, h), (s.wp_moments)(&cur, stride, &refp, stride, w, h), "moments {w}x{h} trial {trial}");
+                    let depth_scale = if max > 255 { 4 } else { 1 };
+                    for weight in [-128, -77, -1, 0, 1, 31, 32, 63, 64, 65, 127, 191, 255] {
+                        for shift in 0..=7u32 {
+                            for offset in [-128 * depth_scale, -3, 0, 5, 127 * depth_scale] {
+                                let want = (s.weighted_sad)(&cur, stride, &refp, stride, w, h, weight, shift, offset, max);
+                                let got = (d.weighted_sad)(&cur, stride, &refp, stride, w, h, weight, shift, offset, max);
+                                assert_eq!(got, want, "weighted_sad {w}x{h} weight {weight} shift {shift} offset {offset} trial {trial}");
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(checked > 0);
+        }
+        run::<u8>(255);
+        run::<u16>(1023);
+        run::<u16>(4095);
+    }
+
     fn lcg(s: &mut u64) -> u64 {
         *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         *s >> 33
@@ -346,5 +464,32 @@ mod tests {
         assert_eq!(sad_scalar(&a, 64, &b, 64, 64, 64), 1023 * 4096);
         assert_eq!(ssd_scalar(&a, 64, &b, 64, 64, 64), 1023u64 * 1023 * 4096);
         assert_eq!(satd_scalar(&a, 64, &b, 64, 64, 64), 256 * ((16 * 1023 + 1) >> 1));
+    }
+}
+#[cfg(test)]
+mod wp_bench {
+    use super::*;
+
+    /// ms per 1080p 8-bit plane, the scalar references against the host's
+    /// table. `cargo test --release wp_kernel_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing, not a check"]
+    fn wp_kernel_bench() {
+        let (w, h) = (1920usize, 1080usize);
+        let a: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
+        let b: Vec<u8> = (0..w * h).map(|i| (i * 13 % 247) as u8).collect();
+        for (name, d) in [("scalar", DistortionDsp::<u8>::scalar()), ("host", DistortionDsp::<u8>::new(Cpu::detect()))] {
+            let t = std::time::Instant::now();
+            for _ in 0..10 {
+                std::hint::black_box((d.wp_moments)(&a, w, &b, w, w, h));
+            }
+            let m = t.elapsed().as_secs_f64() * 100.0;
+            let t = std::time::Instant::now();
+            for _ in 0..10 {
+                std::hint::black_box((d.weighted_sad)(&a, w, &b, w, w, h, 70, 6, 3, 255));
+            }
+            let s = t.elapsed().as_secs_f64() * 100.0;
+            eprintln!("{name}: moments {m:.3} ms, weighted_sad {s:.3} ms (1080p plane)");
+        }
     }
 }

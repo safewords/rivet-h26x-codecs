@@ -30,7 +30,7 @@
 //! ([`RefSamples`]) rather than either decoder's plane type. The weighted
 //! arithmetic the check applies is the same in both standards: H.264's
 //! 8.4.2.3.2 uni-directional formula at `logWD >= 1` is H.265's, and at
-//! `logWD` 0 it drops the rounding shift, as `weighted_sad` does. H.264
+//! `logWD` 0 it drops the rounding shift, as the `weighted_sad` kernel does. H.264
 //! also bounds the sum of a bi-predicted pair's two weights, which a B
 //! slice's fits can break at [`LOG2_DENOM`]; [`fit_samples_at`] quantises
 //! the same sums ([`plane_sums`]) at a coarser denominator for it.
@@ -65,6 +65,7 @@
 //! BD-rate (QP 40 +0.46% bytes at +0.04 dB), the gain-and-offset fade -5.6%
 //! (QP 40 +0.15%).
 
+use crate::dsp::distortion::DistortionDsp;
 use crate::hevc::frame::Plane16;
 use crate::hevc::slice::{PredWeightTable, WeightEntry};
 use crate::sample::Sample;
@@ -134,9 +135,9 @@ impl PlaneFit {
 
 /// Fit one `w` by `h` plane: `cur` at `cur_stride` against the display
 /// area of `refp`, at `bit_depth`.
-pub(crate) fn fit_plane<S: Sample>(cur: &[S], cur_stride: usize, refp: &Plane16<S>, w: usize, h: usize, bit_depth: u32) -> PlaneFit {
+pub(crate) fn fit_plane<S: Sample>(dist: &DistortionDsp<S>, cur: &[S], cur_stride: usize, refp: &Plane16<S>, w: usize, h: usize, bit_depth: u32) -> PlaneFit {
     let refs = RefSamples { data: &refp.data, origin: refp.origin(), stride: refp.stride };
-    fit_samples(cur, cur_stride, refs, w, h, bit_depth, H265_WEIGHTS)
+    fit_samples(dist, cur, cur_stride, refs, w, h, bit_depth, H265_WEIGHTS)
 }
 
 /// A reference plane as the fit reads it: the samples, the index of the
@@ -165,8 +166,8 @@ pub(crate) const H264_WEIGHTS: (i32, i32) = (-128, 127);
 /// [`fit_plane`] over any reference layout, with the weight held to
 /// `weights` — the range the caller's table syntax carries.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn fit_samples<S: Sample>(cur: &[S], cur_stride: usize, refp: RefSamples<'_, S>, w: usize, h: usize, bit_depth: u32, weights: (i32, i32)) -> PlaneFit {
-    fit_samples_at(&plane_sums(cur, cur_stride, refp, w, h), cur, cur_stride, refp, w, h, bit_depth, weights, LOG2_DENOM)
+pub(crate) fn fit_samples<S: Sample>(dist: &DistortionDsp<S>, cur: &[S], cur_stride: usize, refp: RefSamples<'_, S>, w: usize, h: usize, bit_depth: u32, weights: (i32, i32)) -> PlaneFit {
+    fit_samples_at(dist, &plane_sums(dist, cur, cur_stride, refp, w, h), cur, cur_stride, refp, w, h, bit_depth, weights, LOG2_DENOM)
 }
 
 /// What a fit is computed from: the sample count, the sums of the
@@ -185,7 +186,24 @@ pub(crate) struct PlaneSums {
 }
 
 /// [`PlaneSums`] of `cur` against the display area of `refp`.
-pub(crate) fn plane_sums<S: Sample>(cur: &[S], cur_stride: usize, refp: RefSamples<'_, S>, w: usize, h: usize) -> PlaneSums {
+///
+/// The sums are integers, gathered by the table's `wp_moments` kernel and
+/// then converted. That is the same `f64` the reference accumulation
+/// below makes, sample by sample, exactly when every partial sum is below
+/// 2^53 — the terms are non-negative, so the totals bound every partial
+/// sum — which holds for any 8-bit picture and for deep ones short of
+/// tens of megapixels; past it the reference runs.
+pub(crate) fn plane_sums<S: Sample>(dist: &DistortionDsp<S>, cur: &[S], cur_stride: usize, refp: RefSamples<'_, S>, w: usize, h: usize) -> PlaneSums {
+    let m = (dist.wp_moments)(cur, cur_stride, &refp.data[refp.origin..], refp.stride, w, h);
+    const EXACT: u64 = 1 << 53;
+    if [m.sr, m.sc, m.srr, m.src].iter().all(|&v| v < EXACT) {
+        return PlaneSums { n: (w * h) as f64, sr: m.sr as f64, sc: m.sc as f64, srr: m.srr as f64, src: m.src as f64, sad_plain: m.sad };
+    }
+    plane_sums_f64(cur, cur_stride, refp, w, h)
+}
+
+/// The reference accumulation [`plane_sums`] stands for.
+fn plane_sums_f64<S: Sample>(cur: &[S], cur_stride: usize, refp: RefSamples<'_, S>, w: usize, h: usize) -> PlaneSums {
     let o = refp.origin;
     let (mut sr, mut sc, mut srr, mut src) = (0f64, 0f64, 0f64, 0f64);
     let mut sad_plain = 0u64;
@@ -213,6 +231,7 @@ pub(crate) fn plane_sums<S: Sample>(cur: &[S], cur_stride: usize, refp: RefSampl
 /// coarser denominator is judged on what it can actually carry.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fit_samples_at<S: Sample>(
+    dist: &DistortionDsp<S>,
     sums: &PlaneSums,
     cur: &[S],
     cur_stride: usize,
@@ -240,31 +259,9 @@ pub(crate) fn fit_samples_at<S: Sample>(
     let offset_samples = sc / n - f64::from(weight) / unit * (sr / n);
     let offset = (offset_samples / scale).round().clamp(-128.0, 127.0) as i32;
     let fit = PlaneFit { weight, offset, sad_plain, sad_weighted: 0, log2_denom };
-    let sad_weighted = weighted_sad(cur, cur_stride, refp, w, h, bit_depth, weight, offset, log2_denom);
-    PlaneFit { sad_weighted, ..fit }
-}
-
-/// Zero-motion SAD of `cur` against `refp` weighted by `(weight,
-/// offset)` at `log2_denom` — the decoder's `weighted_uni` arithmetic at a
-/// whole-sample vector: `Clip(((r * w + round) >> denom) + (o <<
-/// (bitDepth - 8)))`, and without the rounding shift at a denominator of
-/// zero, as H.264's 8.4.2.3.2 has it.
-#[allow(clippy::too_many_arguments)]
-fn weighted_sad<S: Sample>(cur: &[S], cur_stride: usize, refp: RefSamples<'_, S>, w: usize, h: usize, bit_depth: u32, weight: i32, offset: i32, log2_denom: u32) -> u64 {
-    let o = refp.origin;
     let max = (1i32 << bit_depth) - 1;
-    let off = offset << (bit_depth - 8);
-    let mut sad = 0u64;
-    for y in 0..h {
-        let rrow = &refp.data[o + y * refp.stride..];
-        let crow = &cur[y * cur_stride..];
-        for x in 0..w {
-            let v = rrow[x].to_i32() * weight;
-            let p = if log2_denom >= 1 { ((v + (1 << (log2_denom - 1))) >> log2_denom) + off } else { v + off };
-            sad += u64::from(p.clamp(0, max).abs_diff(crow[x].to_i32()));
-        }
-    }
-    sad
+    let sad_weighted = (dist.weighted_sad)(cur, cur_stride, &refp.data[refp.origin..], refp.stride, w, h, weight, log2_denom, offset << (bit_depth - 8), max);
+    PlaneFit { sad_weighted, ..fit }
 }
 
 /// The `pred_weight_table` entry the three fits make: each component's
@@ -285,6 +282,34 @@ pub(crate) fn table_for(lists: [Vec<WeightEntry>; 2]) -> PredWeightTable {
 mod tests {
     use super::*;
     use crate::hevc::frame::Frame;
+
+    fn dist<S: Sample>() -> DistortionDsp<S> {
+        DistortionDsp::new(crate::dsp::Cpu::detect())
+    }
+
+    /// The integer moments converted are the reference's `f64` sums bit for
+    /// bit, 8-bit and 16-bit, on the host's table and the scalar one.
+    #[test]
+    fn integer_moments_are_the_reference_sums() {
+        fn run<S: Sample>(max: u32) {
+            let (w, h, stride) = (333usize, 41usize, 350usize);
+            let mut seed = 3u64;
+            let mut next = || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((seed >> 33) as u32 % (max + 1)) as i32
+            };
+            let cur: Vec<S> = (0..stride * h).map(|_| S::from_i32(next())).collect();
+            let data: Vec<S> = (0..stride * (h + 2)).map(|_| S::from_i32(next())).collect();
+            let refp = RefSamples { data: &data, origin: stride + 5, stride };
+            let want = format!("{:?}", plane_sums_f64(&cur, stride, refp, w, h));
+            for d in [dist::<S>(), DistortionDsp::<S>::scalar()] {
+                assert_eq!(format!("{:?}", plane_sums(&d, &cur, stride, refp, w, h)), want);
+            }
+        }
+        run::<u8>(255);
+        run::<u16>(1023);
+        run::<u16>(65535);
+    }
     use crate::picture::ChromaFormat;
 
     /// A 32x24 reference with structure, as the luma plane of a frame
@@ -313,7 +338,7 @@ mod tests {
     fn a_gain_fade_is_recovered_and_worth_using() {
         let r = reference();
         let cur = scaled(&r, 32, 24, 0.75, 0.0);
-        let f = fit_plane(&cur, 32, &r, 32, 24, 8);
+        let f = fit_plane(&dist(), &cur, 32, &r, 32, 24, 8);
         assert_eq!(f.weight, 48, "{f:?}");
         assert!(f.offset.abs() <= 1, "{f:?}");
         assert!(f.used(), "{f:?}");
@@ -325,7 +350,7 @@ mod tests {
     fn an_offset_is_recovered() {
         let r = reference();
         let cur = scaled(&r, 32, 24, 1.0, 12.0);
-        let f = fit_plane(&cur, 32, &r, 32, 24, 8);
+        let f = fit_plane(&dist(), &cur, 32, &r, 32, 24, 8);
         assert_eq!((f.weight, f.offset), (64, 12), "{f:?}");
         assert!(f.used() && f.sad_weighted == 0, "{f:?}");
     }
@@ -336,11 +361,11 @@ mod tests {
     fn an_unchanged_picture_uses_no_weighting() {
         let r = reference();
         let cur = scaled(&r, 32, 24, 1.0, 0.0);
-        let f = fit_plane(&cur, 32, &r, 32, 24, 8);
+        let f = fit_plane(&dist(), &cur, 32, &r, 32, 24, 8);
         assert_eq!((f.weight, f.offset), (64, 0), "{f:?}");
         assert!(!f.used(), "{f:?}");
         let flat = Frame::<u8>::new(32, 24, ChromaFormat::Monochrome, 8).y;
-        let f = fit_plane(&cur, 32, &flat, 32, 24, 8);
+        let f = fit_plane(&dist(), &cur, 32, &flat, 32, 24, 8);
         assert!(!f.used(), "{f:?}");
     }
 
@@ -359,7 +384,7 @@ mod tests {
             dark.data[o + (i / 32) * dark.stride + i % 32] = v;
         }
         let cur = scaled(&bright, 32, 24, 0.75, 0.0);
-        let (f0, f1) = (fit_plane(&cur, 32, &bright, 32, 24, 8), fit_plane(&cur, 32, &dark, 32, 24, 8));
+        let (f0, f1) = (fit_plane(&dist(), &cur, 32, &bright, 32, 24, 8), fit_plane(&dist(), &cur, 32, &dark, 32, 24, 8));
         assert_eq!(f0.weight, 48, "list 0, the brighter anchor: {f0:?}");
         assert!((95..=97).contains(&f1.weight), "list 1, the darker anchor, wants a gain of one and a half: {f1:?}");
         assert!(f0.used() && f1.used(), "{f0:?} {f1:?}");
@@ -367,7 +392,7 @@ mod tests {
         let t = table_for([vec![entry_for([f0, id, id], 8, 8)], vec![entry_for([f1, id, id], 8, 8)]]);
         assert_eq!((t.lists[0][0].luma.0, t.lists[1][0].luma.0), (f0.weight, f1.weight), "{t:?}");
 
-        let held = fit_plane(&scaled(&bright, 32, 24, 1.0, 0.0), 32, &bright, 32, 24, 8);
+        let held = fit_plane(&dist(), &scaled(&bright, 32, 24, 1.0, 0.0), 32, &bright, 32, 24, 8);
         assert!(!held.used(), "{held:?}");
         let t = table_for([vec![entry_for([held, id, id], 8, 8)], vec![entry_for([held, id, id], 8, 8)]]);
         assert!(t.lists.iter().flatten().all(|e| e.luma == (64, 0) && e.chroma == [(64, 0); 2]), "{t:?}");
@@ -386,7 +411,7 @@ mod tests {
             }
         }
         let cur: Vec<u16> = (0..h).flat_map(|y| (0..w).map(move |x| (240 + ((x * 20 + y * 12) % 480) + 40) as u16)).collect();
-        let f = fit_plane(&cur, w, &p, w, h, 10);
+        let f = fit_plane(&dist(), &cur, w, &p, w, h, 10);
         assert_eq!((f.weight, f.offset), (64, 10), "{f:?}");
         let e = entry_for([f, PlaneFit::identity(1), PlaneFit::identity(1)], 10, 10);
         assert_eq!(e.luma, (64, 40), "the table holds the offset at the sample depth: {e:?}");

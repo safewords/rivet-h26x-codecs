@@ -29,7 +29,7 @@
 use std::arch::aarch64::*;
 
 use super::Cpu;
-use super::distortion::{DistortionDsp, sad_scalar, satd_scalar, ssd_scalar};
+use super::distortion::{DistortionDsp, WpMoments, sad_scalar, satd_scalar, ssd_scalar, weighted_sad_scalar, wp_moments_scalar};
 
 /// Four bytes at `p` in the low lanes of a vector, the rest zero.
 #[inline(always)]
@@ -210,12 +210,117 @@ pub(crate) fn satd(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: usiz
     unsafe { satd_impl(a.as_ptr(), a_stride, b.as_ptr(), b_stride, w, h) }
 }
 
+// ----------------------------------------------------------------------
+// Weighted-prediction fit: moments and weighted SAD (8-bit)
+// ----------------------------------------------------------------------
+
+/// 16 samples a step: `uadalp` folds the bytes (and their `uabd`) into u32
+/// lanes for the plain sums and the SAD, `umull` squares / multiplies them
+/// into u16 (at most 255^2) and `uadalp` folds those into u32 too; a row of
+/// up to 2^14 samples puts under 2^29 in a lane, and the lanes are folded
+/// into u64 once a row.
+pub(crate) fn wp_moments(cur: &[u8], cur_stride: usize, refp: &[u8], ref_stride: usize, w: usize, h: usize) -> WpMoments {
+    if w == 0 || h == 0 || w > 1 << 14 {
+        return wp_moments_scalar(cur, cur_stride, refp, ref_stride, w, h);
+    }
+    assert!(cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w, "region out of range");
+    // SAFETY: NEON is baseline on AArch64; every load is inside the rows
+    // checked above.
+    unsafe {
+        let mut acc = [vdupq_n_u64(0); 5];
+        let mut m = WpMoments::default();
+        for y in 0..h {
+            let (c, r) = (cur.as_ptr().add(y * cur_stride), refp.as_ptr().add(y * ref_stride));
+            let mut row = [vdupq_n_u32(0); 5];
+            let mut x = 0;
+            while x + 16 <= w {
+                let vr = vld1q_u8(r.add(x));
+                let vc = vld1q_u8(c.add(x));
+                row[0] = vpadalq_u16(row[0], vpaddlq_u8(vr));
+                row[1] = vpadalq_u16(row[1], vpaddlq_u8(vc));
+                row[2] = vpadalq_u16(row[2], vmull_u8(vget_low_u8(vr), vget_low_u8(vr)));
+                row[2] = vpadalq_u16(row[2], vmull_high_u8(vr, vr));
+                row[3] = vpadalq_u16(row[3], vmull_u8(vget_low_u8(vr), vget_low_u8(vc)));
+                row[3] = vpadalq_u16(row[3], vmull_high_u8(vr, vc));
+                row[4] = vpadalq_u16(row[4], vpaddlq_u8(vabdq_u8(vr, vc)));
+                x += 16;
+            }
+            for (a, v) in acc.iter_mut().zip(row) {
+                *a = vpadalq_u32(*a, v);
+            }
+            while x < w {
+                let (r, c) = (u64::from(*r.add(x)), u64::from(*c.add(x)));
+                m.sr += r;
+                m.sc += c;
+                m.srr += r * r;
+                m.src += r * c;
+                m.sad += r.abs_diff(c);
+                x += 1;
+            }
+        }
+        m.sr += vaddvq_u64(acc[0]);
+        m.sc += vaddvq_u64(acc[1]);
+        m.srr += vaddvq_u64(acc[2]);
+        m.src += vaddvq_u64(acc[3]);
+        m.sad += vaddvq_u64(acc[4]);
+        m
+    }
+}
+
+/// 16 samples a step, in i32 as the reference has it: `smull` by the
+/// weight, the rounding term, `sshl` by minus the shift (an arithmetic
+/// shift right), the offset, the clip to 0..=255, `sabd` against the
+/// source, `uadalp` into the row's sums (at most 510 a lane a step).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn weighted_sad(cur: &[u8], cur_stride: usize, refp: &[u8], ref_stride: usize, w: usize, h: usize, weight: i32, shift: u32, offset: i32, max: i32) -> u64 {
+    if w == 0 || h == 0 || w > 1 << 20 || !(-32768..=32767).contains(&weight) || shift > 14 || max != 255 {
+        return weighted_sad_scalar(cur, cur_stride, refp, ref_stride, w, h, weight, shift, offset, max);
+    }
+    assert!(cur.len() >= (h - 1) * cur_stride + w && refp.len() >= (h - 1) * ref_stride + w, "region out of range");
+    let round = if shift >= 1 { 1i32 << (shift - 1) } else { 0 };
+    // SAFETY: NEON is baseline on AArch64; every load is inside the rows
+    // checked above.
+    unsafe {
+        let (rnd, sh, off) = (vdupq_n_s32(round), vdupq_n_s32(-(shift as i32)), vdupq_n_s32(offset));
+        let (lo, hi) = (vdupq_n_s32(0), vdupq_n_s32(255));
+        let wt = weight as i16;
+        let predict = |r: int16x4_t| vminq_s32(vmaxq_s32(vaddq_s32(vshlq_s32(vaddq_s32(vmull_n_s16(r, wt), rnd), sh), off), lo), hi);
+        let mut acc = vdupq_n_u64(0);
+        let mut total = 0u64;
+        for y in 0..h {
+            let (c, r) = (cur.as_ptr().add(y * cur_stride), refp.as_ptr().add(y * ref_stride));
+            let mut row = vdupq_n_u32(0);
+            let mut x = 0;
+            while x + 16 <= w {
+                let vr = vld1q_u8(r.add(x));
+                let vc = vld1q_u8(c.add(x));
+                for (r8, c8) in [(vget_low_u8(vr), vget_low_u8(vc)), (vget_high_u8(vr), vget_high_u8(vc))] {
+                    let (r16, c16) = (vreinterpretq_s16_u16(vmovl_u8(r8)), vreinterpretq_s16_u16(vmovl_u8(c8)));
+                    let da = vabdq_s32(predict(vget_low_s16(r16)), vmovl_s16(vget_low_s16(c16)));
+                    let db = vabdq_s32(predict(vget_high_s16(r16)), vmovl_s16(vget_high_s16(c16)));
+                    row = vaddq_u32(row, vaddq_u32(vreinterpretq_u32_s32(da), vreinterpretq_u32_s32(db)));
+                }
+                x += 16;
+            }
+            acc = vpadalq_u32(acc, row);
+            while x < w {
+                let p = ((i32::from(*r.add(x)) * weight + round) >> shift) + offset;
+                total += u64::from(p.clamp(0, 255).abs_diff(i32::from(*c.add(x))));
+                x += 1;
+            }
+        }
+        total + vaddvq_u64(acc)
+    }
+}
+
 /// Install the NEON kernels.
 pub fn install(d: &mut DistortionDsp<u8>, cpu: Cpu) {
     if cpu.neon {
         d.sad = sad;
         d.satd = satd;
         d.ssd = ssd;
+        d.wp_moments = wp_moments;
+        d.weighted_sad = weighted_sad;
     }
 }
 

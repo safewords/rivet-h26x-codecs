@@ -27,7 +27,7 @@ pub fn install(d: &mut HevcDsp<u8>) {
     d.idst4 = w16::idst4_neon;
     d.intra_planar = w16::intra_planar_neon::<u8>;
     d.intra_dc = w16::intra_dc_neon::<u8>;
-    d.intra_angular = w16::intra_angular_neon::<u8>;
+    d.intra_angular = intra_angular_neon_u8;
     d.add_residual = add_residual_neon;
     d.qpel_copy = copy_neon;
     d.qpel_h = qpel_h_neon;
@@ -942,6 +942,129 @@ fn deblock_chroma_v_neon(data: &mut [u8], off: usize, stride: usize, tc: [i32; 4
     }
 }
 
+// ----------------------------------------------------------------------
+// Intra prediction: the angular modes (8.4.4.2.6)
+// ----------------------------------------------------------------------
+
+/// How many references [`intra_angular_neon_u8`] packs to bytes: `ref[]`
+/// spans `refs[0..3n + 2]`, and the last row's loads, `max(n, 8)` bytes
+/// from `ref` offsets `2n + 1` and `2n + 2`, reach `2n + 2 + max(n, 8)`;
+/// eight at a time.
+fn angular_pack_len(n: usize) -> usize {
+    (3 * n + 2).max(2 * n + 2 + n.max(8)).next_multiple_of(8)
+}
+
+/// Angular prediction of an 8-bit block in byte lanes: `(32 - f) * a + f *
+/// b` is `umull` + `umlal` by the two weights (at most 32 * 255, a u16),
+/// and `rshrn #5` the standard's `+ 16 >> 5` and narrowing at once — sixteen
+/// samples per pair of multiplies, where the shared 16-bit-sample kernel
+/// does eight. A zero fraction weighs `(32, 0)`, the copy the standard asks
+/// for. The horizontal modes predict the transposed block into a scratch
+/// block and transpose it in 8x8 (or 4x4) byte tiles.
+fn intra_angular_neon_u8(dst: &mut [u8], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
+    let fits = n >= 4 && (n - 1) * stride + n <= dst.len();
+    if !matches!(n, 4 | 8 | 16 | 32) || !fits || refs.len() < angular_pack_len(n) || !(-32..=32).contains(&angle) {
+        return (HevcDsp::<u8>::SCALAR.intra_angular)(dst, stride, refs, n, angle, transposed);
+    }
+    // SAFETY: NEON is baseline on AArch64. `refs` holds the
+    // `angular_pack_len(n)` elements packed below, every row's loads stay
+    // inside the packed bytes (see there), and `dst` holds the block's last
+    // sample (checked above).
+    unsafe {
+        // Row `y` reads `r[s..=s + n]`, `s = n + iIdx + 1` in `1..=2n + 1`;
+        // its loads reach `r[s + max(n, 8)]`, which the packing covers, so
+        // every byte loaded is written here first. Bytes past `3n + 1` land
+        // only in lanes no store keeps. A u8 table's references are below
+        // 256, so the saturating narrow only narrows.
+        let mut r = std::mem::MaybeUninit::<[u8; 104]>::uninit();
+        let rp = r.as_mut_ptr() as *mut u8;
+        let mut k = 0;
+        while k < angular_pack_len(n) {
+            vst1_u8(rp.add(k), vqmovn_u16(vld1q_u16(refs.as_ptr().add(k))));
+            k += 8;
+        }
+        let rp = rp as *const u8;
+        // Every byte of the scratch block's `n x n` corner is written before
+        // it is read, and nothing else of it is read.
+        let mut tmp = std::mem::MaybeUninit::<[u8; 32 * 32]>::uninit();
+        let (out, pitch) = if transposed { (tmp.as_mut_ptr() as *mut u8, n) } else { (dst.as_mut_ptr(), stride) };
+        for y in 0..n {
+            let pos = (y as i32 + 1) * angle;
+            let (i, f) = (pos >> 5, (pos & 31) as u8);
+            let (wa, wb) = (vdup_n_u8(32 - f), vdup_n_u8(f));
+            let p = rp.add((n as i32 + i + 1) as usize);
+            let o = out.add(y * pitch);
+            if n >= 16 {
+                let mut x = 0;
+                while x < n {
+                    let a = vld1q_u8(p.add(x));
+                    let b = vld1q_u8(p.add(x + 1));
+                    let lo = vmlal_u8(vmull_u8(vget_low_u8(a), wa), vget_low_u8(b), wb);
+                    let hi = vmlal_high_u8(vmull_high_u8(a, vdupq_n_u8(32 - f)), b, vdupq_n_u8(f));
+                    vst1q_u8(o.add(x), vcombine_u8(vrshrn_n_u16::<5>(lo), vrshrn_n_u16::<5>(hi)));
+                    x += 16;
+                }
+            } else {
+                let v = vrshrn_n_u16::<5>(vmlal_u8(vmull_u8(vld1_u8(p), wa), vld1_u8(p.add(1)), wb));
+                if n == 8 {
+                    vst1_u8(o, v);
+                } else {
+                    std::ptr::write_unaligned(o as *mut u32, vget_lane_u32::<0>(vreinterpret_u32_u8(v)));
+                }
+            }
+        }
+        if !transposed {
+            return;
+        }
+        let t = tmp.as_ptr() as *const u8;
+        let d = dst.as_mut_ptr();
+        if n == 4 {
+            const IDX: [u8; 16] = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+            let c = vqtbl1q_u8(vld1q_u8(t), vld1q_u8(IDX.as_ptr()));
+            let w = vreinterpretq_u32_u8(c);
+            std::ptr::write_unaligned(d as *mut u32, vgetq_lane_u32::<0>(w));
+            std::ptr::write_unaligned(d.add(stride) as *mut u32, vgetq_lane_u32::<1>(w));
+            std::ptr::write_unaligned(d.add(2 * stride) as *mut u32, vgetq_lane_u32::<2>(w));
+            std::ptr::write_unaligned(d.add(3 * stride) as *mut u32, vgetq_lane_u32::<3>(w));
+            return;
+        }
+        for by in (0..n).step_by(8) {
+            for bx in (0..n).step_by(8) {
+                let r: [uint8x8_t; 8] = std::array::from_fn(|j| vld1_u8(t.add((by + j) * n + bx)));
+                for (j, v) in transpose8_u8(r).into_iter().enumerate() {
+                    vst1_u8(d.add((bx + j) * stride + by), v);
+                }
+            }
+        }
+    }
+}
+
+/// Transpose eight 8-byte rows: `trn` at 8, 16 and 32 bits.
+#[inline(always)]
+fn transpose8_u8(r: [uint8x8_t; 8]) -> [uint8x8_t; 8] {
+    // SAFETY: register-only NEON intrinsics; NEON is baseline on AArch64.
+    unsafe {
+        let t8 = |a, b| (vtrn1_u8(a, b), vtrn2_u8(a, b));
+        let (a0, a1) = t8(r[0], r[1]);
+        let (a2, a3) = t8(r[2], r[3]);
+        let (a4, a5) = t8(r[4], r[5]);
+        let (a6, a7) = t8(r[6], r[7]);
+        let h = vreinterpret_u16_u8;
+        let t16 = |a, b| (vtrn1_u16(h(a), h(b)), vtrn2_u16(h(a), h(b)));
+        let (b0, b2) = t16(a0, a2);
+        let (b1, b3) = t16(a1, a3);
+        let (b4, b6) = t16(a4, a6);
+        let (b5, b7) = t16(a5, a7);
+        let w = vreinterpret_u32_u16;
+        let t32 = |a, b| (vreinterpret_u8_u32(vtrn1_u32(w(a), w(b))), vreinterpret_u8_u32(vtrn2_u32(w(a), w(b))));
+        let (c0, c4) = t32(b0, b4);
+        let (c1, c5) = t32(b1, b5);
+        let (c2, c6) = t32(b2, b6);
+        let (c3, c7) = t32(b3, b7);
+        [c0, c1, c2, c3, c4, c5, c6, c7]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1082,6 +1205,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The byte-lane angular predictor against the scalar reference: every
+    /// angle it accepts, both orientations, every size, random and extreme
+    /// references, and a destination pitch wider than the block.
+    #[test]
+    fn intra_angular_matches_scalar_u8() {
+        let d = neon();
+        let s = HevcDsp::<u8>::SCALAR;
+        let mut seed = 0x5eed_u64;
+        let mut checked = 0;
+        for trial in 0..4 {
+            for n in [4usize, 8, 16, 32] {
+                let refs: Vec<u16> = (0..angular_pack_len(n))
+                    .map(|_| match trial {
+                        0 | 1 => (lcg(&mut seed) & 255) as u16,
+                        2 => [0u16, 255][(lcg(&mut seed) & 1) as usize],
+                        _ => 255,
+                    })
+                    .collect();
+                for angle in -32..=32 {
+                    for transposed in [false, true] {
+                        for stride in [n, n + 5, 64] {
+                            let mut a = vec![0x5au8; stride * n + 8];
+                            let mut b = a.clone();
+                            (s.intra_angular)(&mut a, stride, &refs, n, angle, transposed);
+                            (d.intra_angular)(&mut b, stride, &refs, n, angle, transposed);
+                            assert_eq!(a, b, "{n}x{n} angle {angle} transposed {transposed} stride {stride} trial {trial}");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 4 * 4 * 65 * 2 * 3);
     }
 
     #[test]

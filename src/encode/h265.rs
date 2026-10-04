@@ -1417,11 +1417,11 @@ impl<S: Sample> Core<S> {
                 if c.kind == Kind::B && !fit_b {
                     return [identity; 3];
                 }
-                let luma = h265_wp::fit_plane(&src[..dw * dh], dw, &rf.y, dw, dh, bit_depth);
+                let luma = h265_wp::fit_plane(&dist, &src[..dw * dh], dw, &rf.y, dw, dh, bit_depth);
                 let (cb, cr) = if cat != 0 {
                     (
-                        h265_wp::fit_plane(&src[dw * dh..dw * dh + cdw * cdh], cdw, &rf.cb, cdw, cdh, bit_depth),
-                        h265_wp::fit_plane(&src[dw * dh + cdw * cdh..], cdw, &rf.cr, cdw, cdh, bit_depth),
+                        h265_wp::fit_plane(&dist, &src[dw * dh..dw * dh + cdw * cdh], cdw, &rf.cb, cdw, cdh, bit_depth),
+                        h265_wp::fit_plane(&dist, &src[dw * dh + cdw * cdh..], cdw, &rf.cr, cdw, cdh, bit_depth),
                     )
                 } else {
                     (identity, identity)

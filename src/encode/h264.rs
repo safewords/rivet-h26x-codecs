@@ -41,6 +41,8 @@ use super::gop::{Coded, Kind, Scheduler};
 use super::rc::{Insensitivity, PicKind, RateController};
 use super::h264_syntax as syn;
 use super::h265_wp;
+use crate::dsp::Cpu;
+use crate::dsp::distortion::DistortionDsp;
 use crate::h264::slice::{PredWeightTable, WeightEntry};
 use super::h264_me::BWeights;
 use super::{Access, BWeighting, Config, Entropy, FieldCoding, FieldOrder, RateControl};
@@ -2221,6 +2223,7 @@ impl<S: Sample> Core<S> {
     /// ([`h265_wp::PlaneFit::worth_pricing`]) — and whether any of the fits
     /// is [`h265_wp::PlaneFit::strong`].
     fn p_weights(&self, planes: &[syn::Plane<'_, S>], rf: &[syn::Recon<S>], fit: bool) -> (syn::PredWeights, bool) {
+        let dist = DistortionDsp::<S>::new(Cpu::detect_honouring_env());
         let fits: Vec<h265_wp::PlaneFit> = (0..self.plane_dims.len())
             .map(|p| {
                 if !fit {
@@ -2228,7 +2231,7 @@ impl<S: Sample> Core<S> {
                 }
                 let (pw, ph) = self.plane_dims[p];
                 let refs = Self::fit_ref(rf, p);
-                h265_wp::fit_samples(planes[p].data, planes[p].stride, refs, pw as usize, ph as usize, self.cfg.bit_depth, h265_wp::H264_WEIGHTS)
+                h265_wp::fit_samples(&dist, planes[p].data, planes[p].stride, refs, pw as usize, ph as usize, self.cfg.bit_depth, h265_wp::H264_WEIGHTS)
             })
             .collect();
         // A fit that removes under a tenth of the zero-motion SAD is the
@@ -2280,6 +2283,7 @@ impl<S: Sample> Core<S> {
     /// denominator allows. Not `fit`: the table of defaults throughout.
     fn b_weights(&self, planes: &[syn::Plane<'_, S>], anchors: [&[syn::Recon<S>]; 2], fit: bool) -> syn::PredWeights {
         let bd = self.cfg.bit_depth;
+        let dist = DistortionDsp::<S>::new(Cpu::detect_honouring_env());
         let fit_pairs = |comps: &[usize]| -> (u32, Vec<[h265_wp::PlaneFit; 2]>) {
             if !fit {
                 return (h265_wp::LOG2_DENOM, vec![[h265_wp::PlaneFit::identity(0); 2]; comps.len()]);
@@ -2288,7 +2292,7 @@ impl<S: Sample> Core<S> {
                 .iter()
                 .map(|&p| {
                     let (pw, ph) = self.plane_dims[p];
-                    anchors.map(|rf| h265_wp::plane_sums(planes[p].data, planes[p].stride, Self::fit_ref(rf, p), pw as usize, ph as usize))
+                    anchors.map(|rf| h265_wp::plane_sums(&dist, planes[p].data, planes[p].stride, Self::fit_ref(rf, p), pw as usize, ph as usize))
                 })
                 .collect();
             for d in (0..=h265_wp::LOG2_DENOM).rev() {
@@ -2299,7 +2303,7 @@ impl<S: Sample> Core<S> {
                         let (pw, ph) = self.plane_dims[p];
                         [0usize, 1].map(|l| {
                             let refs = Self::fit_ref(anchors[l], p);
-                            h265_wp::fit_samples_at(&s[l], planes[p].data, planes[p].stride, refs, pw as usize, ph as usize, bd, h265_wp::H264_WEIGHTS, d)
+                            h265_wp::fit_samples_at(&dist, &s[l], planes[p].data, planes[p].stride, refs, pw as usize, ph as usize, bd, h265_wp::H264_WEIGHTS, d)
                         })
                     })
                     .collect();
@@ -3468,7 +3472,7 @@ mod tests {
         for c in 0..3 {
             let (w, h) = dims[c];
             let fit = |rf: &[syn::Recon<u8>]| {
-                h265_wp::fit_samples(&cur[c], w, Core::<u8>::fit_ref(rf, c), w, h, 8, h265_wp::H264_WEIGHTS)
+                h265_wp::fit_samples(&DistortionDsp::new(Cpu::detect()), &cur[c], w, Core::<u8>::fit_ref(rf, c), w, h, 8, h265_wp::H264_WEIGHTS)
             };
             let (f0, f1) = (fit(&past), fit(&future));
             assert!(f0.used() && f1.used(), "component {c}: {f0:?} {f1:?}");

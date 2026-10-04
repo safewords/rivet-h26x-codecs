@@ -804,7 +804,7 @@ macro_rules! kernels_u16 {
             }
         }
 
-        fn intra_angular<S: crate::hevc::frame::Sample>(dst: &mut [S], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
+        pub(crate) fn intra_angular<S: crate::hevc::frame::Sample>(dst: &mut [S], stride: usize, refs: &[u16], n: usize, angle: i32, transposed: bool) {
             // Every load of the last vector of a row, from `ref[-n]` up.
             let reach = 3 * n + 2 + 8;
             if refs.len() < reach || !(4..=32).contains(&n) || (n - 1) * stride + n > dst.len() || unsafe { over_i16::<S>(&refs[..3 * n + 2]) } {
