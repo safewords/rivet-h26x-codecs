@@ -199,11 +199,9 @@ caller.
 
 ## Traps
 
-`cargo fmt -- src/some/file.rs` does **not** scope to that path: it reformats
-the whole crate. The crate is not rustfmt-clean as a whole — parts of it are
-hand-laid-out — so that is a several-thousand-line diff sitting on top of
-whatever you were doing. To format one file, run `rustfmt --edition 2024
-<file>`, and check `git diff --stat` before committing either way.
+The crate is rustfmt-clean, and CI checks it (`cargo fmt --all --check`): run
+`cargo fmt --all` before committing. Hand-aligned data tables carry
+`#[rustfmt::skip]`; put one on any new table whose layout carries meaning.
 
 The conformance runners work from a frozen copy of the decoder, so rebuilding
 mid-run cannot disturb a suite — but it also means **a suite run tests the

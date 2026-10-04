@@ -53,8 +53,9 @@ and after: `rmdir /c/Users/elyci/PhpstormProjects/rivet/target/h26x/.gate_lock_$
 - Measure before building when payoff is uncertain. For "does less work": COUNT, don't time.
   For timing: one binary, two paths behind an env var, same-binary control first, median of
   paired ratios (`tools/ab.py`). A control you print but do not apply is worse than none.
-- Zero warnings (crate denies missing_docs); MSRV 1.89; `rustfmt --edition 2024 <file>` per
-  file only (never `cargo fmt`, the crate is not rustfmt-clean).
+- Zero warnings (crate denies missing_docs); MSRV 1.99; the crate is rustfmt-clean and
+  clippy-clean, and CI enforces both: run `cargo fmt --all` and
+  `cargo clippy --all-targets --all-features -- -D warnings` before committing.
 - Scratch files: `/c/Users/elyci/AppData/Local/Temp/claude/.../scratchpad` and `/tmp` are SHARED
   between agents — prefix every filename with your track name.
 - Never `;`-chain a conflict-resolve step with `git add`; use `&&`.
