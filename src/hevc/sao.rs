@@ -234,10 +234,7 @@ impl Neighbours {
                     return false;
                 }
             }
-            if !pps.loop_filter_across_tiles && info.ctb_tile[n] != cur_tile {
-                return false;
-            }
-            true
+            pps.loop_filter_across_tiles || info.ctb_tile[n] == cur_tile
         };
         Neighbours {
             l: usable(-1, 0),

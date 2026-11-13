@@ -3550,7 +3550,6 @@ mod write_round_trip {
         /// The writer's `transform_tree`, over the same inference
         /// conditions as the reader's.
         #[allow(clippy::too_many_arguments)]
-        #[allow(clippy::too_many_arguments)]
         fn tt(
             &mut self,
             e: &mut CabacEncoder,
