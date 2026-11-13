@@ -261,7 +261,7 @@ fn quant(coeffs: &[i16], levels: &mut [i16], n: usize, scale: i32, qbits: u32, o
     // The product needs `scale` in u16 and the sum in u32, which
     // `quant_scale` (at most 26214) and a shift of at least 14 guarantee;
     // anything else is the reference's.
-    if n2 % 8 != 0 || !(0..=32767).contains(&scale) || offset < 0 || qbits > 31 {
+    if !n2.is_multiple_of(8) || !(0..=32767).contains(&scale) || offset < 0 || qbits > 31 {
         return quant_scalar(coeffs, levels, n, scale, qbits, offset);
     }
     assert!(coeffs.len() >= n2 && levels.len() >= n2, "block too small");

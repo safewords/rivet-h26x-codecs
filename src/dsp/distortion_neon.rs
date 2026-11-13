@@ -78,7 +78,7 @@ unsafe fn sad_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, h
 }
 
 pub(crate) fn sad(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: usize, h: usize) -> u32 {
-    if w % 4 != 0 || h == 0 {
+    if !w.is_multiple_of(4) || h == 0 {
         return sad_scalar(a, a_stride, b, b_stride, w, h);
     }
     assert!(
@@ -120,7 +120,7 @@ unsafe fn ssd_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, h
 }
 
 pub(crate) fn ssd(a: &[u8], a_stride: usize, b: &[u8], b_stride: usize, w: usize, h: usize) -> u64 {
-    if w % 4 != 0 || h == 0 {
+    if !w.is_multiple_of(4) || h == 0 {
         return ssd_scalar(a, a_stride, b, b_stride, w, h);
     }
     assert!(
@@ -244,7 +244,7 @@ pub(crate) fn satd(
     w: usize,
     h: usize,
 ) -> u32 {
-    if w % 4 != 0 || h % 4 != 0 || h == 0 {
+    if !w.is_multiple_of(4) || !h.is_multiple_of(4) || h == 0 {
         return satd_scalar(a, a_stride, b, b_stride, w, h);
     }
     assert!(

@@ -53,7 +53,7 @@ pub(crate) fn sad(
     w: usize,
     h: usize,
 ) -> u32 {
-    if w % 4 != 0 || h == 0 {
+    if !w.is_multiple_of(4) || h == 0 {
         return sad_scalar(a, a_stride, b, b_stride, w, h);
     }
     assert!(
@@ -94,7 +94,7 @@ pub(crate) fn ssd(
     w: usize,
     h: usize,
 ) -> u64 {
-    if w % 4 != 0 || h == 0 {
+    if !w.is_multiple_of(4) || h == 0 {
         return ssd_scalar(a, a_stride, b, b_stride, w, h);
     }
     assert!(
@@ -301,7 +301,7 @@ pub(crate) fn satd(
     w: usize,
     h: usize,
 ) -> u32 {
-    if w % 4 != 0 || h % 4 != 0 || h == 0 {
+    if !w.is_multiple_of(4) || !h.is_multiple_of(4) || h == 0 {
         return satd_scalar(a, a_stride, b, b_stride, w, h);
     }
     assert!(

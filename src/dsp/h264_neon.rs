@@ -493,8 +493,8 @@ unsafe fn luma_filter_intra(v: &mut Lines8, alpha: i32, beta: i32) {
 #[inline(always)]
 unsafe fn tc0_luma(tc0: &[i16; 4], half: usize) -> int16x8_t {
     unsafe {
-        let a = tc0[2 * half] as i16;
-        let b = tc0[2 * half + 1] as i16;
+        let a = tc0[2 * half];
+        let b = tc0[2 * half + 1];
         let t = [a, a, a, a, b, b, b, b];
         vld1q_s16(t.as_ptr())
     }
@@ -737,14 +737,7 @@ unsafe fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
 unsafe fn tc0_chroma(tc0: &[i16; 4]) -> int16x8_t {
     unsafe {
         let t = [
-            tc0[0] as i16,
-            tc0[0] as i16,
-            tc0[1] as i16,
-            tc0[1] as i16,
-            tc0[2] as i16,
-            tc0[2] as i16,
-            tc0[3] as i16,
-            tc0[3] as i16,
+            tc0[0], tc0[0], tc0[1], tc0[1], tc0[2], tc0[2], tc0[3], tc0[3],
         ];
         vld1q_s16(t.as_ptr())
     }
