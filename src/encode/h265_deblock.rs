@@ -175,7 +175,24 @@ pub fn deblock_inter_picture<S: Sample>(
                     // motion matches, which is what separates a filtered
                     // edge from an untouched one between two same-motion
                     // CUs.
-                    if d.cbf_luma {
+                    if d.split_tu && d.rqt_root_cbf {
+                        // A split tree: four quarter TBs, each with its
+                        // own edges and its own cbf, as `transform_unit`
+                        // marks them.
+                        let h = n / 2;
+                        for i in 0..4 {
+                            let (tx, ty) = (x0 + (i & 1) * h, y0 + (i >> 1) * h);
+                            for yy in (ty..ty + h).step_by(4) {
+                                pic.info.edges[(yy >> 2) * w4 + (tx >> 2)] |= 1;
+                            }
+                            for xx in (tx..tx + h).step_by(4) {
+                                pic.info.edges[(ty >> 2) * w4 + (xx >> 2)] |= 4;
+                            }
+                            if d.cbf_luma_tu[i] {
+                                PicInfo::fill4(&mut pic.info.cbf_luma, w4, tx, ty, h, h, 1u8);
+                            }
+                        }
+                    } else if d.cbf_luma {
                         PicInfo::fill4(&mut pic.info.cbf_luma, w4, x0, y0, n, n, 1u8);
                     }
                 }

@@ -103,6 +103,8 @@ pub(crate) struct Tune {
     /// Temporal motion vector prediction (the SPS flag; every inter slice
     /// then names its collocated picture).
     pub tmvp: bool,
+    /// `h265_me::InterPicture::tu_split`.
+    pub inter_tu_split: bool,
 }
 
 impl Tune {
@@ -126,6 +128,7 @@ impl Tune {
         cutree: 2.0,
         live_contexts: false,
         tmvp: false,
+        inter_tu_split: false,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -154,12 +157,25 @@ impl Tune {
             // +5.96% -> +3.93% with RDOQ kept on the initial contexts).
             live_contexts: true,
             tmvp: true,
+            // Measured 2026-11-15 (x265 parity): splitting an inter CU's
+            // transform once where that is cheaper, 8x8 CUs included,
+            // took medium from -5.31% to -8.18% BD-rate (park_joy +3.31%
+            // -> -0.58%), veryfast -6.74% -> -9.98%, slow +4.03% ->
+            // +2.48% (mobile +10.25% -> +5.96%), for a fifth more CPU.
+            // Without the 8x8 CUs medium gained only -0.74%.
+            inter_tu_split: true,
             ..Tune::NEUTRAL
         };
         match p {
+            // Intra units in inter pictures without a transform split, and
+            // tried only where their SATD estimate comes within 1.5x of
+            // the inter search: measured 2026-11-15, +3.93% -> +4.03%
+            // BD-rate at 0.78x the CPU.
             Preset::Slow => Tune {
                 rdoq: true,
                 search_rings: 1,
+                intra_split_depth: 0,
+                intra_satd_gate: Some(1.5),
                 ..base
             },
             Preset::Medium => Tune {

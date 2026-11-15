@@ -516,6 +516,19 @@ pub struct InterCuDecision {
     /// format uses are zero and meaningless. Sized for the largest case,
     /// a 4:4:4 32x32 chroma TB.
     pub chroma: [[i16; 1024]; 2],
+    /// The transform tree splits once: four quarter-size luma TUs in
+    /// z-order, `luma` packing quadrant `i` at `[i * q .. (i + 1) * q]`
+    /// (`q = (n / 2)^2`), and at 4:2:0 four chroma TBs per component
+    /// packed the same way at the quarter chroma size. Only for CUs of
+    /// 16x16 and 32x32 in 4:0:0 and 4:2:0 (`InterPicture::tu_split`), so
+    /// every child keeps `log2 > 2` and chroma splits with luma.
+    /// `cbf_luma` and `cbf_chroma` are then the children's union — the
+    /// depth-0 chroma bins the reader gates the children's on.
+    pub split_tu: bool,
+    /// Per quadrant under `split_tu`: `cbf_luma`.
+    pub cbf_luma_tu: [bool; 4],
+    /// Per component and quadrant under `split_tu`: `cbf_cb` / `cbf_cr`.
+    pub cbf_chroma_tu: [[bool; 4]; 2],
 }
 
 impl Default for InterCuDecision {
@@ -538,6 +551,9 @@ impl Default for InterCuDecision {
             cbf_chroma_bot: [false; 2],
             luma: [0; 1024],
             chroma: [[0; 1024]; 2],
+            split_tu: false,
+            cbf_luma_tu: [false; 4],
+            cbf_chroma_tu: [[false; 4]; 2],
         }
     }
 }
@@ -631,6 +647,18 @@ pub struct InterPicture<S: Sample> {
     pub cat: u32,
     /// The current picture's POC (the motion grid stores POC differences).
     pub cur_poc: i32,
+    /// Whether a coded 16x16 or 32x32 CU may split its transform once
+    /// (`InterCuDecision::split_tu`), decided in SSD plus lambda times
+    /// the tree's bits against the unsplit TU.
+    pub tu_split: bool,
+    /// Scratch for the split trial: the prediction, the unsplit
+    /// reconstruction (luma then both chroma planes, packed) and the split
+    /// shape's levels.
+    tu_save: Vec<S>,
+    tu_keep: Vec<S>,
+    tu_alt: Box<InterCuDecision>,
+    /// The slice is B (the initial contexts a rate falls back to).
+    pub slice_b: bool,
     /// `slice_temporal_mvp_enabled_flag`: the SPS enables temporal MVP and
     /// every inter slice this encoder writes then sets it, naming list 1's
     /// first picture for a B slice and list 0's for a P one.
@@ -826,6 +854,11 @@ impl<S: Sample> InterPicture<S> {
             wp_b: [[Weighting::Default; 3]; 3],
             search_b: [None, None],
             tmvp: sps.temporal_mvp_enabled,
+            tu_split: false,
+            tu_save: Vec::new(),
+            tu_keep: Vec::new(),
+            tu_alt: Box::default(),
+            slice_b: false,
         }
     }
 
@@ -2103,6 +2136,246 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
         out: &mut InterCuDecision,
     ) -> bool {
+        out.split_tu = false;
+        let trial = self.tu_split && !ctx.bypass && (3..=5).contains(&log2_cu) && self.cat <= 1;
+        if !trial {
+            return self.code_residual_whole(
+                ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, out,
+            );
+        }
+        let n = 1usize << log2_cu;
+        // At 8x8 the split leaves 4:2:0 chroma whole (4x4 children carry
+        // none; the fourth codes the parent's), so only luma is retried.
+        let rcat = if log2_cu == 3 { 0 } else { self.cat };
+        let mut save = std::mem::take(&mut self.tu_save);
+        Self::save_region(&self.recon, rcat, x0, y0, n, &mut save);
+        let any = self.code_residual_whole(
+            ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, out,
+        );
+        if !out.cbf_luma {
+            self.tu_save = save;
+            return any;
+        }
+        // The CU's SSD, as `cu_ssd` weighs it, over the luma source this
+        // function is handed already at the CU (`src`) and the chroma
+        // planes it is handed whole.
+        let cat = self.cat;
+        let cu_err = |recon: &Frame<S>| -> u64 {
+            let yo = recon.y.offset(x0 as isize, y0 as isize);
+            let mut e = (ctx.dist.ssd)(src, y_stride, &recon.y.data[yo..], recon.y.stride, n, n);
+            if cat != 0 {
+                let (cx, cy, nc) = (x0 / 2, y0 / 2, n / 2);
+                let mut c = 0u64;
+                for (p, sp) in [(&recon.cb, src_cb), (&recon.cr, src_cr)] {
+                    let o = p.offset(cx as isize, cy as isize);
+                    c += (ctx.dist.ssd)(
+                        &sp[cy * c_stride + cx..],
+                        c_stride,
+                        &p.data[o..],
+                        p.stride,
+                        nc,
+                        nc,
+                    );
+                }
+                let bd_off = 6 * (ctx.bit_depth as i32 - 8);
+                let qp_c = chroma_qp(cat, ctx.qp.clamp(-bd_off, 57));
+                e += (c as f64 * 2f64.powf(f64::from(ctx.qp - qp_c) / 3.0)).round() as u64;
+            }
+            e
+        };
+        let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
+        let is_b = self.slice_b;
+        let j_whole = cu_err(&self.recon) as f64
+            + lam * f64::from(crate::encode::h265::inter_tree_bits(out, self.cat, is_b));
+        let mut keep = std::mem::take(&mut self.tu_keep);
+        Self::save_region(&self.recon, rcat, x0, y0, n, &mut keep);
+        Self::restore_region(&mut self.recon, rcat, x0, y0, n, &save);
+        let mut alt = std::mem::take(&mut self.tu_alt);
+        alt.log2_cu = log2_cu;
+        alt.bypass = false;
+        alt.sign_hiding = out.sign_hiding;
+        alt.split_tu = true;
+        if log2_cu == 3 {
+            alt.cbf_chroma = out.cbf_chroma;
+            for c in 0..2 {
+                alt.chroma[c][..16].copy_from_slice(&out.chroma[c][..16]);
+            }
+        }
+        let any_split = self.code_residual_split(
+            ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut alt,
+        );
+        let j_split = if any_split {
+            cu_err(&self.recon) as f64
+                + lam * f64::from(crate::encode::h265::inter_tree_bits(&alt, self.cat, is_b))
+        } else {
+            f64::INFINITY
+        };
+        let any = if j_split < j_whole {
+            let q = n * n;
+            out.luma[..q].copy_from_slice(&alt.luma[..q]);
+            if log2_cu > 3 {
+                let qc = q / 4;
+                for c in 0..2 {
+                    out.chroma[c][..qc].copy_from_slice(&alt.chroma[c][..qc]);
+                }
+            }
+            out.split_tu = true;
+            out.cbf_luma = alt.cbf_luma;
+            out.cbf_chroma = alt.cbf_chroma;
+            out.cbf_chroma_bot = [false; 2];
+            out.cbf_luma_tu = alt.cbf_luma_tu;
+            out.cbf_chroma_tu = alt.cbf_chroma_tu;
+            out.rqt_root_cbf = true;
+            true
+        } else {
+            Self::restore_region(&mut self.recon, rcat, x0, y0, n, &keep);
+            any
+        };
+        self.tu_save = save;
+        self.tu_keep = keep;
+        self.tu_alt = alt;
+        any
+    }
+
+    /// Copy the luma and (4:2:0) chroma samples of the `n`-square CU at
+    /// `(x0, y0)` out of `recon` into `buf`.
+    fn save_region(recon: &Frame<S>, cat: u32, x0: usize, y0: usize, n: usize, buf: &mut Vec<S>) {
+        let nc = if cat == 0 { 0 } else { n / 2 };
+        buf.clear();
+        let mut one = |p: &Plane16<S>, x: usize, y: usize, m: usize| {
+            for r in 0..m {
+                let o = p.offset(x as isize, (y + r) as isize);
+                buf.extend_from_slice(&p.data[o..o + m]);
+            }
+        };
+        one(&recon.y, x0, y0, n);
+        if nc > 0 {
+            one(&recon.cb, x0 / 2, y0 / 2, nc);
+            one(&recon.cr, x0 / 2, y0 / 2, nc);
+        }
+    }
+
+    /// Put back what [`Self::save_region`] took.
+    fn restore_region(recon: &mut Frame<S>, cat: u32, x0: usize, y0: usize, n: usize, buf: &[S]) {
+        let nc = if cat == 0 { 0 } else { n / 2 };
+        let mut at = 0;
+        let mut one = |p: &mut Plane16<S>, x: usize, y: usize, m: usize| {
+            for r in 0..m {
+                let o = p.offset(x as isize, (y + r) as isize);
+                p.data[o..o + m].copy_from_slice(&buf[at..at + m]);
+                at += m;
+            }
+        };
+        one(&mut recon.y, x0, y0, n);
+        if nc > 0 {
+            one(&mut recon.cb, x0 / 2, y0 / 2, nc);
+            one(&mut recon.cr, x0 / 2, y0 / 2, nc);
+        }
+    }
+
+    /// The split shape of [`Self::code_residual_cu`]: four quarter TUs of
+    /// luma and, at 4:2:0, four quarter TBs per chroma component, each
+    /// coded and reconstructed in place over the prediction. Fills the
+    /// split fields of `out`; returns whether anything was coded.
+    #[allow(clippy::too_many_arguments)]
+    fn code_residual_split(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        x0: usize,
+        y0: usize,
+        log2_cu: u32,
+        src: &[S],
+        y_stride: usize,
+        src_cb: &[S],
+        src_cr: &[S],
+        c_stride: usize,
+        out: &mut InterCuDecision,
+    ) -> bool {
+        let qp_l = ctx.qp + 6 * (ctx.bit_depth as i32 - 8);
+        let h = 1usize << (log2_cu - 1);
+        let q = h * h;
+        let mut any = false;
+        for i in 0..4 {
+            let (x, y) = (x0 + (i & 1) * h, y0 + (i >> 1) * h);
+            let nz = code_residual_inter(
+                ctx,
+                &mut self.recon.y,
+                x,
+                y,
+                log2_cu - 1,
+                0,
+                qp_l,
+                &src[(y - y0) * y_stride + (x - x0)..],
+                y_stride,
+                &mut out.luma[i * q..(i + 1) * q],
+            );
+            out.cbf_luma_tu[i] = nz != 0;
+            any |= nz != 0;
+        }
+        out.cbf_luma = out.cbf_luma_tu.iter().any(|&c| c);
+        out.cbf_chroma_tu = [[false; 4]; 2];
+        if log2_cu == 3 {
+            // The chroma TB stays whole; the caller put the unsplit
+            // shape's levels and cbfs in place.
+            out.cbf_chroma_bot = [false; 2];
+            out.rqt_root_cbf = any || out.cbf_chroma.iter().any(|&c| c);
+            return any;
+        }
+        if self.cat != 0 {
+            let bd_off = 6 * (ctx.bit_depth as i32 - 8);
+            let qp_c = chroma_qp(self.cat, ctx.qp.clamp(-bd_off, 57)) + bd_off;
+            let hc = h / 2;
+            let qc = hc * hc;
+            for comp in 0..2usize {
+                let plane = if comp == 0 {
+                    &mut self.recon.cb
+                } else {
+                    &mut self.recon.cr
+                };
+                let srcp = if comp == 0 { src_cb } else { src_cr };
+                for i in 0..4 {
+                    let (px, py) = (x0 / 2 + (i & 1) * hc, y0 / 2 + (i >> 1) * hc);
+                    let nz = code_residual_inter(
+                        ctx,
+                        plane,
+                        px,
+                        py,
+                        log2_cu - 2,
+                        comp + 1,
+                        qp_c,
+                        &srcp[py * c_stride + px..],
+                        c_stride,
+                        &mut out.chroma[comp][i * qc..(i + 1) * qc],
+                    );
+                    out.cbf_chroma_tu[comp][i] = nz != 0;
+                    any |= nz != 0;
+                }
+            }
+        }
+        out.cbf_chroma = [
+            out.cbf_chroma_tu[0].iter().any(|&c| c),
+            out.cbf_chroma_tu[1].iter().any(|&c| c),
+        ];
+        out.cbf_chroma_bot = [false; 2];
+        out.rqt_root_cbf = any;
+        any
+    }
+
+    /// The unsplit residual of [`Self::code_residual_cu`].
+    #[allow(clippy::too_many_arguments)]
+    fn code_residual_whole(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        x0: usize,
+        y0: usize,
+        log2_cu: u32,
+        src: &[S],
+        y_stride: usize,
+        src_cb: &[S],
+        src_cr: &[S],
+        c_stride: usize,
+        out: &mut InterCuDecision,
+    ) -> bool {
         let qp_l = ctx.qp + 6 * (ctx.bit_depth as i32 - 8);
         let nz_l = code_residual_inter(
             ctx,
@@ -2803,7 +3076,7 @@ impl<S: Sample> InterPicture<S> {
         // An intra unit at the minimum coding block has a second shape, as
         // in an I picture: code `PART_NxN` too and keep the cheaper, the
         // loser's state put back from a copy.
-        if log2 == MIN_CB_LOG2 && matches!(coded, PCuDecision::Intra(_)) {
+        if log2 == MIN_CB_LOG2 && matches!(coded, PCuDecision::Intra(_)) && self.nxn_trial > 0.0 {
             let saved = TrialSave::take(self, x0, y0, n);
             let nxn = PCuDecision::Intra(Box::new(self.code_cu_intra_nxn(
                 ctx,

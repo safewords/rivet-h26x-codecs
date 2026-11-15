@@ -1722,6 +1722,8 @@ impl<S: Sample> Core<S> {
         pic.quarter_cross = tune.quarter_cross;
         pic.intra_satd_gate = tune.intra_satd_gate;
         pic.limit_refs = tune.limit_refs;
+        pic.tu_split = tune.inter_tu_split;
+        pic.slice_b = c.kind == Kind::B;
         if !c.reference && tune.nonref_fast {
             // A picture nothing references: its decisions shape only itself.
             pic.rskip = Some(f32::MAX);
@@ -3318,6 +3320,7 @@ impl KindCensus {
                     c.nxn += u64::from(d.nxn);
                 }
                 PCuDecision::Inter(d) => {
+                    c.split_tu += u64::from(d.split_tu && d.rqt_root_cbf);
                     match d.kind {
                         InterCuKind::Skip { .. } => c.skip += 1,
                         InterCuKind::Merge { .. } => c.merge += 1,
@@ -3648,6 +3651,34 @@ fn write_cu_inter(
         InterCuKind::Skip { .. } | InterCuKind::UseIntra => unreachable!("handled above"),
     }
 
+    write_inter_tree(e, cx, d, cat, qp_delta);
+}
+
+/// The bits of an inter CU's transform tree alone (`rqt_root_cbf` 1): what
+/// the split trial (`InterPicture::code_residual_cu`) compares, priced as
+/// every other rate is.
+pub(crate) fn inter_tree_bits(d: &InterCuDecision, cat: u32, is_b: bool) -> f32 {
+    let mut cx = initial_contexts(if is_b { 2 } else { 1 }, d.qp_y);
+    let mut e = CabacEncoder::estimating();
+    write_inter_tree(&mut e, &mut cx, d, cat, None);
+    e.fractional_bits() as f32
+}
+
+/// An inter CU's `transform_tree`, under a coded (or inferred) `rqt_root_cbf`
+/// of 1: one CU-sized TU, or one split into four quarters
+/// (`InterCuDecision::split_tu`).
+fn write_inter_tree(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &InterCuDecision,
+    cat: u32,
+    qp_delta: Option<i32>,
+) {
+    let log2 = d.log2_cu;
+    if d.split_tu {
+        write_inter_tree_split(e, cx, d, cat, qp_delta);
+        return;
+    }
     // The transform tree: one CU-sized TU, no split.
     write_split_transform_flag(e, cx, log2, false);
     // Chroma cbfs, per component. Monochrome codes none at all - the
@@ -3740,6 +3771,146 @@ fn write_cu_inter(
             }
         }
     }
+}
+
+/// The four 4x4 children of a split 8x8 inter CU, after its split flag.
+/// At 4:2:0 the parent codes the chroma cbfs (its size is above 4x4), the
+/// children code none and inherit them, the quantiser delta goes in the
+/// first child with its luma cbf or an inherited chroma one, and the
+/// fourth child carries the parent-sized 4x4 chroma blocks (`blkIdx` 3).
+fn write_inter_tree_split8(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &InterCuDecision,
+    cat: u32,
+    mut pending: Option<i32>,
+) {
+    if cat != 0 {
+        for comp in 0..2 {
+            write_cbf_chroma(e, cx, 0, d.cbf_chroma[comp]);
+        }
+    }
+    let params = |c_idx: usize| ResidualParams {
+        sign_hiding: d.sign_hiding,
+        log2_size: 2,
+        c_idx,
+        scan_idx: 0,
+        bypass: d.bypass,
+        transform_skip_allowed: false,
+        intra: false,
+        pred_mode_intra: 0,
+        ts_context: false,
+        implicit_rdpcm: false,
+        explicit_rdpcm: false,
+        persistent_rice: false,
+        trace: false,
+    };
+    let chroma = cat != 0 && (d.cbf_chroma[0] || d.cbf_chroma[1]);
+    for i in 0..4 {
+        // No split flag at the 4x4 minimum, no chroma cbf below 8x8.
+        write_cbf_luma(e, cx, 1, d.cbf_luma_tu[i]);
+        if pending.is_some() && (d.cbf_luma_tu[i] || chroma) {
+            write_cu_qp_delta(e, cx, pending.take().expect("checked"));
+        }
+        if d.cbf_luma_tu[i] {
+            write_residual(e, cx, &params(0), &d.luma[i * 16..(i + 1) * 16]);
+        }
+        if i == 3 && cat != 0 {
+            for comp in 0..2 {
+                if d.cbf_chroma[comp] {
+                    write_residual(e, cx, &params(comp + 1), &d.chroma[comp][..16]);
+                }
+            }
+        }
+    }
+    debug_assert!(
+        pending.is_none(),
+        "a quantiser delta was handed to a split CU with no coded cbf"
+    );
+}
+
+/// [`write_inter_tree`] for a split CU: the reader's `transform_tree`
+/// specialised to one level, as [`write_cu_intra_body`] spells an intra
+/// split — the split flag, the depth-0 chroma gate bins, then per
+/// quadrant its own (unsplit) flag, its chroma bins under a set gate,
+/// its always-coded `cbf_luma`, the quantiser delta at the first quadrant
+/// with a cbf, and its residuals, every block scanned diagonally.
+fn write_inter_tree_split(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &InterCuDecision,
+    cat: u32,
+    qp_delta: Option<i32>,
+) {
+    debug_assert!(
+        cat <= 1 && d.log2_cu >= 3,
+        "a split inter tree is 4:0:0 / 4:2:0, 8x8 up"
+    );
+    let log2 = d.log2_cu;
+    let mut pending = qp_delta;
+    write_split_transform_flag(e, cx, log2, true);
+    if log2 == 3 {
+        write_inter_tree_split8(e, cx, d, cat, pending);
+        return;
+    }
+    if cat != 0 {
+        for comp in 0..2 {
+            write_cbf_chroma(e, cx, 0, d.cbf_chroma[comp]);
+        }
+    }
+    let params = |log2_size: u32, c_idx: usize| ResidualParams {
+        sign_hiding: d.sign_hiding,
+        log2_size,
+        c_idx,
+        scan_idx: 0,
+        bypass: d.bypass,
+        transform_skip_allowed: false,
+        intra: false,
+        pred_mode_intra: 0,
+        ts_context: false,
+        implicit_rdpcm: false,
+        explicit_rdpcm: false,
+        persistent_rice: false,
+        trace: false,
+    };
+    let n = 1usize << log2;
+    let q = (n / 2) * (n / 2);
+    let qc = q / 4;
+    for i in 0..4 {
+        write_split_transform_flag(e, cx, log2 - 1, false);
+        if cat != 0 {
+            for comp in 0..2 {
+                if d.cbf_chroma[comp] {
+                    write_cbf_chroma(e, cx, 1, d.cbf_chroma_tu[comp][i]);
+                }
+            }
+        }
+        write_cbf_luma(e, cx, 1, d.cbf_luma_tu[i]);
+        let child_chroma =
+            cat != 0 && (0..2).any(|comp| d.cbf_chroma[comp] && d.cbf_chroma_tu[comp][i]);
+        if pending.is_some() && (d.cbf_luma_tu[i] || child_chroma) {
+            write_cu_qp_delta(e, cx, pending.take().expect("checked"));
+        }
+        if d.cbf_luma_tu[i] {
+            write_residual(e, cx, &params(log2 - 1, 0), &d.luma[i * q..(i + 1) * q]);
+        }
+        if cat != 0 {
+            for comp in 0..2 {
+                if d.cbf_chroma[comp] && d.cbf_chroma_tu[comp][i] {
+                    write_residual(
+                        e,
+                        cx,
+                        &params(log2 - 2, comp + 1),
+                        &d.chroma[comp][i * qc..(i + 1) * qc],
+                    );
+                }
+            }
+        }
+    }
+    debug_assert!(
+        pending.is_none(),
+        "a quantiser delta was handed to a split CU with no coded cbf"
+    );
 }
 
 /// Serialise one CTU of an **I** slice, holding exactly one `PART_2Nx2N`
@@ -5669,6 +5840,59 @@ mod tests {
     /// restarts at every IDR. H.265 drops its references at an IDR
     /// (`Attempt::clears_refs`) and never showed the H.264 fault; this
     /// holds it there.
+    #[test]
+    fn every_tier_round_trips_through_the_decoder() {
+        // Each tier's own tools — temporal MVP, live pricing, the split
+        // inter transform tree (8x8 to 32x32) and the slow tier's RDOQ —
+        // decode to exactly the encoder's reconstruction, and the split
+        // tree is actually taken in P and B pictures.
+        use super::super::Preset;
+        for preset in [Preset::Veryfast, Preset::Medium, Preset::Slow] {
+            for qp in [22u8, 34] {
+                let tag = format!("{preset:?} qp {qp}");
+                let mut c = Config {
+                    gop: 12,
+                    rate: super::super::RateControl::ConstantQp(qp),
+                    ..cfg(96, 64, ChromaFormat::Yuv420)
+                };
+                super::super::h265_tune::apply_preset(&mut c, preset);
+                let frames = moving_frames_n(96, 64, ChromaFormat::Yuv420, 9);
+                let mut e = H265Encoder::new(c).unwrap_or_else(|err| panic!("{tag}: {err}"));
+                let mut units = Vec::new();
+                for f in &frames {
+                    units.extend(e.push(f).unwrap_or_else(|err| panic!("{tag}: {err}")));
+                }
+                units.extend(e.flush().unwrap_or_else(|err| panic!("{tag}: {err}")));
+                let census = e.census();
+                assert!(
+                    qp > 22 || census.by_kind[1].split_tu + census.by_kind[2].split_tu > 0,
+                    "{tag}: no inter CU split its transform tree"
+                );
+                let mut dec = crate::hevc::HevcDecoder::new();
+                for u in &units {
+                    dec.push_annexb(&u.data)
+                        .unwrap_or_else(|err| panic!("{tag}: decoder rejected the stream: {err}"));
+                }
+                dec.flush()
+                    .unwrap_or_else(|err| panic!("{tag}: decoder failed to flush: {err}"));
+                assert_eq!(dec.warnings(), 0, "{tag}: the decoder concealed something");
+                let mut by_display = vec![0usize; units.len()];
+                for u in &units {
+                    by_display[u.display as usize] = u.encode_index as usize;
+                }
+                for (i, &coded) in by_display.iter().enumerate() {
+                    let got = dec
+                        .next_picture()
+                        .unwrap_or_else(|| panic!("{tag}: picture {i} missing"));
+                    assert!(
+                        got.into_packed() == e.reconstructions()[coded],
+                        "{tag}: picture {i} decoded differently than the encoder reconstructed it"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_gop_predicts_from_what_the_decoder_holds() {
         for bframes in 1u32..=3 {
