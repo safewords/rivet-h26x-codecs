@@ -9,7 +9,7 @@ comparison of this crate's decoder against them.
 The reference for H.264 is JM's `ldecod`, for HEVC HM's `TAppDecoder`: the
 decoders the ITU-T / ISO/IEC joint teams publish beside the standards, used
 here only as programs (their source is not read). Which one is decided by
-the extension (`.264 .h264 .jsv .26l .avc .jvt` H.264; `.265 .h265 .hevc .bit .bin`
+the extension (`.264 .h264 .jsv .26l .avc .jvt .bits` H.264 — `.bits` being the JVT professional-profile streams; `.265 .h265 .hevc .bit .bin`
 HEVC) or `--codec`.
 
 `decode` writes the reference decoder's pictures in the layout h26xdec
@@ -50,7 +50,7 @@ import subprocess
 import sys
 import tempfile
 
-H264_EXT = ('.264', '.h264', '.jsv', '.26l', '.avc', '.jvt')
+H264_EXT = ('.264', '.h264', '.jsv', '.26l', '.avc', '.jvt', '.bits')
 HEVC_EXT = ('.265', '.h265', '.hevc', '.bit', '.bin')
 
 

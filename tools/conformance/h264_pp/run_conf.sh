@@ -43,9 +43,11 @@ one() {
     ref="jm/$name.md5"
   else
     ref="md5/$name.ref.md5"
-    # The Sejong 4:4:4 streams' VUI says matrix_coefficients 0 (RGB), and JM
-    # writes those planes as R, G, B; --rgb undoes that order.
-    rgb=; case "$name" in PPCV444I7_SejongUniv_A|PPH444I7_SejongUniv_A|PPH444P10_SejongUniv_A) rgb=--rgb ;; esac
+    # The Sejong 4:4:4 streams and the eleven 2008 4:4:4 .bits streams are
+    # RGB-coded, and JM writes those planes as R, G, B (Cr, Y, Cb); --rgb
+    # undoes that order. (PPH444I1_2008: h26xdec's planes reordered Cr, Y,
+    # Cb equal JM's file, all 120 frames; in coded order, none.)
+    rgb=; case "$name" in PPCV444I7_SejongUniv_A|PPH444I7_SejongUniv_A|PPH444P10_SejongUniv_A|PP*444*_2008) rgb=--rgb ;; esac
     [ -s "$ref" ] || python "$REF_DECODE" framemd5 $rgb "$bs" "$nmine" > "$ref" 2> "$OUT/$name.referr" || rm -f "$ref"
   fi
   nref=$(cat "$ref" 2>/dev/null | wc -l | tr -d " ")
