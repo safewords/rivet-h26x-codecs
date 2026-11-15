@@ -8,8 +8,8 @@
 //! counted `Instant` for `performance.now()`. The three vendored streams
 //! must decode on four threads to the hashes `tests/decode.rs` holds them
 //! to, every worker must have been asked of the platform, and every one
-//! must leave its body when its decoder is dropped — the pool cannot join
-//! a thread it did not start.
+//! have left its body by the time its decoder is dropped — the pool cannot
+//! join a thread it did not start, so it waits for them.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -104,8 +104,10 @@ fn decoders_run_on_the_installed_platform() {
     // Every worker came from the platform: four for each H.264 decoder, and
     // eight decoding plus one filtering for each HEVC one.
     assert_eq!(SPAWNED.load(Ordering::SeqCst), 2 * (4 + 4 + 8 + 1));
-    // The decoders are gone, so their pools are: every worker returns from
-    // its body (the pool does not join threads it did not start).
+    // The decoders are gone, so their pools are: a pool waits, as it is
+    // dropped, until every worker it asked for has returned from its body
+    // (it cannot join threads it did not start). The counter here drops a
+    // moment after the body returns.
     let deadline = Instant::now() + Duration::from_secs(10);
     while RUNNING.load(Ordering::SeqCst) > 0 {
         assert!(

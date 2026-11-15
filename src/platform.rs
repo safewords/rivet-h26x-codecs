@@ -18,8 +18,10 @@
 //! A worker that [`Platform::spawn`] was asked for may start late (a Web
 //! Worker loads asynchronously) or on a thread that has run other bodies
 //! before. Neither matters to the pool: jobs wait in its queue until a
-//! worker takes them, and a worker leaves the pool's loop — returning from
-//! its body — when the pool is dropped, instead of being joined.
+//! worker takes them. A pool cannot join a thread it did not start, so when
+//! it is dropped it waits instead until each of its workers has left the
+//! pool's loop — returned from its body — and the thread is the embedder's
+//! again, free to run another body.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -33,8 +35,9 @@ pub type ThreadBody = Box<dyn FnOnce() + Send + 'static>;
 pub struct Platform {
     /// Run `body` on a thread of its own, to completion. It must not wait
     /// for the body to start or to finish: the caller may go on to block
-    /// until the body has done work. Should it be unable to start a thread,
-    /// the body must still run some time (or the decoder waits for ever).
+    /// until the body has done work, or (dropping the pool) has returned.
+    /// Should it be unable to start a thread, the body must still run some
+    /// time (or the decoder waits for ever).
     pub spawn: fn(ThreadBody),
     /// Milliseconds on a monotonic clock (`performance.now()`), from any
     /// thread.

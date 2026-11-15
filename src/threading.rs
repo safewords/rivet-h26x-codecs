@@ -178,6 +178,9 @@ pub struct Pool {
     /// The std threads, joined on drop; none when a
     /// [`Platform`](crate::platform::Platform) starts the workers.
     workers: Vec<JoinHandle<()>>,
+    /// Workers a [`Platform`](crate::platform::Platform) started that have
+    /// not left yet: what drop waits for in place of joining them.
+    platform_workers: Arc<(Mutex<usize>, Condvar)>,
     capacity: usize,
     threads: usize,
     /// What every worker blocked inside a task is waiting for (see
@@ -229,14 +232,24 @@ impl Pool {
             Condvar::new(),
         ));
         let mut workers = Vec::with_capacity(threads);
+        let platform_workers = Arc::new((Mutex::new(0usize), Condvar::new()));
         for i in 0..threads.max(1) {
             let st = state.clone();
-            let body = move || worker_loop(&st);
             match crate::platform::get() {
-                // The embedder's thread (a Web Worker on wasm): not joined;
-                // the body returns when the pool shuts down.
-                Some(p) => (p.spawn)(Box::new(body)),
+                // The embedder's thread (a Web Worker on wasm): its body
+                // returns when the pool shuts down, and says so.
+                Some(p) => {
+                    *platform_workers.0.lock().unwrap() += 1;
+                    let left = platform_workers.clone();
+                    (p.spawn)(Box::new(move || {
+                        worker_loop(&st);
+                        let (count, cv) = &*left;
+                        *count.lock().unwrap() -= 1;
+                        cv.notify_all();
+                    }));
+                }
                 None => {
+                    let body = move || worker_loop(&st);
                     let h = std::thread::Builder::new()
                         .name(format!("h26x-worker-{i}"))
                         .spawn(body)
@@ -248,6 +261,7 @@ impl Pool {
         Arc::new(Pool {
             state,
             workers,
+            platform_workers,
             capacity: capacity.max(1),
             threads: threads.max(1),
             waits: Mutex::new(Vec::new()),
@@ -329,6 +343,14 @@ impl Drop for Pool {
         }
         for h in self.workers.drain(..) {
             let _ = h.join();
+        }
+        // The embedder's threads cannot be joined; wait for each to leave
+        // its body instead, so that the pool is gone when it is dropped
+        // either way (and a thread the embedder reuses is free again).
+        let (count, cv) = &*self.platform_workers;
+        let mut n = count.lock().unwrap();
+        while *n > 0 {
+            n = cv.wait(n).unwrap();
         }
     }
 }
