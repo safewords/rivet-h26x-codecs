@@ -8,9 +8,9 @@
 //! adjacency is the defence worth having).
 
 use crate::cabac::{Cabac, Ctx, init_ctx_h264};
-use crate::cabac_enc::BinEnc;
 #[cfg(test)]
 use crate::cabac_enc::CabacEncoder;
+use crate::cabac_enc::{BinCore, BinEnc};
 use crate::encode::h264_intra::{MbDecision, MbKind as IntraKind};
 use crate::encode::h264_me::{BDecision, BMbKind, InterDecision, InterMbKind};
 use crate::{Error, Result};
@@ -2241,8 +2241,8 @@ fn residual_block_cabac(
 /// and a desync is invisible until a later macroblock decodes as rubbish, so
 /// the defence worth having is that the two are on the same screen.
 #[allow(clippy::too_many_arguments, dead_code)]
-pub(crate) fn write_residual_block_cabac(
-    e: &mut impl BinEnc,
+pub(crate) fn write_residual_block_cabac<E: BinEnc>(
+    e: &mut E,
     st: &mut CabacState,
     field: bool,
     cat: usize,
@@ -2270,10 +2270,18 @@ pub(crate) fn write_residual_block_cabac(
     // mask says so to the compiler, which otherwise checks each bin.
     let ctx = &mut st.ctx;
     const M: usize = NUM_CTX - 1;
+    // The coder's per-bin state by value for the block, so the bins below
+    // keep it in registers rather than in the coder.
+    let (mut c, out) = e.split();
 
     if let Some(inc) = cbf_inc {
-        e.encode_decision(&mut ctx[(CBF_CTX_BASE[cat] + inc) & M], (n_sig != 0) as u32);
+        c.decision(
+            out,
+            &mut ctx[(CBF_CTX_BASE[cat] + inc) & M],
+            (n_sig != 0) as u32,
+        );
         if n_sig == 0 {
+            e.join(c);
             return 0;
         }
     } else {
@@ -2285,6 +2293,7 @@ pub(crate) fn write_residual_block_cabac(
             "block with an inferred coded_block_flag has no coefficient"
         );
         if n_sig == 0 {
+            e.join(c);
             return 0;
         }
     }
@@ -2317,14 +2326,15 @@ pub(crate) fn write_residual_block_cabac(
     for k in 0..n_sig {
         let p = sig_pos[k] as usize;
         while i < p {
-            e.encode_decision(&mut ctx[(sig_base + sig_off[i] as usize) & M], 0);
+            c.decision(out, &mut ctx[(sig_base + sig_off[i] as usize) & M], 0);
             i += 1;
         }
         if p == last {
             break;
         }
-        e.encode_decision(&mut ctx[(sig_base + sig_off[p] as usize) & M], 1);
-        e.encode_decision(
+        c.decision(out, &mut ctx[(sig_base + sig_off[p] as usize) & M], 1);
+        c.decision(
+            out,
             &mut ctx[(last_base + last_off[p] as usize) & M],
             (k + 1 == n_sig) as u32,
         );
@@ -2345,33 +2355,33 @@ pub(crate) fn write_residual_block_cabac(
             (1 + num_eq1).min(4)
         };
         if abs_m1 == 0 {
-            e.encode_decision(&mut ctx[(abs_base + inc0) & M], 0);
+            c.decision(out, &mut ctx[(abs_base + inc0) & M], 0);
         } else {
-            e.encode_decision(&mut ctx[(abs_base + inc0) & M], 1);
+            c.decision(out, &mut ctx[(abs_base + inc0) & M], 1);
             let c1 = &mut ctx[(abs_base + 5 + inc1_cap.min(num_gt1)) & M];
             // The reader counts from one and stops at fourteen without
             // consuming a terminator, so a capped prefix writes ones only.
             let prefix = abs_m1.min(14);
             for _ in 1..prefix {
-                e.encode_decision(c1, 1);
+                c.decision(out, c1, 1);
             }
             if prefix < 14 {
-                e.encode_decision(c1, 0);
+                c.decision(out, c1, 0);
             } else {
                 // UEG0 escape: ones while the remainder covers the next
                 // doubling, a zero, then that many bits of what is left.
                 let mut rem = abs_m1 - 14;
                 let mut kk = 0u32;
                 while rem >= (1 << kk) {
-                    e.encode_bypass(1);
+                    c.bypass(out, 1);
                     rem -= 1 << kk;
                     kk += 1;
                     debug_assert!(kk <= 24, "coeff_abs_level too large to binarise");
                 }
-                e.encode_bypass(0);
+                c.bypass(out, 0);
                 while kk > 0 {
                     kk -= 1;
-                    e.encode_bypass((rem >> kk) & 1);
+                    c.bypass(out, (rem >> kk) & 1);
                 }
             }
         }
@@ -2380,8 +2390,9 @@ pub(crate) fn write_residual_block_cabac(
         } else {
             num_gt1 += 1;
         }
-        e.encode_bypass((level < 0) as u32);
+        c.bypass(out, (level < 0) as u32);
     }
+    e.join(c);
     n_sig
 }
 

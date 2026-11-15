@@ -533,19 +533,27 @@ impl<'a> CabacEncoder<'a> {
 /// same bytes.
 pub(crate) struct CabacWriter<'a> {
     w: &'a mut BitWriter,
-    /// `codILow`, with [`CabacWriter::queued`] bits above its window.
+    /// The registers every bin touches, kept apart so a hot loop can hold
+    /// them by value ([`BinEnc::split`]).
+    core: WCore,
+    /// The byte that a carry may still increment (`-1`: none yet), ...
+    pend: i32,
+    /// ... and the `0xff` bytes after it, which a carry turns to `0x00`.
+    ffs: u32,
+}
+
+/// [`CabacWriter`]'s per-bin state.
+#[derive(Clone, Copy)]
+pub(crate) struct WCore {
+    /// `codILow`, with [`WCore::queued`] bits above its window.
     low: u32,
     /// `codIRange`.
     range: u32,
-    /// The first bit to leave the window is the implicit one
-    /// `firstBitFlag` drops.
-    first: bool,
-    /// The byte that a carry may still increment (`-1`: none yet), ...
-    pend: i32,
-    /// ... the `0xff` bytes after it, which a carry turns to `0x00` ...
-    ffs: u32,
-    /// ... and how many bits `low` holds above its ten-bit window.
+    /// How many bits `low` holds above its ten-bit window ...
     queued: u32,
+    /// ... and how many make a byte to hand on: nine for the first, whose
+    /// leading bit is the implicit one `firstBitFlag` drops, eight after.
+    need: u32,
 }
 
 impl<'a> CabacWriter<'a> {
@@ -554,43 +562,36 @@ impl<'a> CabacWriter<'a> {
         debug_assert!(w.byte_aligned(), "CABAC data starts on a byte boundary");
         Self {
             w,
-            low: 0,
-            range: 510,
-            first: true,
+            core: WCore {
+                low: 0,
+                range: 510,
+                queued: 0,
+                need: 9,
+            },
             pend: -1,
             ffs: 0,
-            queued: 0,
         }
     }
 
-    /// [`CabacWriter`]: move whole bytes from above the window to the
-    /// writer. The first bit to leave the window is the implicit leading
-    /// one the standard's `firstBitFlag` drops, so the first byte waits
-    /// for nine.
-    #[inline(always)]
-    fn fast_settle(&mut self) {
-        if self.queued >= 8 + self.first as u32 {
-            self.fast_out();
-        }
-    }
-
-    /// [`CabacWriter::fast_settle`]'s byte, out of line: one bin in
-    /// several gets here.
+    /// [`WCore::settle`]'s byte, out of line: one bin in several gets
+    /// here. The core goes in and comes back by value, so the caller's
+    /// copy never has to live in memory.
     #[inline(never)]
-    fn fast_out(&mut self) {
-        let need = 8 + self.first as u32;
-        let shift = 10 + self.queued - need;
-        let v = self.low >> shift;
-        self.low &= (1 << shift) - 1;
-        self.queued -= need;
-        let (carry, byte) = if self.first {
-            self.first = false;
+    fn fast_out(&mut self, mut c: WCore) -> WCore {
+        let need = c.need;
+        let shift = 10 + c.queued - need;
+        let v = c.low >> shift;
+        c.low &= (1 << shift) - 1;
+        c.queued -= need;
+        let (carry, byte) = if need == 9 {
+            c.need = 8;
             debug_assert!(v < 0x100, "a carry past the codeword's first bit");
             (0, v & 0xff)
         } else {
             (v >> 8, v & 0xff)
         };
         self.fast_byte(carry, byte);
+        c
     }
 
     #[inline]
@@ -619,38 +620,27 @@ impl<'a> CabacWriter<'a> {
         }
     }
 
-    /// [`CabacWriter`]'s renormalisation: one shift, then whole bytes out.
-    #[inline(always)]
-    fn fast_renorm(&mut self) {
-        if self.range < 256 {
-            let s = self.range.leading_zeros() - 23;
-            self.range <<= s;
-            self.low <<= s;
-            self.queued += s;
-            self.fast_settle();
-        }
-    }
-
     /// [`CabacWriter`]'s `EncodeFlush`: the window's top three bits, the
     /// last forced to one, join the queue, and everything left goes out.
     fn fast_flush(&mut self) {
-        self.range = 2;
-        self.fast_renorm();
-        self.low |= 0x80;
-        self.low <<= 3;
-        self.queued += 3;
-        self.fast_settle();
-        self.fast_settle();
+        let mut c = self.core;
+        c.range = 2;
+        c.renorm(self);
+        c.low |= 0x80;
+        c.low <<= 3;
+        c.queued += 3;
+        c.settle(self);
+        c.settle(self);
         // Nothing can carry any more: the pending byte and its run go out
         // as they stand, then the bits short of a byte.
-        let mut rest = self.queued;
-        let mut v = self.low >> 10;
-        if self.first {
+        let mut rest = c.queued;
+        let mut v = c.low >> 10;
+        if c.need == 9 {
             // Never reached a byte: drop the leading bit here.
             debug_assert!(rest >= 1);
             rest -= 1;
             v &= (1 << rest) - 1;
-            self.first = false;
+            c.need = 8;
         }
         // A carry out of the last bits still reaches the pending byte.
         self.fast_byte(v >> rest, 0);
@@ -660,14 +650,38 @@ impl<'a> CabacWriter<'a> {
         if rest > 0 {
             w.bits(rest, v & ((1 << rest) - 1));
         }
-        self.queued = 0;
-        self.low = 0;
+        c.queued = 0;
+        c.low = 0;
+        self.core = c;
     }
 }
 
-impl BinEnc for CabacWriter<'_> {
+impl WCore {
+    /// Move a whole byte from above the window to the writer, when there
+    /// is one.
     #[inline(always)]
-    fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
+    fn settle(&mut self, out: &mut CabacWriter<'_>) {
+        if self.queued >= self.need {
+            *self = out.fast_out(*self);
+        }
+    }
+
+    /// The renormalisation: one shift, then whole bytes out.
+    #[inline(always)]
+    fn renorm(&mut self, out: &mut CabacWriter<'_>) {
+        if self.range < 256 {
+            let s = self.range.leading_zeros() - 23;
+            self.range <<= s;
+            self.low <<= s;
+            self.queued += s;
+            self.settle(out);
+        }
+    }
+}
+
+impl<'a> BinCore<CabacWriter<'a>> for WCore {
+    #[inline(always)]
+    fn decision(&mut self, out: &mut CabacWriter<'a>, ctx: &mut Ctx, bin: u32) {
         let state = *ctx;
         let p = (state >> 1) as usize;
         let mps = (state & 1) as u32;
@@ -678,28 +692,70 @@ impl BinEnc for CabacWriter<'_> {
             self.range = lps;
         }
         *ctx = EST_NEXT[((state as usize) << 1 | bin as usize) & 255];
-        self.fast_renorm();
+        self.renorm(out);
     }
 
     #[inline(always)]
-    fn encode_bypass(&mut self, bin: u32) {
+    fn bypass(&mut self, out: &mut CabacWriter<'a>, bin: u32) {
         self.low <<= 1;
         if bin != 0 {
             self.low += self.range;
         }
         self.queued += 1;
-        self.fast_settle();
+        self.settle(out);
+    }
+}
+
+impl<'a> BinEnc for CabacWriter<'a> {
+    type Core = WCore;
+    type Out = CabacWriter<'a>;
+
+    #[inline(always)]
+    fn split(&mut self) -> (WCore, &mut Self) {
+        (self.core, self)
+    }
+
+    #[inline(always)]
+    fn join(&mut self, core: WCore) {
+        self.core = core;
+    }
+
+    #[inline(always)]
+    fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
+        let mut c = self.core;
+        c.decision(self, ctx, bin);
+        self.core = c;
+    }
+
+    #[inline(always)]
+    fn encode_bypass(&mut self, bin: u32) {
+        let mut c = self.core;
+        c.bypass(self, bin);
+        self.core = c;
     }
 
     fn encode_terminate(&mut self, bin: u32) {
-        self.range -= 2;
+        self.core.range -= 2;
         if bin != 0 {
-            self.low += self.range;
+            self.core.low += self.core.range;
             self.fast_flush();
         } else {
-            self.fast_renorm();
+            let mut c = self.core;
+            c.renorm(self);
+            self.core = c;
         }
     }
+}
+
+/// A bin coder's per-bin state taken out of it by value
+/// ([`BinEnc::split`]), so a loop that codes many bins — a residual
+/// block — keeps it in registers; `out` is the coder itself, for what a
+/// bin rarely needs (a byte to write).
+pub(crate) trait BinCore<O: ?Sized>: Copy {
+    /// A context-coded bin.
+    fn decision(&mut self, out: &mut O, ctx: &mut Ctx, bin: u32);
+    /// A bypass bin.
+    fn bypass(&mut self, out: &mut O, bin: u32);
 }
 
 /// The bin-level interface the macroblock writers code through, so one
@@ -707,6 +763,16 @@ impl BinEnc for CabacWriter<'_> {
 /// that only prices ([`CabacEstimator`]) — each compiled for its own, the
 /// pricing one with nothing in a bin but two table loads.
 pub(crate) trait BinEnc {
+    /// The per-bin state [`BinEnc::split`] hands out.
+    type Core: BinCore<Self::Out>;
+    /// What the state codes into.
+    type Out: ?Sized;
+    /// Take the per-bin state out by value, with what it codes into.
+    /// Bins coded through the pair must be followed by [`BinEnc::join`]
+    /// before the coder is used directly again.
+    fn split(&mut self) -> (Self::Core, &mut Self::Out);
+    /// Put the state [`BinEnc::split`] took back.
+    fn join(&mut self, core: Self::Core);
     /// A context-coded bin.
     fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32);
     /// A bypass bin.
@@ -722,7 +788,31 @@ pub(crate) trait BinEnc {
     fn encode_terminate(&mut self, bin: u32);
 }
 
-impl BinEnc for CabacEncoder<'_> {
+/// [`CabacEncoder`]'s [`BinCore`]: no state of its own, every bin through
+/// the encoder.
+#[derive(Clone, Copy)]
+pub(crate) struct Forward;
+
+impl<'a> BinCore<CabacEncoder<'a>> for Forward {
+    #[inline(always)]
+    fn decision(&mut self, out: &mut CabacEncoder<'a>, ctx: &mut Ctx, bin: u32) {
+        out.encode_decision(ctx, bin)
+    }
+    #[inline(always)]
+    fn bypass(&mut self, out: &mut CabacEncoder<'a>, bin: u32) {
+        out.encode_bypass(bin)
+    }
+}
+
+impl<'a> BinEnc for CabacEncoder<'a> {
+    type Core = Forward;
+    type Out = CabacEncoder<'a>;
+    #[inline(always)]
+    fn split(&mut self) -> (Forward, &mut Self) {
+        (Forward, self)
+    }
+    #[inline(always)]
+    fn join(&mut self, _: Forward) {}
     #[inline]
     fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
         CabacEncoder::encode_decision(self, ctx, bin)
@@ -760,7 +850,34 @@ impl CabacEstimator {
     }
 }
 
+/// [`CabacEstimator`]'s [`BinCore`]: the running total.
+#[derive(Clone, Copy)]
+pub(crate) struct EstCore(f64);
+
+impl BinCore<CabacEstimator> for EstCore {
+    #[inline(always)]
+    fn decision(&mut self, _: &mut CabacEstimator, ctx: &mut Ctx, bin: u32) {
+        let i = ((*ctx as usize) << 1 | bin as usize) & 255;
+        self.0 += EST_COST[i] as f64;
+        *ctx = EST_NEXT[i];
+    }
+    #[inline(always)]
+    fn bypass(&mut self, _: &mut CabacEstimator, _bin: u32) {
+        self.0 += 1.0;
+    }
+}
+
 impl BinEnc for CabacEstimator {
+    type Core = EstCore;
+    type Out = CabacEstimator;
+    #[inline(always)]
+    fn split(&mut self) -> (EstCore, &mut Self) {
+        (EstCore(self.frac), self)
+    }
+    #[inline(always)]
+    fn join(&mut self, core: EstCore) {
+        self.frac = core.0;
+    }
     #[inline(always)]
     fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
         let i = ((*ctx as usize) << 1 | bin as usize) & 255;
