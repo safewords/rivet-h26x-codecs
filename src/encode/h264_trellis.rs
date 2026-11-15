@@ -123,35 +123,10 @@ impl Trellis {
         state_bits(self.ctx[ctx], bin)
     }
 
-    /// Bits of `coeff_abs_level_minus1` and the sign for a level of
-    /// magnitude `abs` coded in path state `node`.
-    fn level_bits(&self, abs_base: usize, node: usize, abs: u32) -> f32 {
-        let c0 = abs_base + first_inc(node);
-        if abs == 1 {
-            return self.bits(c0, 0) + 1.0;
-        }
-        let c1 = abs_base + rest_inc(node);
-        let m1 = abs - 1;
-        let prefix = m1.min(14);
-        let mut b = self.bits(c0, 1) + (prefix - 1) as f32 * self.bits(c1, 1);
-        if prefix < 14 {
-            b += self.bits(c1, 0);
-        } else {
-            let mut rem = m1 - 14;
-            let mut k = 0;
-            while rem >= (1 << k) {
-                rem -= 1 << k;
-                k += 1;
-            }
-            b += (2 * k + 1) as f32;
-        }
-        b + 1.0
-    }
-
     /// Quantise `coeffs` (raster, `n` = 16 or 64) into `levels` by the
     /// trellis: `mf` and `qbits` the quantiser's, `qp` the block's own
-    /// quantiser, primed (for its step). AC blocks leave position 0 at zero (its
-    /// DC is coded elsewhere). Returns the nonzero count.
+    /// quantiser, primed (for its step). AC blocks leave position 0 at zero
+    /// (its DC is coded elsewhere). Returns the nonzero count.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn quant(
         &self,
@@ -167,118 +142,162 @@ impl Trellis {
             Block::Luma4 => (&ZIGZAG4X4[..], 0, 16),
             _ => (&ZIGZAG4X4[..], 1, 15),
         };
+        for l in levels.iter_mut().take(if count == 64 { 64 } else { 16 }) {
+            *l = 0;
+        }
+        // Exact levels and their rounded magnitudes, in scan order.
+        let scale = 1.0 / (1u64 << qbits) as f32;
+        let mut x = [0f32; 64];
+        let mut top = [0u32; 64];
+        let mut last = usize::MAX;
+        for i in 0..count {
+            let r = scan[start + i] as usize;
+            let v = (coeffs[r].unsigned_abs() as f32) * mf[r] as f32 * scale;
+            x[i] = v;
+            let t = (v + 0.5) as u32;
+            top[i] = t;
+            if t != 0 {
+                last = i;
+            }
+        }
+        if last == usize::MAX {
+            return 0;
+        }
         let (sig_base, last_base, abs_base, cbf_base) = kind.bases();
         // lambda in this block's level units: squared error scales with its
         // own step (chroma's differs from luma's).
         let own = qstep(qp - self.bd_off);
         let lam = self.lambda / (own * own) * *TLAM;
-        let scale = 1.0 / (1u64 << qbits) as f32;
 
-        // Exact levels and their rounded magnitudes, in scan order.
-        let mut x = [0f32; 64];
-        let mut top = [0u32; 64];
-        let mut last = None;
-        for i in 0..count {
-            let r = scan[start + i] as usize;
-            x[i] = (coeffs[r].unsigned_abs() as f32) * mf[r] as f32 * scale;
-            top[i] = (x[i] + 0.5) as u32;
-            if top[i] != 0 {
-                last = Some(i);
+        // Every bin the block can code, priced once and scaled by lambda:
+        // the level bins by context increment, then sig / last per position.
+        let mut lb = [[0f32; 2]; 10];
+        for (inc, e) in lb.iter_mut().enumerate() {
+            *e = [
+                lam * self.bits(abs_base + inc, 0),
+                lam * self.bits(abs_base + inc, 1),
+            ];
+        }
+        // Per node: the cost of a level of 1, and the fixed part of a larger
+        // one (first bin 1 plus the rest-context terminator) and the cost per
+        // extra unit, all with the sign.
+        let mut one = [0f32; NODES];
+        let mut big0 = [0f32; NODES];
+        let mut big1 = [0f32; NODES];
+        for n in 0..NODES {
+            let f = first_inc(n);
+            let r = rest_inc(n);
+            one[n] = lb[f][0] + lam;
+            big0[n] = lb[f][1] + lb[r][0] + lam;
+            big1[n] = lb[r][1];
+        }
+        let level_cost = |n: usize, abs: u32| -> f32 {
+            if abs == 1 {
+                one[n]
+            } else if abs < 15 {
+                big0[n] + (abs - 2) as f32 * big1[n]
+            } else {
+                // A capped prefix has no terminator; the escape is bypass.
+                let mut rem = abs - 15;
+                let mut k = 0;
+                while rem >= (1 << k) {
+                    rem -= 1 << k;
+                    k += 1;
+                }
+                big0[n] - lb[rest_inc(n)][0] + 13.0 * big1[n] + lam * (2 * k + 1) as f32
             }
-        }
-        for l in levels.iter_mut().take(if count == 64 { 64 } else { 16 }) {
-            *l = 0;
-        }
-        let Some(last) = last else {
-            return 0;
         };
         let max_idx = count - 1;
-        let sig_ctx = |i: usize| {
-            if count == 64 {
-                sig_base + SIG_COEFF_8X8_CTX[0][i] as usize
-            } else {
-                sig_base + i
-            }
-        };
-        let last_ctx = |i: usize| {
-            if count == 64 {
-                last_base + LAST_COEFF_8X8_CTX[i] as usize
-            } else {
-                last_base + i
-            }
-        };
 
         let mut cost = [f32::INFINITY; NODES];
-        cost[NONE] = 0.0;
-        // Per position and node: (from node, level) for the backtrack.
-        let mut from = [[(0u8, 0u32); NODES]; 64];
         // Everything past `last` is zero and costs its squared error only.
-        let tail: f32 = (last + 1..count).map(|i| x[i] * x[i]).sum();
-        cost[NONE] += tail;
+        cost[NONE] = (last + 1..count).map(|i| x[i] * x[i]).sum();
+        let mut live: u16 = 1 << NONE;
+        // Per position and resulting node: the node it came from and the
+        // level chosen, packed.
+        let mut from = [[0u32; NODES]; 64];
         for i in (0..=last).rev() {
             let mut nc = [f32::INFINITY; NODES];
-            let mut nf = [(0u8, 0u32); NODES];
+            let mut nf = [0u32; NODES];
+            let mut nlive: u16 = 0;
             let t = top[i];
-            let cands: [u32; 3] = [t, t.saturating_sub(1), 0];
-            let ncand = if t == 0 {
-                1
-            } else if t == 1 {
-                2
-            } else if t <= 2 {
-                3
-            } else {
-                2
-            };
             let coded_sig = i < max_idx;
-            let (zs, os) = if coded_sig {
-                (self.bits(sig_ctx(i), 0), self.bits(sig_ctx(i), 1))
+            let (zs, os, l0, l1) = if coded_sig {
+                let sc = if count == 64 {
+                    sig_base + SIG_COEFF_8X8_CTX[0][i] as usize
+                } else {
+                    sig_base + i
+                };
+                let lc = if count == 64 {
+                    last_base + LAST_COEFF_8X8_CTX[i] as usize
+                } else {
+                    last_base + i
+                };
+                (
+                    lam * self.bits(sc, 0),
+                    lam * self.bits(sc, 1),
+                    lam * self.bits(lc, 0),
+                    lam * self.bits(lc, 1),
+                )
             } else {
-                (0.0, 0.0)
+                (0.0, 0.0, 0.0, 0.0)
             };
-            let (l0, l1) = if coded_sig {
-                (self.bits(last_ctx(i), 0), self.bits(last_ctx(i), 1))
-            } else {
-                (0.0, 0.0)
-            };
-            for (node, &c) in cost.iter().enumerate() {
-                if !c.is_finite() {
-                    continue;
+            let xi = x[i];
+            let d0 = xi * xi;
+            let mut m = live;
+            while m != 0 {
+                let node = m.trailing_zeros() as usize;
+                m &= m - 1;
+                let c = cost[node];
+                // Zero.
+                if t <= 2 {
+                    let j = c + d0 + if node == NONE { 0.0 } else { zs };
+                    if j < nc[node] {
+                        nc[node] = j;
+                        nf[node] = (node as u32) << 24;
+                        nlive |= 1 << node;
+                    }
                 }
-                for &lv in cands.iter().skip(if t == 0 { 2 } else { 0 }).take(ncand) {
-                    let d = x[i] - lv as f32;
-                    let (to, bits) = if lv == 0 {
-                        let b = if node == NONE { 0.0 } else { zs };
-                        (node, b)
-                    } else {
-                        let b = os
-                            + if node == NONE { l1 } else { l0 }
-                            + self.level_bits(abs_base, node, lv);
-                        (next(node, lv), b)
-                    };
-                    let j = c + d * d + lam * bits;
+                // The rounded level and one less.
+                let sig = os + if node == NONE { l1 } else { l0 };
+                let lo = t.saturating_sub(1).max(1);
+                for lv in lo..=t {
+                    if lv == 0 {
+                        continue;
+                    }
+                    let d = xi - lv as f32;
+                    let j = c + d * d + sig + level_cost(node, lv);
+                    let to = next(node, lv);
                     if j < nc[to] {
                         nc[to] = j;
-                        nf[to] = (node as u8, lv);
+                        nf[to] = ((node as u32) << 24) | lv;
+                        nlive |= 1 << to;
                     }
                 }
             }
             cost = nc;
+            live = nlive;
             from[i] = nf;
         }
         // The coded block flag: an all-zero block saves it.
         if let Some(cb) = cbf_base {
             let c = cb + 1;
             cost[NONE] += lam * self.bits(c, 0);
+            let one = lam * self.bits(c, 1);
             for v in cost.iter_mut().skip(1) {
-                *v += lam * self.bits(c, 1);
+                *v += one;
             }
         }
-        let mut node = (0..NODES)
-            .min_by(|&a, &b| cost[a].partial_cmp(&cost[b]).unwrap())
-            .unwrap();
+        let mut node = 0;
+        for n in 1..NODES {
+            if cost[n] < cost[node] {
+                node = n;
+            }
+        }
         let mut nz = 0;
         for i in 0..=last {
-            let (prev, lv) = from[i][node];
+            let e = from[i][node];
+            let lv = e & 0xff_ffff;
             if lv != 0 {
                 let r = scan[start + i] as usize;
                 levels[r] = if coeffs[r] < 0 {
@@ -288,7 +307,7 @@ impl Trellis {
                 };
                 nz += 1;
             }
-            node = prev as usize;
+            node = (e >> 24) as usize;
         }
         nz
     }
