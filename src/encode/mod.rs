@@ -238,6 +238,20 @@ pub enum InterParts {
     Symmetric,
 }
 
+/// How much analysis the encoder spends per picture: speed against
+/// compression, in three tiers. H.264 uses it (see
+/// `encode::h264_analyse`); a codec that has no tiers ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Preset {
+    /// Least analysis: the fastest tier.
+    Veryfast,
+    /// The default balance.
+    #[default]
+    Medium,
+    /// More search and more candidates: the most compression.
+    Slow,
+}
+
 /// How an H.264 B slice weights its predictions (8.4.2.3) — the PPS's
 /// `weighted_bipred_idc` — see [`Config::b_weighting`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +566,17 @@ pub struct Config {
     /// picture it is the default weighting: halfway, the weights are 32
     /// and 32.
     pub b_weighting: Option<BWeighting>,
+    /// See [`Preset`].
+    pub preset: Preset,
+    /// H.264: the middle B picture of each run of two or more is coded as
+    /// a reference the others predict from (a B pyramid). Progressive
+    /// streams only. Off by default.
+    pub pyramid: bool,
+    /// H.264: pictures of lookahead for the macroblock quantiser
+    /// propagation (`encode::h264_lookahead`): reference pictures are
+    /// coded finer where later pictures reuse them. Costs that many
+    /// pictures of output delay; 0, the default, runs none.
+    pub tree_lookahead: u32,
 }
 
 impl Default for Config {
@@ -586,6 +611,9 @@ impl Default for Config {
             field_coding: FieldCoding::Paff,
             inter_parts: InterParts::None,
             b_weighting: None,
+            preset: Preset::Medium,
+            pyramid: false,
+            tree_lookahead: 0,
         }
     }
 }

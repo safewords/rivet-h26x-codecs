@@ -76,6 +76,23 @@ static BIN_COST: LazyLock<Box<[f64]>> = LazyLock::new(|| {
     t
 });
 
+/// What a context-coded bin costs, in bits, from its context's probability
+/// state alone: `[state][is_lps]`. The state names a probability — the
+/// standard's 64 states are the geometric ladder `p_LPS = 0.5 * a^state`,
+/// `a = (0.01875 / 0.5)^(1/63)` (the design the state transition tables
+/// approximate) — so a bin's information content is `-log2` of the
+/// probability its state gives it. Independent of the coder's range, which
+/// is what makes an estimate this cheap: one load, no renormalisation.
+static STATE_COST: LazyLock<[[f32; 2]; 64]> = LazyLock::new(|| {
+    let a = (0.01875f64 / 0.5).powf(1.0 / 63.0);
+    let mut t = [[0f32; 2]; 64];
+    for (s, e) in t.iter_mut().enumerate() {
+        let p = 0.5 * a.powi(s as i32);
+        *e = [(-(1.0 - p).log2()) as f32, (-p.log2()) as f32];
+    }
+    t
+});
+
 /// Where an encoder's output goes: a caller's writer, or nowhere.
 ///
 /// Counting exists so a decision can ask what a shape *costs* without
@@ -90,6 +107,9 @@ enum Out<'a> {
     Bits(&'a mut BitWriter),
     /// Count them and throw them away.
     Count(u64),
+    /// Run no arithmetic at all: advance the contexts and charge each bin
+    /// its [`STATE_COST`] — see [`CabacEncoder::estimating`].
+    Estimate,
 }
 
 impl Out<'_> {
@@ -98,6 +118,7 @@ impl Out<'_> {
         match self {
             Out::Bits(w) => w.bit(v),
             Out::Count(n) => *n += 1,
+            Out::Estimate => {}
         }
     }
     #[inline]
@@ -105,6 +126,7 @@ impl Out<'_> {
         match self {
             Out::Bits(w) => w.bits(n, v),
             Out::Count(c) => *c += n as u64,
+            Out::Estimate => {}
         }
     }
     #[inline]
@@ -112,6 +134,7 @@ impl Out<'_> {
         match self {
             Out::Bits(w) => w.position(),
             Out::Count(n) => *n,
+            Out::Estimate => 0,
         }
     }
 }
@@ -188,6 +211,27 @@ impl<'a> CabacEncoder<'a> {
         }
     }
 
+    /// An encoder that only *prices* what it is given: each context-coded
+    /// bin advances its context exactly as encoding would and is charged
+    /// the cost its probability state gives it ([`STATE_COST`]), each
+    /// bypass bin one bit, and no interval arithmetic runs at all.
+    /// [`CabacEncoder::fractional_bits`] is the estimate.
+    ///
+    /// Not the measurement [`CabacEncoder::counting`] is — the real coder's
+    /// cost of a bin also depends on the interval it meets — but the same
+    /// within a small fraction of a bit per bin, and several times cheaper:
+    /// what a mode decision pricing many candidates per macroblock wants.
+    pub fn estimating() -> CabacEncoder<'static> {
+        CabacEncoder {
+            w: Out::Estimate,
+            frac: 0.0,
+            low: 0,
+            range: 510,
+            outstanding: 0,
+            first: true,
+        }
+    }
+
     /// `PutBit(b)` (9.3.4.3): emit `b`, then settle every outstanding bit as
     /// its complement.
     #[inline]
@@ -229,6 +273,19 @@ impl<'a> CabacEncoder<'a> {
     pub fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
         debug_assert!(bin <= 1);
         let state = *ctx;
+        if let Out::Estimate = self.w {
+            let p = (state >> 1) as usize;
+            let mps = (state & 1) as u32;
+            if bin != mps {
+                self.frac += STATE_COST[p][1] as f64;
+                let flipped = if p == 0 { mps ^ 1 } else { mps };
+                *ctx = (NEXT_STATE_LPS[p] << 1) | flipped as u8;
+            } else {
+                self.frac += STATE_COST[p][0] as f64;
+                *ctx = (NEXT_STATE_MPS[p] << 1) | mps as u8;
+            }
+            return;
+        }
         let p = (state >> 1) as usize;
         let mps = (state & 1) as u32;
         let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
@@ -262,6 +319,9 @@ impl<'a> CabacEncoder<'a> {
         debug_assert!(bin <= 1);
         // A bypass bin halves the interval by construction: one bit, exactly.
         self.frac += 1.0;
+        if let Out::Estimate = self.w {
+            return;
+        }
         self.low <<= 1;
         if bin != 0 {
             self.low += self.range;
@@ -290,6 +350,12 @@ impl<'a> CabacEncoder<'a> {
     /// and flushes; nothing may be encoded afterwards.
     pub fn encode_terminate(&mut self, bin: u32) {
         debug_assert!(bin <= 1);
+        if let Out::Estimate = self.w {
+            // A terminate bin of 0 is nearly free (2 / range of the
+            // interval goes); 1 ends the codeword, about seven bits.
+            self.frac += if bin != 0 { 7.0 } else { 0.01 };
+            return;
+        }
         let before = self.range;
         self.range -= 2;
         self.frac += if bin != 0 {

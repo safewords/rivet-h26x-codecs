@@ -17,7 +17,7 @@
 use h26x::ChromaFormat;
 use h26x::encode::{
     BWeighting, ColourDescription, Config, ContentLightLevel, Entropy, FieldCoding, FieldOrder,
-    InterParts, MasteringDisplay, RateControl,
+    InterParts, MasteringDisplay, Preset, RateControl,
 };
 
 /// `G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min)` — x265's `master-display`
@@ -180,6 +180,32 @@ fn main() {
             "--sao" => cfg.sao = true,
             // H.264 only: offer inter partitions below 16x16.
             "--subparts" => cfg.subparts = true,
+            // H.264: a speed tier, with the tools that tier codes with —
+            // later flags still override any of them.
+            "--preset" => {
+                let (preset, tree) = match val(&mut i, &args, "--preset").as_str() {
+                    "veryfast" => (Preset::Veryfast, 10),
+                    "medium" => (Preset::Medium, 40),
+                    "slow" => (Preset::Slow, 50),
+                    _ => die("--preset"),
+                };
+                cfg.preset = preset;
+                cfg.bframes = 3;
+                cfg.transform_8x8 = true;
+                cfg.subparts = true;
+                cfg.pyramid = true;
+                cfg.tree_lookahead = tree;
+            }
+            // H.264: B pyramid on or off.
+            "--pyramid" => cfg.pyramid = true,
+            "--no-pyramid" => cfg.pyramid = false,
+            // H.264: macroblock quantiser propagation over N pictures of
+            // lookahead (0 off).
+            "--tree" => {
+                cfg.tree_lookahead = val(&mut i, &args, "--tree")
+                    .parse()
+                    .unwrap_or_else(|_| die("--tree"))
+            }
             // Both codecs: adaptive quantisation at this strength (0 off).
             "--aq" => {
                 cfg.aq_strength = val(&mut i, &args, "--aq")

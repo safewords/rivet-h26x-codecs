@@ -79,6 +79,9 @@ pub struct Scheduler {
     /// The next picture offered starts a new GOP whatever the cadence says.
     /// Set by [`Scheduler::force_idr`], cleared when that IDR is emitted.
     force_idr: bool,
+    /// B pyramid: the middle B picture of each run is coded right after
+    /// its anchor, as a reference, and the others predict from it.
+    pyramid: bool,
 }
 
 impl Scheduler {
@@ -94,7 +97,15 @@ impl Scheduler {
             pending: Vec::new(),
             first: true,
             force_idr: false,
+            pyramid: false,
         }
+    }
+
+    /// The same cadence with a B pyramid (see the field) when `on` and
+    /// there are at least two B pictures per run.
+    pub fn with_pyramid(mut self, on: bool) -> Self {
+        self.pyramid = on && self.bframes >= 2;
+        self
     }
 
     /// Make the **next** picture offered an IDR, wherever the GOP cadence
@@ -176,9 +187,20 @@ impl Scheduler {
             return out;
         }
 
-        // This picture is the anchor. It codes first, then the Bs behind it.
+        // This picture is the anchor. It codes first, then the Bs behind it
+        // — under a pyramid the middle one first, as a reference.
         out.push(self.emit(display, Kind::P, true));
         let held = std::mem::take(&mut self.pending);
+        if self.pyramid {
+            let mid = held.len() / 2;
+            out.push(self.emit(held[mid], Kind::B, true));
+            for (i, &d) in held.iter().enumerate() {
+                if i != mid {
+                    out.push(self.emit(d, Kind::B, false));
+                }
+            }
+            return out;
+        }
         for d in held {
             out.push(self.emit(d, Kind::B, false));
         }
@@ -232,6 +254,38 @@ mod tests {
         }
         out.extend(s.flush());
         out
+    }
+
+    #[test]
+    fn a_pyramid_codes_its_middle_b_first_as_a_reference() {
+        let mut s = Scheduler::new(250, 3).with_pyramid(true);
+        let mut out = Vec::new();
+        for _ in 0..9 {
+            out.extend(s.push());
+        }
+        out.extend(s.flush());
+        let order: Vec<(u64, Kind, bool)> = out
+            .iter()
+            .map(|c| (c.display, c.kind, c.reference))
+            .collect();
+        assert_eq!(
+            &order[..5],
+            &[
+                (0, Kind::Idr, true),
+                (4, Kind::P, true),
+                (2, Kind::B, true),
+                (1, Kind::B, false),
+                (3, Kind::B, false),
+            ]
+        );
+        // Every B picture's nearest references on both sides precede it.
+        for (i, c) in out.iter().enumerate() {
+            if c.kind == Kind::B {
+                let before = &out[..i];
+                assert!(before.iter().any(|r| r.reference && r.display < c.display));
+                assert!(before.iter().any(|r| r.reference && r.display > c.display));
+            }
+        }
     }
 
     #[test]

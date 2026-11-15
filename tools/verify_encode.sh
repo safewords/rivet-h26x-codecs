@@ -770,6 +770,12 @@ h264-aq40-ip|--codec h264 --qp 40 --gop 8 --aq 1.0
 h264-aq-cavlc-intra|--codec h264 --qp 26 --gop 0 --cavlc --aq 1.0
 h264-aq-cavlc-ipb|--codec h264 --qp 26 --gop 8 --bframes 2 --cavlc --aq 1.0
 h264-aq40-cavlc-ip|--codec h264 --qp 40 --gop 8 --cavlc --aq 1.0
+h264-preset-medium|--codec h264 --qp 26 --gop 8 --preset medium
+h264-preset-medium-cavlc|--codec h264 --qp 30 --gop 12 --preset medium --cavlc
+h264-preset-medium40|--codec h264 --qp 40 --gop 8 --preset medium
+h264-pyramid-b2|--codec h264 --qp 26 --gop 9 --bframes 2 --pyramid --t8x8
+h264-tree-ip|--codec h264 --qp 28 --gop 8 --tree 6
+h264-10-preset-medium@p10|--codec h264 --qp 26 --gop 8 --preset medium
 h264-aq-t8x8-subparts-ipb|--codec h264 --qp 26 --gop 8 --bframes 2 --t8x8 --subparts --aq 1.0
 h264-abr-aq-64k|--codec h264 --bitrate 64000 --gop 8 --aq 1.0
 h264-10-aq-ip@p10|--codec h264 --qp 26 --gop 8 --aq 1.0
