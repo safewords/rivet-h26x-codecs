@@ -14,10 +14,16 @@ use super::{Config, InterParts, Preset};
 /// Set the structural fields of `cfg` to what tier `p` codes with, and
 /// record the tier. Call before applying explicit overrides.
 pub fn apply_preset(cfg: &mut Config, p: Preset) {
-    cfg.preset = Some(p);
+    cfg.preset = p;
     cfg.bframes = 3;
-    cfg.b_pyramid = true;
+    cfg.pyramid = true;
     cfg.sao = true;
+    // H.264's tools, which the shared `--preset` sets: not H.265 syntax.
+    cfg.transform_8x8 = false;
+    cfg.subparts = false;
+    // H.265's lookahead propagation (`h265_cutree`) is not yet a tier's
+    // tool: as measured it loses (see `Tune::cutree`).
+    cfg.tree_lookahead = 0;
     match p {
         Preset::Veryfast => {
             cfg.max_refs = 2;
@@ -83,7 +89,12 @@ pub(crate) struct Tune {
     pub nonref_fast: bool,
     /// `h265_me::InterPicture::limit_refs`.
     pub limit_refs: bool,
-    /// Lookahead quantiser propagation strength (`h265_cutree`), 0 off.
+    /// Lookahead quantiser propagation strength (`h265_cutree`), applied
+    /// over `Config::tree_lookahead` pictures when that is nonzero (the
+    /// shared `--tree`). No tier sets the window for H.265 yet: as first
+    /// measured (2026-11-15, medium) propagation at 2.0 took BD-rate from
+    /// -3.31% to +2.58% and at 1.0 to -1.57%, where x265 loses 14-22% on
+    /// the 720p clips without its own.
     pub cutree: f32,
 }
 
@@ -105,14 +116,15 @@ impl Tune {
         fast_intra: false,
         nonref_fast: false,
         limit_refs: false,
-        cutree: 0.0,
+        cutree: 2.0,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
     pub fn of(cfg: &Config) -> Tune {
-        let Some(p) = cfg.preset else {
+        if cfg.legacy_decisions {
             return Tune::NEUTRAL;
-        };
+        }
+        let p = cfg.preset;
         // Offsets measured 2026-11-15 (x265 parity, 30 frames of the five
         // clips, `--bframes 3 --refs 4 --sao --b-pyramid`, BD-rate PSNR-Y
         // mean against x265 medium): I/B1/B2 at -3/+2/+4 +1.85%, -4/+2/+5
@@ -157,12 +169,21 @@ impl Tune {
     }
 
     /// The quantiser offset of a picture of `kind` at B layer `layer`.
-    pub fn qp_offset(&self, kind: super::gop::Kind, layer: u8) -> i32 {
+    ///
+    /// The offsets belong to the tier's GOP structure: they apply only under
+    /// a B pyramid (`Config::pyramid`, which `--preset` sets), so a stream
+    /// asked for at a constant quantiser without one keeps it constant.
+    pub fn qp_offset(&self, cfg: &Config, c: &super::gop::Coded) -> i32 {
         use super::gop::Kind;
-        match kind {
+        if !cfg.pyramid {
+            return 0;
+        }
+        match c.kind {
             Kind::Idr | Kind::I => self.i_qp_offset,
             Kind::P => 0,
-            Kind::B => self.b_qp_offset[usize::from(layer.max(1) - 1).min(2)],
+            // Under the scheduler's pyramid the middle B picture is the one
+            // reference: layer 1 above the others' layer 2.
+            Kind::B => self.b_qp_offset[if c.reference { 0 } else { 1 }],
         }
     }
 }

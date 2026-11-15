@@ -36,7 +36,7 @@
 //! 2^(2 * (15 - BitDepth - log2(N)))` (Parseval, up to the rounding the
 //! integer transforms keep). The bits are context-coded bins priced at
 //! the probability states of the slice's initial contexts
-//! (`cabac_enc::bin_cost`), as every other rate in this encoder.
+//! (`cabac_enc::state_bits`), as every other rate in this encoder.
 //!
 //! # Sign data hiding
 //!
@@ -49,7 +49,7 @@
 //! position — which costs far less than the sign bit it saves on average.
 //! [`hide_signs`] does that after either quantiser.
 
-use crate::cabac_enc::bin_cost;
+use crate::cabac_enc::state_bits;
 use crate::hevc::ctx::{
     COEFF_ABS_LEVEL_GREATER1_FLAG_OFFSET, COEFF_ABS_LEVEL_GREATER2_FLAG_OFFSET, Contexts,
     LAST_SIGNIFICANT_COEFF_X_PREFIX_OFFSET, LAST_SIGNIFICANT_COEFF_Y_PREFIX_OFFSET,
@@ -134,10 +134,10 @@ fn last_pos_bits(cx: &Contexts, c_idx: usize, log2: u32, lx: u32, ly: u32) -> f6
     ] {
         let p = prefix_of(v);
         for i in 0..p {
-            bits += f64::from(bin_cost(cx.c[base + (off + (i >> shift)) as usize], 1));
+            bits += f64::from(state_bits(cx.c[base + (off + (i >> shift)) as usize], 1));
         }
         if p < c_max {
-            bits += f64::from(bin_cost(cx.c[base + (off + (p >> shift)) as usize], 0));
+            bits += f64::from(state_bits(cx.c[base + (off + (p >> shift)) as usize], 0));
         }
         if p > 3 {
             bits += f64::from((p >> 1) - 1);
@@ -189,7 +189,7 @@ impl LevelState {
                 + (st.ctx_set * 4) as usize
                 + if c_idx > 0 { 16 } else { 0 };
             let g1 = l > 1;
-            bits += f64::from(bin_cost(cx.c[g1_base + st.c1.min(3) as usize], g1 as u32));
+            bits += f64::from(state_bits(cx.c[g1_base + st.c1.min(3) as usize], g1 as u32));
             if st.c1 > 0 {
                 st.c1 = if g1 { 0 } else { st.c1 + 1 };
             }
@@ -198,7 +198,7 @@ impl LevelState {
             if g1 && !st.g1_seen {
                 st.g1_seen = true;
                 let inc = st.ctx_set as usize + if c_idx > 0 { 4 } else { 0 };
-                bits += f64::from(bin_cost(
+                bits += f64::from(state_bits(
                     cx.c[COEFF_ABS_LEVEL_GREATER2_FLAG_OFFSET + inc],
                     (l > 2) as u32,
                 ));
@@ -321,8 +321,8 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             let at = pos[k];
             let is_last = k == last;
             let sig_ctx = cx_state(b.cx, ctx_of[p] as usize);
-            let sig0 = f64::from(bin_cost(sig_ctx, 0));
-            let sig1 = f64::from(bin_cost(sig_ctx, 1));
+            let sig0 = f64::from(state_bits(sig_ctx, 0));
+            let sig1 = f64::from(state_bits(sig_ctx, 1));
             let rounded = ((at.scaled + (step >> 1)) >> qbits) as i32;
             let mut best_level = 0;
             let mut best = at.zero + lambda * sig0;
@@ -392,8 +392,8 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             2 + inc.min(1)
         };
         let flag = cx_state(b.cx, SIGNIFICANT_COEFF_GROUP_FLAG_OFFSET + inc);
-        let keep = sb_cost_coded[sb] + lambda * f64::from(bin_cost(flag, 1));
-        let drop = sb_cost_zero[sb] + lambda * f64::from(bin_cost(flag, 0));
+        let keep = sb_cost_coded[sb] + lambda * f64::from(state_bits(flag, 1));
+        let drop = sb_cost_zero[sb] + lambda * f64::from(state_bits(flag, 0));
         if drop < keep {
             for p in &mut pos[sb * 16..sb * 16 + 16] {
                 p.level = 0;

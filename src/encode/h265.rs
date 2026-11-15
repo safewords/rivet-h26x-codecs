@@ -598,12 +598,10 @@ impl<S: Sample> Core<S> {
         // a table. Without B pictures the second flag would be a PPS bit
         // no slice reads, and one every such stream coded before B slices
         // were weighted does not have.
-        let tree_on = super::h265_tune::Tune::of(&cfg).cutree > 0.0
-            && !matches!(cfg.rate, RateControl::Lossless);
+        let tree_on = cfg.tree_lookahead > 0 && !matches!(cfg.rate, RateControl::Lossless);
         let pps_opts = PpsOptions {
             cu_qp_delta_depth: (cfg.aq_strength > 0.0
-                || (super::h265_tune::Tune::of(&cfg).cutree > 0.0
-                    && !matches!(cfg.rate, RateControl::Lossless)))
+                || (cfg.tree_lookahead > 0 && !matches!(cfg.rate, RateControl::Lossless)))
             .then_some(u32::from(tree_depth(&cfg, &g) > 0 && cfg.gop != 0)),
             weighted_pred: cfg.weighted_pred,
             weighted_bipred: cfg.weighted_pred && cfg.bframes > 0,
@@ -674,11 +672,7 @@ impl<S: Sample> Core<S> {
             cbr,
             pps_opts,
             census: Census::default(),
-            sched: if cfg.b_pyramid {
-                Scheduler::with_pyramid(cfg.gop, cfg.bframes)
-            } else {
-                Scheduler::new(cfg.gop, cfg.bframes)
-            },
+            sched: Scheduler::new(cfg.gop, cfg.bframes).with_pyramid(cfg.pyramid),
             rc,
             pps_qp,
             emitted: 0,
@@ -768,8 +762,11 @@ impl<S: Sample> Core<S> {
         // Without a lookahead that is the picture just pushed, once, which
         // is the path every stream took before one existed.
         let mut out = Vec::new();
-        let hold =
-            u64::from(self.cfg.lookahead).max(if self.tree.is_some() { TREE_AHEAD } else { 0 });
+        let hold = u64::from(self.cfg.lookahead).max(if self.tree.is_some() {
+            u64::from(self.cfg.tree_lookahead)
+        } else {
+            0
+        });
         while self.next_display - self.offered > hold {
             self.offered += 1;
             let ready = self.sched.push();
@@ -812,7 +809,9 @@ impl<S: Sample> Core<S> {
                     t.coded_refs = vec![c.display];
                 }
                 // Keep what a later picture may still be searched against.
-                let keep = c.display.saturating_sub(TREE_AHEAD + 8);
+                let keep = c
+                    .display
+                    .saturating_sub(u64::from(self.cfg.tree_lookahead) + 8);
                 t.lowres.retain(|&d, _| d >= keep);
                 t.motion.retain(|&(a, b), _| a >= keep && b >= keep);
                 t.coded_refs.retain(|&d| d >= keep);
@@ -966,7 +965,7 @@ impl<S: Sample> Core<S> {
             // Under a tier the configured quantiser is a P picture's, and
             // the others sit at the tier's offsets from it (`h265_tune`).
             RateControl::ConstantQp(q) => {
-                let off = super::h265_tune::Tune::of(&self.cfg).qp_offset(c.kind, c.layer);
+                let off = super::h265_tune::Tune::of(&self.cfg).qp_offset(&self.cfg, c);
                 (i32::from(q) + off).clamp(0, 51) as u8
             }
             RateControl::Bitrate { .. } => {
@@ -2277,9 +2276,6 @@ impl<S: Sample> Core<S> {
 }
 
 /// The rate controller's kind for a scheduled picture.
-/// How many pictures the encoder holds back for quantiser propagation.
-const TREE_AHEAD: u64 = 16;
-
 /// The quantiser propagation's state (`Core::tree`).
 #[derive(Default)]
 struct TreeState {
@@ -2299,11 +2295,8 @@ const B_BELOW_ANCHOR: u8 = 3;
 /// choose between, and under a B pyramid two anchors plus one picture of
 /// every reference layer — what the bottom of the hierarchy reads.
 pub(crate) fn refs_kept(cfg: &Config) -> usize {
-    let layers = if cfg.b_pyramid {
-        Scheduler::with_pyramid(cfg.gop, cfg.bframes).reference_b_layers() as usize
-    } else {
-        0
-    };
+    // The scheduler's pyramid has one reference layer of B pictures.
+    let layers = usize::from(cfg.pyramid && cfg.bframes >= 2);
     (cfg.max_refs as usize).max(2 + layers)
 }
 
@@ -7127,6 +7120,9 @@ mod tests {
                 rate,
                 aq_strength,
                 max_cu_depth: Some(max_cu_depth),
+                // No tier's tuning: the decisions this test's coverage
+                // was measured on (every trial on, no early exits).
+                legacy_decisions: true,
                 ..cfg(w as u32, h as u32, chroma)
             };
             let mut e =
