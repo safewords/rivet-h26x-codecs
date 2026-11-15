@@ -836,11 +836,28 @@ impl<'a> BinEnc for CabacEncoder<'a> {
 }
 
 /// [`CabacEncoder::estimating`] as a type of its own: the same prices and
-/// the same context transitions, with no output to dispatch on.
+/// the same context transitions, with no output to dispatch on — and the
+/// total kept in fixed point ([`EST_ONE`] to the bit), so that a bin is an
+/// integer add rather than a floating one whose latency every bin of a
+/// block waits on.
 #[derive(Default)]
 pub(crate) struct CabacEstimator {
-    frac: f64,
+    acc: u64,
 }
+
+/// One bit in [`CabacEstimator`]'s fixed point.
+const EST_ONE: u64 = 1 << 16;
+
+/// [`EST_COST`] in [`CabacEstimator`]'s fixed point, rounded.
+static EST_COST_FX: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = (EST_COST[i] as f64 * EST_ONE as f64 + 0.5) as u32;
+        i += 1;
+    }
+    t
+};
 
 impl CabacEstimator {
     /// A fresh estimate.
@@ -850,24 +867,24 @@ impl CabacEstimator {
 
     /// The bins' estimated cost so far, in bits.
     pub(crate) fn fractional_bits(&self) -> f64 {
-        self.frac
+        self.acc as f64 / EST_ONE as f64
     }
 }
 
 /// [`CabacEstimator`]'s [`BinCore`]: the running total.
 #[derive(Clone, Copy)]
-pub(crate) struct EstCore(f64);
+pub(crate) struct EstCore(u64);
 
 impl BinCore<CabacEstimator> for EstCore {
     #[inline(always)]
     fn decision(&mut self, _: &mut CabacEstimator, ctx: &mut Ctx, bin: u32) {
         let i = ((*ctx as usize) << 1 | bin as usize) & 255;
-        self.0 += EST_COST[i] as f64;
+        self.0 += EST_COST_FX[i] as u64;
         *ctx = EST_NEXT[i];
     }
     #[inline(always)]
     fn bypass(&mut self, _: &mut CabacEstimator, _bin: u32) {
-        self.0 += 1.0;
+        self.0 += EST_ONE;
     }
 }
 
@@ -876,31 +893,30 @@ impl BinEnc for CabacEstimator {
     type Out = CabacEstimator;
     #[inline(always)]
     fn split(&mut self) -> (EstCore, &mut Self) {
-        (EstCore(self.frac), self)
+        (EstCore(self.acc), self)
     }
     #[inline(always)]
     fn join(&mut self, core: EstCore) {
-        self.frac = core.0;
+        self.acc = core.0;
     }
     #[inline(always)]
     fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
         let i = ((*ctx as usize) << 1 | bin as usize) & 255;
-        self.frac += EST_COST[i] as f64;
+        self.acc += EST_COST_FX[i] as u64;
         *ctx = EST_NEXT[i];
     }
     #[inline(always)]
     fn encode_bypass(&mut self, _bin: u32) {
-        self.frac += 1.0;
+        self.acc += EST_ONE;
     }
     #[inline(always)]
     fn encode_bypass_bits(&mut self, n: u32, _v: u32) {
-        for _ in 0..n {
-            self.frac += 1.0;
-        }
+        self.acc += n as u64 * EST_ONE;
     }
     #[inline(always)]
     fn encode_terminate(&mut self, bin: u32) {
-        self.frac += if bin != 0 { 7.0 } else { 0.01 };
+        // 7 bits and 0.01 of one, as the floating coders charge them.
+        self.acc += if bin != 0 { 7 * EST_ONE } else { EST_ONE / 100 };
     }
 }
 
