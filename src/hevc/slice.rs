@@ -798,3 +798,31 @@ fn parse_pred_weight_table(
         lists,
     })
 }
+
+#[cfg(test)]
+mod curr_pic_tests {
+    use super::curr_pic_entries;
+
+    #[test]
+    fn the_current_picture_closes_every_round_of_the_temporary_list() {
+        // Only the current picture: every entry of both lists is it.
+        assert_eq!(curr_pic_entries(0, 1, 0, true, None), [true]);
+        assert_eq!(curr_pic_entries(1, 2, 0, true, None), [true, true]);
+        // Two other pictures, two entries: RefPicListTemp0 = [a, b, cur]
+        // is longer than the list, so 8-9 makes the last entry current;
+        // list 1 has no such rule.
+        assert_eq!(curr_pic_entries(0, 2, 2, true, None), [false, true]);
+        assert_eq!(curr_pic_entries(1, 2, 2, true, None), [false, false]);
+        // Five entries over [a, b, cur]: a, b, cur, a, b.
+        assert_eq!(
+            curr_pic_entries(1, 5, 2, true, None),
+            [false, false, true, false, false]
+        );
+        // A modification picks positions explicitly, and switches 8-9 off.
+        assert_eq!(
+            curr_pic_entries(0, 2, 2, true, Some(&[2, 0])),
+            [true, false]
+        );
+        assert_eq!(curr_pic_entries(0, 2, 2, false, None), [false, false]);
+    }
+}

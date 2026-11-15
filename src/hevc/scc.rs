@@ -91,6 +91,50 @@ pub fn palette_predictor_init(sps: &Sps, pps: &Pps) -> Vec<[u16; 3]> {
         .unwrap_or_default()
 }
 
+/// The SCC configurations this decoder refuses, by name: the tools
+/// combined with what no conformance stream exercises alongside them, where
+/// the combination takes code paths of its own (and, for palette mode in
+/// 4:2:2, where 8-69 / 8-70 do not say which index-map sample a chroma
+/// sample reads). Every other configuration of the tools decodes the JCT-VC
+/// SCC suite bit-exactly.
+pub fn unsupported(sps: &Sps, pps: &Pps) -> Option<&'static str> {
+    let cat = sps.chroma_array_type();
+    let palette = sps.palette_mode();
+    let ibc = pps.curr_pic_ref();
+    let act = pps.act();
+    let (bdy, bdc) = (sps.bit_depth_luma, sps.bit_depth_chroma);
+    if palette && cat == 2 {
+        return Some("palette mode in 4:2:2");
+    }
+    if palette && cat == 0 {
+        return Some("palette mode in 4:0:0");
+    }
+    if ibc && (cat == 0 || cat == 2) {
+        return Some("prediction from the current picture in 4:0:0 / 4:2:2");
+    }
+    if (palette || act) && (bdy != bdc || bdy > 10) {
+        return Some(
+            "palette mode / adaptive colour transform above 10 bits or at unequal bit depths",
+        );
+    }
+    if (palette || act) && pps.transquant_bypass_enabled {
+        return Some("palette mode / adaptive colour transform with cu_transquant_bypass");
+    }
+    if palette && pps.dependent_slice_segments_enabled {
+        return Some("palette predictor across dependent slice segments");
+    }
+    if ibc && (pps.weighted_pred || pps.weighted_bipred) {
+        return Some("weighted prediction with the current picture as a reference");
+    }
+    if ibc && pps.lists_modification_present {
+        return Some("reference list modification with the current picture as a reference");
+    }
+    if ibc && pps.constrained_intra_pred {
+        return Some("constrained intra prediction with the current picture as a reference");
+    }
+    None
+}
+
 /// k-th order Exp-Golomb, all bins bypass (9.3.3.3).
 fn eg_k(c: &mut Cabac, mut k: u32) -> Result<u32> {
     let mut v = 0u32;
@@ -601,4 +645,145 @@ impl<S: Sample> SliceDec<'_, S> {
 #[inline(always)]
 fn bin(c: &mut Cabac, cx: &mut Contexts, ctx: usize) -> bool {
     c.decision(&mut cx.c[ctx]) != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitwriter::BitWriter;
+    use crate::hevc::pps::PpsScc;
+    use crate::hevc::sps::SpsScc;
+
+    /// A PPS RBSP with every tool off and the extensions `ext` (range,
+    /// multilayer, 3D, SCC) present, the SCC one written by `scc`.
+    fn pps_rbsp(ext: [bool; 4], scc: impl Fn(&mut BitWriter)) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.ue(0); // pps_pic_parameter_set_id
+        w.ue(0); // pps_seq_parameter_set_id
+        w.flag(false); // dependent_slice_segments_enabled_flag
+        w.flag(false); // output_flag_present_flag
+        w.bits(3, 0); // num_extra_slice_header_bits
+        w.flag(false); // sign_data_hiding_enabled_flag
+        w.flag(false); // cabac_init_present_flag
+        w.ue(0); // num_ref_idx_l0_default_active_minus1
+        w.ue(0); // num_ref_idx_l1_default_active_minus1
+        w.se(0); // init_qp_minus26
+        w.flag(false); // constrained_intra_pred_flag
+        w.flag(false); // transform_skip_enabled_flag
+        w.flag(false); // cu_qp_delta_enabled_flag
+        w.se(0); // pps_cb_qp_offset
+        w.se(0); // pps_cr_qp_offset
+        w.flag(false); // pps_slice_chroma_qp_offsets_present_flag
+        w.flag(false); // weighted_pred_flag
+        w.flag(false); // weighted_bipred_flag
+        w.flag(false); // transquant_bypass_enabled_flag
+        w.flag(false); // tiles_enabled_flag
+        w.flag(false); // entropy_coding_sync_enabled_flag
+        w.flag(false); // pps_loop_filter_across_slices_enabled_flag
+        w.flag(false); // deblocking_filter_control_present_flag
+        w.flag(false); // pps_scaling_list_data_present_flag
+        w.flag(false); // lists_modification_present_flag
+        w.ue(0); // log2_parallel_merge_level_minus2
+        w.flag(false); // slice_segment_header_extension_present_flag
+        w.flag(true); // pps_extension_present_flag
+        for f in ext {
+            w.flag(f);
+        }
+        w.bits(4, 0); // pps_extension_4bits
+        if ext[0] {
+            // pps_range_extension() with nothing on.
+            w.flag(false); // cross_component_prediction_enabled_flag
+            w.flag(false); // chroma_qp_offset_list_enabled_flag
+            w.ue(0); // log2_sao_offset_scale_luma
+            w.ue(0); // log2_sao_offset_scale_chroma
+        }
+        scc(&mut w);
+        w.rbsp_trailing_bits();
+        w.into_rbsp()
+    }
+
+    fn scc_ext(w: &mut BitWriter) {
+        w.flag(true); // pps_curr_pic_ref_enabled_flag
+        w.flag(true); // residual_adaptive_colour_transform_enabled_flag
+        w.flag(true); // pps_slice_act_qp_offsets_present_flag
+        w.se(2); // pps_act_y_qp_offset_plus5
+        w.se(-1); // pps_act_cb_qp_offset_plus5
+        w.se(1); // pps_act_cr_qp_offset_plus3
+        w.flag(true); // pps_palette_predictor_initializers_present_flag
+        w.ue(2); // pps_num_palette_predictor_initializers
+        w.flag(false); // monochrome_palette_flag
+        w.ue(0); // luma_bit_depth_entry_minus8
+        w.ue(0); // chroma_bit_depth_entry_minus8
+        for v in [10, 20, 30, 40, 50, 60] {
+            w.bits(8, v); // component by component
+        }
+    }
+
+    #[test]
+    fn the_pps_scc_extension_is_read_behind_the_range_extension() {
+        let pps = Pps::parse(&pps_rbsp([true, false, false, true], scc_ext)).expect("parses");
+        assert!(pps.range_ext);
+        assert_eq!(
+            pps.scc,
+            Some(PpsScc {
+                curr_pic_ref: true,
+                act: true,
+                slice_act_qp_offsets_present: true,
+                act_qp_offsets: [-3, -6, -2],
+                palette_init: Some(vec![[10, 30, 50], [20, 40, 60]]),
+            })
+        );
+        assert!(pps.curr_pic_ref() && pps.act());
+    }
+
+    #[test]
+    fn an_scc_extension_behind_an_unparsed_one_is_refused_not_misread() {
+        for ext in [[false, true, false, true], [false, false, true, true]] {
+            let e = Pps::parse(&pps_rbsp(ext, scc_ext)).expect_err("refused");
+            assert!(matches!(e, Error::Unsupported(_)), "{e}");
+        }
+        // Without an SCC extension behind it, the multilayer one is
+        // skipped as before (the base layer does not need it).
+        let pps = Pps::parse(&pps_rbsp([false, true, false, false], |w| {
+            w.flag(true); // some multilayer extension bit
+        }))
+        .expect("parses");
+        assert_eq!(pps.scc, None);
+    }
+
+    #[test]
+    fn unverified_combinations_are_refused_by_name() {
+        use crate::encode::Config;
+        use crate::encode::h265_syntax::{Geometry, write_sps};
+        use crate::nal::unescape_rbsp;
+        let cfg = Config {
+            width: 64,
+            height: 64,
+            ..Config::default()
+        };
+        let g = Geometry::new(&cfg);
+        let mut sps = Sps::parse(&unescape_rbsp(&write_sps(&cfg, &g, 8, None)))
+            .expect("the encoder's SPS parses");
+        let mut pps = Pps::parse(&pps_rbsp([false, false, false, true], scc_ext)).unwrap();
+        sps.scc = Some(SpsScc {
+            curr_pic_ref: true,
+            palette_mode: true,
+            palette_max_size: 63,
+            palette_max_predictor_size: 128,
+            ..SpsScc::default()
+        });
+        sps.chroma_format_idc = 3;
+        assert_eq!(unsupported(&sps, &pps), None);
+        sps.chroma_format_idc = 2;
+        assert_eq!(unsupported(&sps, &pps), Some("palette mode in 4:2:2"));
+        sps.chroma_format_idc = 3;
+        pps.weighted_pred = true;
+        assert_eq!(
+            unsupported(&sps, &pps),
+            Some("weighted prediction with the current picture as a reference")
+        );
+        pps.weighted_pred = false;
+        sps.bit_depth_chroma = 10;
+        assert!(unsupported(&sps, &pps).is_some());
+    }
 }

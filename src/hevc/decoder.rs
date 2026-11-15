@@ -1436,6 +1436,9 @@ impl<S: Sample> HevcDecoderImpl<S> {
         }
         if starts {
             self.awaiting_plane = false;
+            if let Some(what) = super::scc::unsupported(&sps, &pps) {
+                return Err(Error::unsupported(what));
+            }
             pps.resolve_tiles(&sps)?;
             self.start_picture(&hdr, sps, pps, nh)?;
             if self.skipping {
