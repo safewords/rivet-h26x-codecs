@@ -63,6 +63,20 @@ pub type Quant4Fn =
 pub type Quant8Fn =
     fn(coeffs: &[i32; 64], levels: &mut [i16; 64], mf: &[i32; 64], qbits: u32, offset: i32) -> u32;
 
+/// SATD of `src` against the rounded average `(a + b + 1) >> 1` of two
+/// 8-bit predictions, `w` by `h` (multiples of four): a quarter-sample
+/// motion candidate scored without writing its prediction out.
+pub type SatdAvgFn = fn(
+    src: &[u8],
+    src_stride: usize,
+    a: &[u8],
+    a_stride: usize,
+    b: &[u8],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u32;
+
 /// The encode-side kernel table, filled at run time from what the CPU has,
 /// exactly as [`super::h264::H264Dsp`] is. Kept separate from it because a
 /// decoder never calls any of this and should not carry it.
@@ -84,6 +98,10 @@ pub struct H264EncDsp {
     pub quant4: Quant4Fn,
     /// 8x8 quantisation.
     pub quant8: Quant8Fn,
+    /// Fused average and SATD, where a rung has one; `None` and callers
+    /// average into a buffer and take the distortion table's SATD, which
+    /// is what [`satd_avg_scalar`] defines.
+    pub satd_avg: Option<SatdAvgFn>,
 }
 
 impl H264EncDsp {
@@ -98,6 +116,7 @@ impl H264EncDsp {
         hadamard2x4: hadamard2x4_scalar,
         quant4: quant4_scalar,
         quant8: quant8_scalar,
+        satd_avg: None,
     };
 
     /// The best table for `cpu`: the scalar reference, then each rung of
@@ -126,6 +145,29 @@ impl Default for H264EncDsp {
     fn default() -> Self {
         Self::SCALAR
     }
+}
+
+/// The definition [`SatdAvgFn`] kernels are held to: the average into a
+/// buffer, then the scalar SATD.
+#[allow(clippy::too_many_arguments)]
+pub fn satd_avg_scalar(
+    src: &[u8],
+    src_stride: usize,
+    a: &[u8],
+    a_stride: usize,
+    b: &[u8],
+    b_stride: usize,
+    w: usize,
+    h: usize,
+) -> u32 {
+    let mut p = [0u8; 256];
+    for y in 0..h {
+        for x in 0..w {
+            p[y * 16 + x] =
+                ((a[y * a_stride + x] as u16 + b[y * b_stride + x] as u16 + 1) >> 1) as u8;
+        }
+    }
+    super::distortion::satd_scalar(src, src_stride, &p, 16, w, h)
 }
 
 // ----------------------------------------------------------------------

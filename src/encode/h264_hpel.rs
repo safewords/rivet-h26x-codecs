@@ -365,6 +365,8 @@ pub(crate) struct Search<'a, 'b, S: Sample> {
     pub(crate) cost: &'b MvCostTable,
     /// Whole-sample window, see [`search_bounds`].
     pub(crate) bounds: (i32, i32, i32, i32),
+    /// The encode table's fused average-SATD, where the CPU has one.
+    pub(crate) satd_avg: Option<crate::dsp::h264_enc::SatdAvgFn>,
 }
 
 impl<S: Sample> Search<'_, '_, S> {
@@ -393,6 +395,26 @@ impl<S: Sample> Search<'_, '_, S> {
     /// SATD of the prediction at `mv` (no rate).
     #[inline]
     pub(crate) fn satd(&self, mv: Mv, buf: &mut [S; 256]) -> u32 {
+        if let Some(f) = self.satd_avg
+            && S::BYTES == 1
+        {
+            let (xi, yi) = (self.x + (mv.x as i32 >> 2), self.y + (mv.y as i32 >> 2));
+            let (p1, dx1, dy1, p2, dx2, dy2) = QPEL[((mv.y & 3) * 4 + (mv.x & 3)) as usize];
+            if p2 != 255 {
+                let a = self.r.at(p1, xi + dx1 as i32, yi + dy1 as i32);
+                let b = self.r.at(p2, xi + dx2 as i32, yi + dy2 as i32);
+                let rs = self.r.p[0].stride;
+                // SAFETY: a one-byte `Sample` is `u8`.
+                let (s8, a8, b8) = unsafe {
+                    (
+                        std::slice::from_raw_parts(self.src.as_ptr() as *const u8, self.src.len()),
+                        std::slice::from_raw_parts(a.as_ptr() as *const u8, a.len()),
+                        std::slice::from_raw_parts(b.as_ptr() as *const u8, b.len()),
+                    )
+                };
+                return f(s8, self.src_stride, a8, rs, b8, rs, self.w, self.h);
+            }
+        }
         let (p, ps) = self.r.pred(self.x, self.y, mv, self.w, self.h, buf);
         (self.dist.satd)(self.src, self.src_stride, p, ps, self.w, self.h)
     }

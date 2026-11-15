@@ -1168,6 +1168,7 @@ pub(crate) fn p_mb<S: Sample>(
                 pred,
                 cost: costs,
                 bounds: search_bounds(pref.search, (px + x) as i32, (py + y) as i32, w, h, vr),
+                satd_avg: ctx.enc.satd_avg,
             };
             s.run(cands, mc)
         };
@@ -1843,6 +1844,7 @@ pub(crate) fn b_mb<S: Sample>(
                 pred,
                 cost: costs,
                 bounds: search_bounds(refs.search[l], (px + x) as i32, (py + y) as i32, w, h, vr),
+                satd_avg: ctx.enc.satd_avg,
             };
             s.run(cands, mc)
         };

@@ -36,13 +36,13 @@ use super::distortion::{
 
 /// Four bytes at `p` in the low lanes of a vector, the rest zero.
 #[inline(always)]
-unsafe fn load4(p: *const u8) -> uint8x8_t {
+pub(super) unsafe fn load4(p: *const u8) -> uint8x8_t {
     unsafe { vreinterpret_u8_u32(vcreate_u32((p as *const u32).read_unaligned() as u64)) }
 }
 
 /// Four bytes at `p` and four at `q`, in the low and high halves.
 #[inline(always)]
-unsafe fn load4x2(p: *const u8, q: *const u8) -> uint8x8_t {
+pub(super) unsafe fn load4x2(p: *const u8, q: *const u8) -> uint8x8_t {
     unsafe {
         let lo = (p as *const u32).read_unaligned() as u64;
         let hi = (q as *const u32).read_unaligned() as u64;
@@ -150,7 +150,12 @@ unsafe fn butterfly(r0: int16x8_t, r1: int16x8_t, r2: int16x8_t, r3: int16x8_t) 
 /// SATD of the two tiles in `r0..r3` (one row each, A low, B high), as
 /// `[A, B, A, B]` i32 with the per-tile rounding applied.
 #[inline(always)]
-unsafe fn satd_pair(r0: int16x8_t, r1: int16x8_t, r2: int16x8_t, r3: int16x8_t) -> int32x4_t {
+pub(super) unsafe fn satd_pair(
+    r0: int16x8_t,
+    r1: int16x8_t,
+    r2: int16x8_t,
+    r3: int16x8_t,
+) -> int32x4_t {
     unsafe {
         let [t0, t1, t2, t3] = butterfly(r0, r1, r2, r3);
         // Transpose each 4x4 tile: 16-bit pairs, then 32-bit pairs.
@@ -193,7 +198,7 @@ unsafe fn satd_pair(r0: int16x8_t, r1: int16x8_t, r2: int16x8_t, r3: int16x8_t) 
 }
 
 #[inline(always)]
-unsafe fn diff8(a: uint8x8_t, b: uint8x8_t) -> int16x8_t {
+pub(super) unsafe fn diff8(a: uint8x8_t, b: uint8x8_t) -> int16x8_t {
     unsafe { vreinterpretq_s16_u16(vsubl_u8(a, b)) }
 }
 

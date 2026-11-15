@@ -30,6 +30,94 @@ pub fn install(d: &mut H264EncDsp, cpu: Cpu) {
         d.hadamard4 = hadamard4;
         d.quant4 = quant4;
         d.quant8 = quant8;
+        d.satd_avg = Some(satd_avg);
+    }
+}
+
+/// [`super::h264_enc::SatdAvgFn`]: each prediction row is `urhadd` of the
+/// two references' rows, differenced against the source and fed to the
+/// distortion kernel's tile pairs — the SATD of a quarter-sample candidate
+/// with no buffer in between.
+#[allow(clippy::too_many_arguments)]
+fn satd_avg(
+    src: &[u8],
+    ss: usize,
+    a: &[u8],
+    sa: usize,
+    b: &[u8],
+    sb: usize,
+    w: usize,
+    h: usize,
+) -> u32 {
+    if !w.is_multiple_of(4) || !h.is_multiple_of(4) || h == 0 || w > 16 {
+        return super::h264_enc::satd_avg_scalar(src, ss, a, sa, b, sb, w, h);
+    }
+    assert!(
+        src.len() >= (h - 1) * ss + w && a.len() >= (h - 1) * sa + w && b.len() >= (h - 1) * sb + w,
+        "block out of range"
+    );
+    unsafe { satd_avg_impl(src.as_ptr(), ss, a.as_ptr(), sa, b.as_ptr(), sb, w, h) }
+}
+
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn satd_avg_impl(
+    s: *const u8,
+    ss: usize,
+    a: *const u8,
+    sa: usize,
+    b: *const u8,
+    sb: usize,
+    w: usize,
+    h: usize,
+) -> u32 {
+    use super::distortion_neon::{diff8, load4, load4x2, satd_pair};
+    unsafe {
+        let mut acc = vdupq_n_s32(0);
+        if w == 4 {
+            let mut y = 0;
+            while y + 8 <= h {
+                let row = |r: usize| {
+                    let p = vrhadd_u8(
+                        load4x2(a.add((y + r) * sa), a.add((y + r + 4) * sa)),
+                        load4x2(b.add((y + r) * sb), b.add((y + r + 4) * sb)),
+                    );
+                    diff8(load4x2(s.add((y + r) * ss), s.add((y + r + 4) * ss)), p)
+                };
+                acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                y += 8;
+            }
+            if y < h {
+                let row = |r: usize| {
+                    let p = vrhadd_u8(load4(a.add((y + r) * sa)), load4(b.add((y + r) * sb)));
+                    diff8(load4(s.add((y + r) * ss)), p)
+                };
+                acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+            }
+        } else {
+            let mut y = 0;
+            while y < h {
+                let (rs, ra, rb) = (s.add(y * ss), a.add(y * sa), b.add(y * sb));
+                let mut x = 0;
+                while x + 8 <= w {
+                    let row = |r: usize| {
+                        let p = vrhadd_u8(vld1_u8(ra.add(r * sa + x)), vld1_u8(rb.add(r * sb + x)));
+                        diff8(vld1_u8(rs.add(r * ss + x)), p)
+                    };
+                    acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                    x += 8;
+                }
+                if x < w {
+                    let row = |r: usize| {
+                        let p = vrhadd_u8(load4(ra.add(r * sa + x)), load4(rb.add(r * sb + x)));
+                        diff8(load4(rs.add(r * ss + x)), p)
+                    };
+                    acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                }
+                y += 4;
+            }
+        }
+        (vgetq_lane_s32(acc, 0) as u32).wrapping_add(vgetq_lane_s32(acc, 1) as u32)
     }
 }
 
@@ -332,6 +420,34 @@ mod tests {
             "NEON installed nothing"
         );
         d
+    }
+
+    /// The fused average-SATD against its definition, every block shape
+    /// the search scores, random samples and the extremes.
+    #[test]
+    fn satd_avg_matches_scalar() {
+        let f = neon().satd_avg.expect("NEON installs the fused SATD");
+        let mut seed = 7u64;
+        for &(w, h) in &[(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (4, 4)] {
+            for trial in 0..200 {
+                let mk = |seed: &mut u64| -> Vec<u8> {
+                    (0..40 * 24)
+                        .map(|_| match trial % 4 {
+                            0 => 0,
+                            1 => 255,
+                            _ => lcg(seed) as u8,
+                        })
+                        .collect()
+                };
+                let (s, a, b) = (mk(&mut seed), mk(&mut seed), mk(&mut seed));
+                let (ss, sa, sb) = (40, 37, 33);
+                assert_eq!(
+                    f(&s, ss, &a, sa, &b, sb, w, h),
+                    crate::dsp::h264_enc::satd_avg_scalar(&s, ss, &a, sa, &b, sb, w, h),
+                    "{w}x{h} trial {trial}"
+                );
+            }
+        }
     }
 
     #[test]
