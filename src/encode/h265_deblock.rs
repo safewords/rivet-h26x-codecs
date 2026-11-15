@@ -709,10 +709,10 @@ mod tests {
         let count = (w >> pic.log2_ctb) * (h >> pic.log2_ctb);
         let _ = n;
         let decisions = vec![
-            PCuDecision::Inter(InterCuDecision {
+            PCuDecision::Inter(Box::new(InterCuDecision {
                 log2_cu: pic.log2_ctb,
                 ..InterCuDecision::default()
-            });
+            }));
             count
         ];
         (pic, decisions)
@@ -910,7 +910,7 @@ mod tests {
         let mut decisions = Vec::new();
         for cy in 0..h / n {
             for cx in 0..w / n {
-                decisions.push(PCuDecision::Inter(pic.code_ctu(
+                decisions.push(PCuDecision::Inter(Box::new(pic.code_ctu(
                     &ctx,
                     &[&refp],
                     cx,
@@ -920,7 +920,7 @@ mod tests {
                     &src_cb,
                     &src_cr,
                     w / 2,
-                )));
+                ))));
             }
         }
         assert!(

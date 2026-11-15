@@ -556,8 +556,10 @@ impl Default for InterCuDecision {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum PCuDecision {
-    /// An inter CU: skip, merge or AMVP.
-    Inter(InterCuDecision),
+    /// An inter CU: skip, merge or AMVP. Boxed, as the intra one is: the
+    /// decision carries its coefficients, several kilobytes that the
+    /// quadtree walk would otherwise copy at every return.
+    Inter(Box<InterCuDecision>),
     /// An intra CU inside the P slice, decided by the intra module over
     /// this same picture's reconstruction.
     Intra(Box<CuDecision>),
@@ -652,6 +654,8 @@ pub struct InterPicture<S: Sample> {
     /// depth, by the unit's position, for the units below it to start
     /// from: a child's motion is most often its parent's.
     seed_at: [[Option<(u32, u32, Mv)>; 16]; 4],
+    /// Scratch for a bi-prediction scored from the fractional planes.
+    spred_avg: Vec<S>,
     /// Whether a unit is offered intra by coding it (`Some`), or by the
     /// flat-block proxy [`prefer_intra`] (`None`).
     ///
@@ -667,6 +671,13 @@ pub struct InterPicture<S: Sample> {
     /// times in 338,000 trials and units under half a lambda per sample 896
     /// in 235,000, which is what the gate leaves out (gate 1.0: -2.83%).
     pub rd_intra: Option<f32>,
+    /// Recursion skip: a unit coded as a skip whose cost is below this
+    /// many lambdas per sample is not tried split. `None` tries every
+    /// split. Measured 2026-11-15 (x265 parity, `--preset medium`, CPU by
+    /// interleaved one-thread runs on park_joy 720p and foreman CIF at QP
+    /// 32): every skip, -2.55% BD-rate where -4.37% was, at 0.82x the CPU;
+    /// below 1.0 lambda -3.00%, 0.5 -3.77%, 0.25 -4.28% at 0.89x.
+    pub rskip: Option<f32>,
     /// Set for one call of `code_whole`: predict, but code no residual —
     /// the rate-distortion trial of a unit without its coefficients.
     no_residual: bool,
@@ -762,9 +773,11 @@ impl<S: Sample> InterPicture<S> {
             alts: None,
             no_residual: false,
             rd_intra: None,
+            rskip: None,
             half: Vec::new(),
             search_rings: 0,
             seed_at: [[None; 16]; 4],
+            spred_avg: vec![S::default(); 64 * 64],
             geo: Geo::new(sps.log2_ctb_size, w, h, sps.chroma_array_type()),
             intra_scratch: IntraScratch::default(),
             scratch: McScratch::new(),
@@ -2311,7 +2324,12 @@ impl<S: Sample> InterPicture<S> {
         };
         let bits = unit_bits + flag;
         let j_whole = ssd as f64 + lam * f64::from(bits);
-        if depth >= max_depth || log2 <= MIN_CB_LOG2 {
+        // A skipped unit this cheap is not split further: see `rskip`.
+        let rskip = self
+            .rskip
+            .is_some_and(|t| j_whole < f64::from(t) * lam * (size * size) as f64)
+            && matches!(&d, PCuDecision::Inter(i) if matches!(i.kind, InterCuKind::Skip { .. }));
+        if depth >= max_depth || log2 <= MIN_CB_LOG2 || rskip {
             out.push(TreeCu {
                 x0,
                 y0,
@@ -2545,7 +2563,7 @@ impl<S: Sample> InterPicture<S> {
         );
         self.no_residual = false;
         if alt.kind != InterCuKind::UseIntra {
-            let alt = PCuDecision::Inter(alt);
+            let alt = PCuDecision::Inter(Box::new(alt));
             let ssd_a = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
             let bits_a = crate::encode::h265::p_cu_bits(
                 &alt, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
@@ -2620,7 +2638,7 @@ impl<S: Sample> InterPicture<S> {
                 src.c_stride,
             )))
         } else {
-            PCuDecision::Inter(d)
+            PCuDecision::Inter(Box::new(d))
         };
         let n = 1usize << log2;
         let ssd = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
@@ -2680,7 +2698,7 @@ impl<S: Sample> InterPicture<S> {
                     )
                 };
                 if alt.kind != InterCuKind::UseIntra {
-                    let alt = PCuDecision::Inter(alt);
+                    let alt = PCuDecision::Inter(Box::new(alt));
                     let ssd_a = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
                     let bits_a = crate::encode::h265::p_cu_bits(
                         &alt, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
@@ -2768,6 +2786,39 @@ impl<S: Sample> InterPicture<S> {
             .iter()
             .find(|(p, _)| *p == poc)
             .map(|(_, h)| h.clone())
+    }
+
+    /// The samples a uni-predicted block at `(x, y)` of `wh` under default
+    /// weighting reads at `mv` from `refp`, when they can be read rather
+    /// than interpolated: the reference itself at a whole-sample vector,
+    /// its precomputed fractional phase otherwise (`self.half`, found by
+    /// the plane's address). `None` sends the caller to the
+    /// interpolating path.
+    fn read_at<'a>(
+        half: &'a [(i32, std::sync::Arc<h265_search::HalfPlanes<S>>)],
+        refp: &'a Plane16<S>,
+        x: usize,
+        y: usize,
+        (w, h): (usize, usize),
+        mv: Mv,
+    ) -> Option<(&'a [S], usize)> {
+        let (mvx, mvy) = (i32::from(mv.x), i32::from(mv.y));
+        if mvx & 3 == 0 && mvy & 3 == 0 {
+            let (xi, yi) = (x as i32 + (mvx >> 2), y as i32 + (mvy >> 2));
+            let lim = refp.pad as i32;
+            if xi < -lim
+                || yi < -lim
+                || xi + w as i32 > refp.width as i32 + lim
+                || yi + h as i32 > refp.height as i32 + lim
+            {
+                return None;
+            }
+            let off = refp.offset(xi as isize, yi as isize);
+            return Some((&refp.data[off..], refp.stride));
+        }
+        let key = refp.data.as_ptr() as usize;
+        let hp = half.iter().find(|(_, h)| h.source == key)?;
+        hp.1.at(x, y, w, h, mvx, mvy)
     }
 
     /// The coding-tree depth of the unit `pu` belongs to.
@@ -3016,6 +3067,11 @@ impl<S: Sample> InterPicture<S> {
         wp: Weighting,
         list: usize,
     ) -> u32 {
+        if matches!(wp, Weighting::Default)
+            && let Some((p, ps)) = Self::read_at(&self.half, refp, x, y, (w, h), mv)
+        {
+            return (ctx.dist.satd)(src, src_stride, p, ps, w, h);
+        }
         let InterPicture {
             swin,
             stmp,
@@ -3182,6 +3238,26 @@ impl<S: Sample> InterPicture<S> {
         mv1: Mv,
         wp: Weighting,
     ) -> u32 {
+        if matches!(wp, Weighting::Default)
+            && let (Some((p0, s0)), Some((p1, s1))) = (
+                Self::read_at(&self.half, ref0, x, y, (w, h), mv0),
+                Self::read_at(&self.half, ref1, x, y, (w, h), mv1),
+            )
+        {
+            // The two one-list predictions averaged at sample precision:
+            // within one of the bi-prediction 8.5.3.3.4.2 makes from the
+            // 14-bit intermediates, which is close enough to rank
+            // candidates by; the unit that wins is predicted exactly.
+            let avg = &mut self.spred_avg;
+            for yy in 0..h {
+                for xx in 0..w {
+                    avg[yy * w + xx] = S::from_i32(
+                        (p0[yy * s0 + xx].to_i32() + p1[yy * s1 + xx].to_i32() + 1) >> 1,
+                    );
+                }
+            }
+            return (ctx.dist.satd)(src, src_stride, &self.spred_avg, w, w, h);
+        }
         let InterPicture {
             swin,
             stmp,

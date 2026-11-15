@@ -53,6 +53,13 @@ pub(crate) struct Tune {
     /// Intra in inter pictures by coding it, under this cost gate
     /// (`h265_me::InterPicture::rd_intra`), or by the flat-block proxy.
     pub rd_intra: Option<f32>,
+    /// The recursion skip (`h265_me::InterPicture::rskip`).
+    pub rskip: Option<f32>,
+    /// How deep an intra unit inside an inter picture may split its
+    /// transform. Measured 2026-11-15 (x265 parity, `--preset medium`, CPU
+    /// by interleaved one-thread runs): 0 against 1, -4.19% against -4.28%
+    /// BD-rate at 0.92x the CPU.
+    pub intra_split_depth: u32,
 }
 
 impl Tune {
@@ -62,6 +69,8 @@ impl Tune {
         b_qp_offset: [0; 3],
         search_rings: 0,
         rd_intra: Some(0.5),
+        rskip: None,
+        intra_split_depth: 1,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -77,6 +86,8 @@ impl Tune {
         Tune {
             i_qp_offset: -3,
             b_qp_offset: [2, 4, 5],
+            rskip: Some(0.25),
+            intra_split_depth: 0,
             ..Tune::NEUTRAL
         }
     }

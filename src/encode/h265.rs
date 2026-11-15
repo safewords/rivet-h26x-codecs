@@ -1426,6 +1426,7 @@ impl<S: Sample> Core<S> {
                 std::sync::Arc::new(super::h265_search::HalfPlanes::new(
                     &frame.y,
                     self.cfg.bit_depth,
+                    &HevcDsp::<S>::new(Cpu::detect_honouring_env()),
                 )),
             ));
             self.refs.push(frame);
@@ -1626,6 +1627,8 @@ impl<S: Sample> Core<S> {
         let tune = super::h265_tune::Tune::of(&self.cfg);
         pic.search_rings = tune.search_rings;
         pic.rd_intra = tune.rd_intra;
+        pic.rskip = tune.rskip;
+        pic.split_depth = tune.intra_split_depth;
 
         // Weighted prediction, for a P slice under `weighted_pred_flag` and
         // a B slice under `weighted_bipred_flag`: one entry per reference
@@ -1841,7 +1844,7 @@ impl<S: Sample> Core<S> {
                         pic.code_ctu_intra(&cctx, cxu, cy, &py, cw, &pcb, &pcr, ccw),
                     ))
                 } else {
-                    PCuDecision::Inter(d)
+                    PCuDecision::Inter(Box::new(d))
                 };
                 cus.push(TreeCu {
                     x0,

@@ -27,18 +27,22 @@
 //! samples on every side, where the filter would reach outside it; the
 //! search keeps its candidates inside that margin.
 
+use crate::dsp::hevc::HevcDsp;
 use crate::hevc::frame::Plane16;
 use crate::sample::Sample;
 
-/// The HEVC luma half-sample filter (Table 8-11, `fL[2]`).
-const HALF: [i32; 8] = [-1, 4, -11, 40, 40, -11, 4, -1];
+/// Above this many luma samples a reference keeps its three half-sample
+/// phases only: fifteen phases of a 3840x2160 picture are 140 MB.
+const QUARTER_LIMIT: usize = 2_200_000;
 
-/// The three half-sample phases of one reference luma plane, laid out
+/// The fractional-sample phases of one reference luma plane, laid out
 /// exactly as that plane is (same stride, same padding, same origin), so
-/// an offset computed for the reference indexes these too.
+/// an offset computed for the reference indexes these too. Phase
+/// `(fx, fy)` (quarter samples) lives at `planes[fy * 4 + fx - 1]`; a
+/// plane is empty when the phase was not built.
 pub(crate) struct HalfPlanes<S: Sample> {
-    /// `[x + 1/2, y]`, `[x, y + 1/2]`, `[x + 1/2, y + 1/2]`.
-    pub planes: [Vec<S>; 3],
+    /// The fifteen fractional phases, `(0, 0)` excluded.
+    pub planes: Vec<Vec<S>>,
     /// The reference plane's stride.
     pub stride: usize,
     /// The reference plane's padding: valid samples lie within
@@ -48,76 +52,113 @@ pub(crate) struct HalfPlanes<S: Sample> {
     pub width: usize,
     /// See `width`.
     pub height: usize,
+    /// The address of the reference plane's samples these were built
+    /// from: how a scoring call that holds only the plane finds them
+    /// (`InterPicture::planes_of`). A plane's buffer does not move while
+    /// its frame is a reference.
+    pub source: usize,
 }
 
 /// How far inside the padded area the planes are valid.
 pub(crate) const MARGIN: usize = 4;
 
 impl<S: Sample> HalfPlanes<S> {
-    /// Build the three phases of `p`, whose border must already be
-    /// extended, at `bit_depth`.
-    pub fn new(p: &Plane16<S>, bit_depth: u32) -> Self {
+    /// Build the fractional phases of `p`, whose border must already be
+    /// extended, at `bit_depth`: all fifteen, or the three half-sample
+    /// ones above [`QUARTER_LIMIT`] luma samples. Through the decoder's
+    /// own interpolation kernels (`dsp`), 64x64 tiles at a time, over the
+    /// padded area less [`MARGIN`].
+    pub fn new(p: &Plane16<S>, bit_depth: u32, dsp: &HevcDsp<S>) -> Self {
+        const T: usize = 64;
         let (stride, rows) = (p.stride, p.data.len() / p.stride);
+        let quarter = p.width * p.height <= QUARTER_LIMIT;
         let shift1 = bit_depth.min(12) as i32 - 8;
         let shift3 = 14 - bit_depth as i32;
-        let round3 = 1i32 << (shift3 - 1).max(0);
         let max = (1i32 << bit_depth) - 1;
-        let fin = |v14: i32| -> S {
-            let v = if shift3 > 0 {
-                (v14 + round3) >> shift3
-            } else {
-                v14
-            };
-            S::from_i32(v.clamp(0, max))
-        };
+        let wanted = |fx: usize, fy: usize| quarter || (fx.is_multiple_of(2) && fy.is_multiple_of(2));
         let d = &p.data;
-        let mut h = vec![S::default(); d.len()];
-        let mut v = vec![S::default(); d.len()];
-        let mut hv = vec![S::default(); d.len()];
-        // The horizontal pass, kept at 14 bits for the second pass.
-        let mut h14 = vec![0i16; d.len()];
-        let (x_lo, x_hi) = (3usize, stride - 4);
-        for y in 0..rows {
-            let row = y * stride;
-            for x in x_lo..x_hi {
-                let o = row + x - 3;
-                let mut s = 0i32;
-                for (k, c) in HALF.iter().enumerate() {
-                    s += c * d[o + k].to_i32();
+        let mut planes: Vec<Vec<S>> = (1..16)
+            .map(|ph| {
+                if wanted(ph % 4, ph / 4) {
+                    vec![S::default(); d.len()]
+                } else {
+                    Vec::new()
                 }
-                let t = s >> shift1;
-                h14[row + x] = t as i16;
-                h[row + x] = fin(t);
-            }
-        }
-        for y in 3..rows - 4 {
-            let row = y * stride;
-            for x in x_lo..x_hi {
-                let mut sv = 0i32;
-                let mut shv = 0i32;
-                for (k, c) in HALF.iter().enumerate() {
-                    let o = (y + k - 3) * stride + x;
-                    sv += c * d[o].to_i32();
-                    shv += c * i32::from(h14[o]);
+            })
+            .collect();
+        let mut tmp = vec![0i16; T * (T + 7)];
+        let mut out14 = vec![0i16; T * T];
+        let (lo, hi_x, hi_y) = (MARGIN, stride - MARGIN, rows - MARGIN);
+        let mut y0 = lo;
+        while y0 < hi_y {
+            let th = T.min(hi_y - y0);
+            let mut x0 = lo;
+            while x0 < hi_x {
+                let tw = T.min(hi_x - x0);
+                let at = y0 * stride + x0;
+                for fx in 0..4usize {
+                    // The horizontal pass over th + 7 rows, from three rows
+                    // above, for the phases that interpolate both ways.
+                    if fx != 0 && (1..4).any(|fy| wanted(fx, fy)) {
+                        (dsp.qpel_h)(
+                            &mut tmp,
+                            &d[at - 3 * stride - 3..],
+                            stride,
+                            tw,
+                            th + 7,
+                            fx,
+                            shift1,
+                        );
+                    }
+                    for fy in 0..4usize {
+                        if (fx, fy) == (0, 0) || !wanted(fx, fy) {
+                            continue;
+                        }
+                        match (fx, fy) {
+                            (_, 0) => {
+                                (dsp.qpel_h)(&mut out14, &d[at - 3..], stride, tw, th, fx, shift1)
+                            }
+                            (0, _) => (dsp.qpel_v)(
+                                &mut out14,
+                                &d[at - 3 * stride..],
+                                stride,
+                                tw,
+                                th,
+                                fy,
+                                shift1,
+                            ),
+                            _ => (dsp.qpel_v2)(&mut out14, &tmp, tw, tw, th, fy),
+                        }
+                        (dsp.uni)(
+                            &mut planes[fy * 4 + fx - 1][at..],
+                            stride,
+                            &out14,
+                            tw,
+                            th,
+                            shift3,
+                            max,
+                        );
+                    }
                 }
-                v[row + x] = fin(sv >> shift1);
-                hv[row + x] = fin(shv >> 6);
+                x0 += tw;
             }
+            y0 += th;
         }
         HalfPlanes {
-            planes: [h, v, hv],
+            planes,
             stride,
             pad: p.pad,
             width: p.width,
             height: p.height,
+            source: p.data.as_ptr() as usize,
         }
     }
 
-    /// The plane and offset of the half-sample-aligned position `mv`
-    /// (quarter-sample units, both components even) for a block at luma
-    /// `(x, y)` of `w` by `h`, or `None` when the block reaches past the
-    /// valid area or `mv` is not on the half-sample grid. For the
-    /// full-sample phase the caller reads the reference itself.
+    /// The plane and offset of the fractional position `mv` (quarter-sample
+    /// units) for a block at luma `(x, y)` of `w` by `h`, or `None` when the
+    /// block reaches past the valid area, `mv` is on the full-sample grid
+    /// (the caller reads the reference itself) or its phase was not built.
+    #[allow(clippy::too_many_arguments)]
     pub fn at(
         &self,
         x: usize,
@@ -127,15 +168,10 @@ impl<S: Sample> HalfPlanes<S> {
         mvx: i32,
         mvy: i32,
     ) -> Option<(&[S], usize)> {
-        if mvx & 1 != 0 || mvy & 1 != 0 {
+        let phase = ((mvy & 3) * 4 + (mvx & 3)) as usize;
+        if phase == 0 || self.planes[phase - 1].is_empty() {
             return None;
         }
-        let phase = match (mvx & 2 != 0, mvy & 2 != 0) {
-            (false, false) => return None,
-            (true, false) => 0,
-            (false, true) => 1,
-            (true, true) => 2,
-        };
         let xi = x as i32 + (mvx >> 2);
         let yi = y as i32 + (mvy >> 2);
         let lim = (self.pad - MARGIN) as i32;
@@ -147,7 +183,7 @@ impl<S: Sample> HalfPlanes<S> {
             return None;
         }
         let off = ((self.pad as i32 + yi) as usize) * self.stride + (self.pad as i32 + xi) as usize;
-        Some((&self.planes[phase][off..], self.stride))
+        Some((&self.planes[phase - 1][off..], self.stride))
     }
 }
 
@@ -212,7 +248,7 @@ mod tests {
         }
     }
 
-    /// The half-sample planes are the decoder's own interpolation: every
+    /// The fractional planes are the decoder's own interpolation: every
     /// phase at every position equals `predict_block`'s output for a
     /// uni-predicted block under default weighting.
     #[test]
@@ -232,12 +268,25 @@ mod tests {
             }
         }
         f.extend_rows(0, h);
-        let hp = HalfPlanes::new(&f.y, 8);
         let dsp = HevcDsp::<u8>::new(Cpu::SCALAR);
+        let hp = HalfPlanes::new(&f.y, 8, &dsp);
         let mut out14 = vec![0i16; 64 * 64];
         let mut tmp = vec![0i16; 64 * 80];
         let mut out = vec![0u8; 64 * 64];
-        for &(mvx, mvy) in &[(2i32, 0i32), (0, 2), (2, 2), (-6, 10), (14, -2), (-30, -30)] {
+        for &(mvx, mvy) in &[
+            (2i32, 0i32),
+            (0, 2),
+            (2, 2),
+            (-6, 10),
+            (14, -2),
+            (-30, -30),
+            (1, 0),
+            (0, 3),
+            (1, 1),
+            (3, 2),
+            (-7, 5),
+            (13, -11),
+        ] {
             for &(x, y) in &[(0usize, 0usize), (8, 4), (32, 16)] {
                 let (bw, bh) = (8usize, 8usize);
                 let xi = x as i32 + (mvx >> 2);
