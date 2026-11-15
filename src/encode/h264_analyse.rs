@@ -83,6 +83,9 @@ pub(crate) struct AnalysisCfg {
     pub(crate) rd: bool,
     /// Active list-0 references of a P picture, at most.
     pub(crate) refs: usize,
+    /// Active list-0 references of a B picture nothing references, at
+    /// most (list 1 and reference B pictures keep one).
+    pub(crate) b_refs: usize,
     /// A P partition below 16x16 searches every reference whose 16x16
     /// cost came within this factor of the best one's (1.0: the best
     /// 16x16 reference only).
@@ -131,6 +134,7 @@ impl AnalysisCfg {
         trellis_nonref: true,
         rd: true,
         refs: 3,
+        b_refs: 2,
         mixed_refs: 1.25,
         bi_refine: 2,
         bi_part_ratio: 0.0,
@@ -169,6 +173,7 @@ impl AnalysisCfg {
         trellis_nonref: false,
         rd: true,
         refs: 1,
+        b_refs: 1,
         mixed_refs: 1.0,
         bi_refine: 1,
         bi_part_ratio: 0.0,
@@ -207,6 +212,7 @@ impl AnalysisCfg {
         trellis_nonref: true,
         rd: true,
         refs: 5,
+        b_refs: 2,
         mixed_refs: 1.5,
         bi_refine: 2,
         bi_part_ratio: 1.2,
@@ -254,6 +260,8 @@ pub(crate) struct PicAn<'a, S: Sample> {
     pub(crate) me: [Option<MeRef<'a, S>>; 2],
     /// A P picture's further list-0 references, by index from 1.
     pub(crate) me_more: Vec<MeRef<'a, S>>,
+    /// A B picture's further references per list, by index from 1.
+    pub(crate) me_b_more: [Vec<MeRef<'a, S>>; 2],
     costs: Vec<Option<MvCostTable>>,
     /// The trellis's context states and multiplier, when it runs.
     trellis: Option<Trellis>,
@@ -265,6 +273,7 @@ impl<'a, S: Sample> PicAn<'a, S> {
             cfg,
             me,
             me_more: Vec::new(),
+            me_b_more: [Vec::new(), Vec::new()],
             costs: (0..52).map(|_| None).collect(),
             trellis: None,
         }
@@ -280,6 +289,12 @@ impl<'a, S: Sample> PicAn<'a, S> {
                 bd_off: 6 * (bit_depth as i32 - 8),
             });
         }
+        self
+    }
+
+    /// A B picture's further references per list.
+    pub(crate) fn with_b_more(mut self, more: [Vec<MeRef<'a, S>>; 2]) -> Self {
+        self.me_b_more = more;
         self
     }
 
@@ -1635,6 +1650,8 @@ struct BCand {
     sub_shape: [SubMbShape; 4],
     mv: [[Mv; 2]; 16],
     mvd: [[Mv; 16]; 2],
+    /// Reference index per 8x8 partition per list, where it uses the list.
+    rf: [[i8; 2]; 4],
     est: f32,
 }
 
@@ -1646,6 +1663,7 @@ impl BCand {
             sub_shape: [SubMbShape::S8x8; 4],
             mv: [[Mv::ZERO; 2]; 16],
             mvd: [[Mv::ZERO; 16]; 2],
+            rf: [[0; 2]; 4],
             est: 0.0,
         }
     }
@@ -1656,6 +1674,7 @@ impl BCand {
         dir: u8,
         mv: [Mv; 2],
         mvd: [Mv; 2],
+        rf: [i8; 2],
     ) {
         let used = lists(dir);
         for by in y / 4..(y + h) / 4 {
@@ -1670,6 +1689,7 @@ impl BCand {
         for py in y / 8..(y + h).div_ceil(8) {
             for px in x / 8..(x + w).div_ceil(8) {
                 self.dir[py * 2 + px] = dir;
+                self.rf[py * 2 + px] = rf;
             }
         }
     }
@@ -1685,9 +1705,27 @@ impl BCand {
         };
         for part in 0..4 {
             let u = d.used(part);
-            d.ref_idx[part] = [if u[0] { 0 } else { -1 }, if u[1] { 0 } else { -1 }];
+            let r = self.rf[part];
+            d.ref_idx[part] = [if u[0] { r[0] } else { -1 }, if u[1] { r[1] } else { -1 }];
         }
         d
+    }
+}
+
+/// Bits charged to a B macroblock's list reference past index 0 beyond
+/// its index's own: the choice is made on the 16x16 estimate and binds
+/// every partition, and moves the neighbours' vector predictions off the
+/// index they mostly use (medium: 0 bits +0.09 %, 3 bits +0.02 %, 8 bits
+/// +0.03 % BD-rate, list 0 in every B picture).
+const B_REF_BIAS: f32 = 3.0;
+
+/// The bits of reference index `r` among `n` active ones: te(v) — none
+/// for one reference, one for two, ue(v) beyond.
+fn ref_bits(r: i8, n: usize) -> f32 {
+    match n {
+        0 | 1 => 0.0,
+        2 => 1.0,
+        _ => (2 * (32 - (r as u32 + 1).leading_zeros()) - 1) as f32,
     }
 }
 
@@ -1737,73 +1775,88 @@ pub(crate) fn b_mb<S: Sample>(
     let mut direct = BCand::new(BMbKind::BDirect16);
     for part in 0..4 {
         let r = ((part & 1) * 8, (part >> 1) * 8, 8, 8);
-        direct.fill(r, ddir, dmv[part], [Mv::ZERO; 2]);
+        direct.fill(r, ddir, dmv[part], [Mv::ZERO; 2], dref);
     }
-    let me = [an.me[0].as_ref(), an.me[1].as_ref()];
+    // Each list's search planes at reference index `r`.
+    let me_b_more = &an.me_b_more;
+    let me0 = [an.me[0].as_ref(), an.me[1].as_ref()];
+    let me_at = |l: usize, r: i8| -> &MeRef<'_, S> {
+        if r <= 0 {
+            me0[l].expect("both lists searched")
+        } else {
+            &me_b_more[l][r as usize - 1]
+        }
+    };
     let costs = an.cost(ctx.qp);
 
     // Luma SATD of a rectangle under `dir` at `mv`: through the planes
     // where the prediction is plain, the decoder's kernels where weighted.
-    let satd = |(x, y, w, h): (usize, usize, usize, usize), dir: u8, mv: [Mv; 2]| -> u32 {
-        let used = lists(dir);
-        let wt = refs.weighting_for(used);
-        let s = &sy[y * src.ys + x..];
-        // The planes hold every vector a search can reach from this block;
-        // a derived one (direct's) may lie outside, and goes through the
-        // decoder's clamped kernels instead.
-        let (ax, ay) = ((px + x) as i32, (py + y) as i32);
-        let inside = |l: usize| {
-            let (lx, hx, ly, hy) = search_bounds(refs.search[l], ax, ay, w, h, i32::MAX);
-            let (mx, my) = (mv[l].x as i32 >> 2, mv[l].y as i32 >> 2);
-            !used[l] || (mx >= lx && mx < hx && my >= ly && my < hy)
-        };
-        if matches!(wt, Weighting::Default) && inside(0) && inside(1) {
-            let mut b0 = [S::default(); 256];
-            let mut b1 = [S::default(); 256];
-            if used[0] && used[1] {
-                let (p0, s0) = me[0].unwrap().pred(ax, ay, mv[0], w, h, &mut b0);
-                let (p1, s1) = me[1].unwrap().pred(ax, ay, mv[1], w, h, &mut b1);
-                let mut avg = [S::default(); 256];
-                avg_into(&mut avg, 16, p0, s0, p1, s1, w, h);
-                return (ctx.dist.satd)(s, src.ys, &avg, 16, w, h);
+    let satd =
+        |(x, y, w, h): (usize, usize, usize, usize), dir: u8, mv: [Mv; 2], rf: [i8; 2]| -> u32 {
+            let used = lists(dir);
+            let wt = refs.weighting_for(used);
+            let s = &sy[y * src.ys + x..];
+            // The planes hold every vector a search can reach from this block;
+            // a derived one (direct's) may lie outside, and goes through the
+            // decoder's clamped kernels instead.
+            let (ax, ay) = ((px + x) as i32, (py + y) as i32);
+            let inside = |l: usize| {
+                let (lx, hx, ly, hy) = search_bounds(refs.search[l], ax, ay, w, h, i32::MAX);
+                let (mx, my) = (mv[l].x as i32 >> 2, mv[l].y as i32 >> 2);
+                !used[l] || (mx >= lx && mx < hx && my >= ly && my < hy)
+            };
+            if matches!(wt, Weighting::Default) && inside(0) && inside(1) {
+                let mut b0 = [S::default(); 256];
+                let mut b1 = [S::default(); 256];
+                if used[0] && used[1] {
+                    let (p0, s0) = me_at(0, rf[0]).pred(ax, ay, mv[0], w, h, &mut b0);
+                    let (p1, s1) = me_at(1, rf[1]).pred(ax, ay, mv[1], w, h, &mut b1);
+                    let mut avg = [S::default(); 256];
+                    avg_into(&mut avg, 16, p0, s0, p1, s1, w, h);
+                    return (ctx.dist.satd)(s, src.ys, &avg, 16, w, h);
+                }
+                let l = if used[0] { 0 } else { 1 };
+                let (p, ps) = me_at(l, rf[l]).pred(ax, ay, mv[l], w, h, &mut b0);
+                return (ctx.dist.satd)(s, src.ys, p, ps, w, h);
             }
-            let l = if used[0] { 0 } else { 1 };
-            let (p, ps) = me[l].unwrap().pred(ax, ay, mv[l], w, h, &mut b0);
-            return (ctx.dist.satd)(s, src.ys, p, ps, w, h);
-        }
-        rect_satd_under(
-            ctx,
-            refs,
-            (px + x) as i32,
-            (py + y) as i32,
-            w,
-            h,
-            s,
-            src.ys,
-            used,
-            mv,
-            wt,
-        )
-    };
+            rect_satd_under(
+                ctx,
+                refs,
+                (px + x) as i32,
+                (py + y) as i32,
+                w,
+                h,
+                s,
+                src.ys,
+                used,
+                mv,
+                wt,
+                rf,
+            )
+        };
     let predict_cand = |rec: &mut [Recon<S>], st: &mut MbMotionState, c: &BCand| {
         st.reset_mb();
         let mut rects = [(0usize, 0usize, 0usize, 0usize); 16];
         let d = c.decision();
         let n = d.rects(&mut rects);
         for &(x, y, w, h) in rects.iter().take(n) {
-            let used = d.used(crate::h264::cavlc::part_index_of(x, y));
+            let part = crate::h264::cavlc::part_index_of(x, y);
+            let used = d.used(part);
+            let rf = c.rf[part];
             let mv = c.mv[(y / 4) * 4 + x / 4];
-            st.commit_part(
+            st.commit_part_b(
                 x,
                 y,
                 w,
                 h,
                 [used[0].then_some(mv[0]), used[1].then_some(mv[1])],
+                rf,
+                refs.ids_at(rf),
             );
             predict_inter_rect(
                 ctx,
                 rec,
-                refs.planes,
+                refs.planes_at(rf),
                 px + x,
                 py + y,
                 w,
@@ -1819,7 +1872,7 @@ pub(crate) fn b_mb<S: Sample>(
     let mut dsatd = 0u32;
     for part in 0..4 {
         let r = ((part & 1) * 8, (part >> 1) * 8, 8, 8);
-        dsatd += satd(r, ddir, dmv[part]);
+        dsatd += satd(r, ddir, dmv[part], dref);
     }
     direct.est = dsatd as f32 + lam1;
     predict_cand(rec, st, &direct);
@@ -1869,32 +1922,34 @@ pub(crate) fn b_mb<S: Sample>(
 
     // 16x16 per list, then the pair.
     let vr = ctx.motion.vertical_search(ctx.field);
-    let search =
-        |l: usize, x: usize, y: usize, w: usize, h: usize, pred: Mv, cands: &[Mv], mc: &MeCfg| {
-            let s = Search {
-                dist: ctx.dist,
-                r: me[l].expect("both lists searched"),
-                src: &sy[y * src.ys + x..],
-                src_stride: src.ys,
-                x: (px + x) as i32,
-                y: (py + y) as i32,
-                w,
-                h,
-                pred,
-                cost: costs,
-                bounds: search_bounds(refs.search[l], (px + x) as i32, (py + y) as i32, w, h, vr),
-                satd_avg: ctx.enc.satd_avg,
-            };
-            s.run(cands, mc)
+    let search = |l: usize,
+                  rf: i8,
+                  x: usize,
+                  y: usize,
+                  w: usize,
+                  h: usize,
+                  pred: Mv,
+                  cands: &[Mv],
+                  mc: &MeCfg| {
+        let s = Search {
+            dist: ctx.dist,
+            r: me_at(l, rf),
+            src: &sy[y * src.ys + x..],
+            src_stride: src.ys,
+            x: (px + x) as i32,
+            y: (py + y) as i32,
+            w,
+            h,
+            pred,
+            cost: costs,
+            bounds: search_bounds(refs.search[l], (px + x) as i32, (py + y) as i32, w, h, vr),
+            satd_avg: ctx.enc.satd_avg,
         };
-    st.reset_mb();
-    let pmv = [
-        st.predict(0, 0, 0, 0, 16, 16),
-        st.predict(1, 0, 0, 0, 16, 16),
-    ];
-    let mut m16 = [Mv::ZERO; 2];
-    let mut c16 = [0u32; 2];
-    for l in 0..2 {
+        s.run(cands, mc)
+    };
+    // List `l`'s 16x16 at reference `r` from predictor `p`; `m16` holds
+    // list 0's result by the time list 1 is searched.
+    let search16 = |l: usize, r: i8, p: Mv, m16: &[Mv; 2]| -> (Mv, u32) {
         let mut cands = [Mv::ZERO; 9];
         let mut nc = 0;
         // List 1 also starts from list 0's vector mirrored: an object in
@@ -1903,9 +1958,9 @@ pub(crate) fn b_mb<S: Sample>(
         let mirror = if l == 1 {
             Mv::new(-m16[0].x, -m16[0].y)
         } else {
-            pmv[0]
+            p
         };
-        for &c in [pmv[l], dmv[0][l], Mv::ZERO, mirror]
+        for &c in [p, dmv[0][l], Mv::ZERO, mirror]
             .iter()
             .chain(nb.cands[l][..nb.ncands[l]].iter())
         {
@@ -1914,9 +1969,29 @@ pub(crate) fn b_mb<S: Sample>(
                 nc += 1;
             }
         }
-        let (mv, _, c) = search(l, 0, 0, 16, 16, pmv[l], &cands[..nc], &cfg.me);
-        m16[l] = mv;
-        c16[l] = c;
+        let (mv, _, c) = search(l, r, 0, 0, 16, 16, p, &cands[..nc], &cfg.me);
+        (mv, c)
+    };
+    st.reset_mb();
+    // Each list's 16x16 searched at every active reference; the best one
+    // (its index's bits included) is the macroblock's for that list, and
+    // every explicit partition predicts from it.
+    let mut br = [0i8; 2];
+    let mut pmv = [Mv::ZERO; 2];
+    let mut m16 = [Mv::ZERO; 2];
+    let mut c16 = [0u32; 2];
+    for l in 0..2 {
+        let n = refs.more.count(l);
+        let mut best = (u32::MAX, 0i8, Mv::ZERO, Mv::ZERO);
+        for r in 0..n as i8 {
+            let p = st.predict(l, r, 0, 0, 16, 16);
+            let (mv, c) = search16(l, r, p, &m16);
+            let c = c + (lam1 * (ref_bits(r, n) + if r > 0 { B_REF_BIAS } else { 0.0 })) as u32;
+            if c < best.0 {
+                best = (c, r, mv, p);
+            }
+        }
+        (c16[l], br[l], m16[l], pmv[l]) = best;
     }
     let mvd16 = [sub(m16[0], pmv[0]), sub(m16[1], pmv[1])];
     // A pair, refined jointly: each list's vector a quarter sample
@@ -1926,7 +2001,7 @@ pub(crate) fn b_mb<S: Sample>(
         |r: (usize, usize, usize, usize), m: [Mv; 2], p: [Mv; 2], limit: u32| -> ([Mv; 2], u32) {
             let mut mbi = m;
             let mut bi_cost =
-                satd(r, PRED_BI, mbi) + costs.of(mbi[0], p[0]) + costs.of(mbi[1], p[1]);
+                satd(r, PRED_BI, mbi, br) + costs.of(mbi[0], p[0]) + costs.of(mbi[1], p[1]);
             let rounds = if bi_cost > limit { 0 } else { cfg.bi_refine };
             for _ in 0..rounds {
                 let before = mbi;
@@ -1948,7 +2023,7 @@ pub(crate) fn b_mb<S: Sample>(
                         if rc >= bi_cost {
                             continue;
                         }
-                        let k = satd(r, PRED_BI, m) + rc;
+                        let k = satd(r, PRED_BI, m, br) + rc;
                         if k < bi_cost {
                             bi_cost = k;
                             mbi = m;
@@ -1977,9 +2052,9 @@ pub(crate) fn b_mb<S: Sample>(
             b16_est = est;
             best16 = BCand::new(BMbKind::B16);
             if dir == PRED_BI {
-                best16.fill((0, 0, 16, 16), dir, mbi, mvdbi);
+                best16.fill((0, 0, 16, 16), dir, mbi, mvdbi, br);
             } else {
-                best16.fill((0, 0, 16, 16), dir, m16, mvd16);
+                best16.fill((0, 0, 16, 16), dir, m16, mvd16, br);
             }
             best16.est = est;
         }
@@ -1996,10 +2071,10 @@ pub(crate) fn b_mb<S: Sample>(
         let mut q = lam1 * 6.0;
         for part in 0..4 {
             let r = ((part & 1) * 8, (part >> 1) * 8, 8, 8);
-            let a = satd(r, PRED_L0, m16) as f32 + lam1 * 3.0;
-            let b = satd(r, PRED_L1, m16) as f32 + lam1 * 3.0;
-            let c = satd(r, PRED_BI, mbi) as f32 + lam1 * 5.0;
-            let d = satd(r, ddir, dmv[part]) as f32 + lam1;
+            let a = satd(r, PRED_L0, m16, br) as f32 + lam1 * 3.0;
+            let b = satd(r, PRED_L1, m16, br) as f32 + lam1 * 3.0;
+            let c = satd(r, PRED_BI, mbi, br) as f32 + lam1 * 5.0;
+            let d = satd(r, ddir, dmv[part], dref) as f32 + lam1;
             q += a.min(b).min(c).min(d);
         }
         q < cfg.b_part_gate * b16_est.min(direct.est)
@@ -2013,18 +2088,22 @@ pub(crate) fn b_mb<S: Sample>(
             let r = ((part & 1) * 8, (part >> 1) * 8, 8, 8);
             let (x, y, w, h) = r;
             let mut bestp = (
-                satd(r, ddir, dmv[part]) as f32 + lam1,
+                satd(r, ddir, dmv[part], dref) as f32 + lam1,
                 SubMbShape::Direct,
                 ddir,
                 dmv[part],
                 [Mv::ZERO; 2],
             );
-            let p = [st.predict(0, 0, x, y, w, h), st.predict(1, 0, x, y, w, h)];
+            let p = [
+                st.predict(0, br[0], x, y, w, h),
+                st.predict(1, br[1], x, y, w, h),
+            ];
             let mut m = [Mv::ZERO; 2];
             let mut c = [0u32; 2];
             for l in 0..2 {
                 let (mv, _, cc) = search(
                     l,
+                    br[l],
                     x,
                     y,
                     w,
@@ -2057,14 +2136,21 @@ pub(crate) fn b_mb<S: Sample>(
             let (est, shape, dir, mv, mvd) = bestp;
             t.est += est;
             t.sub_shape[part] = shape;
-            t.fill(r, dir, mv, mvd);
+            let rf = if shape == SubMbShape::Direct {
+                dref
+            } else {
+                br
+            };
+            t.fill(r, dir, mv, mvd, rf);
             let used = lists(dir);
-            st.commit_part(
+            st.commit_part_b(
                 x,
                 y,
                 w,
                 h,
                 [used[0].then_some(mv[0]), used[1].then_some(mv[1])],
+                rf,
+                refs.ids_at(rf),
             );
         }
         let c8 = t.est;
@@ -2079,14 +2165,26 @@ pub(crate) fn b_mb<S: Sample>(
                 let mut c = BCand::new(kind);
                 c.est = lam1 * 6.0;
                 for &(x, y, w, h) in mb_partitions(kind.dec_kind()) {
-                    let p = [st.predict(0, 0, x, y, w, h), st.predict(1, 0, x, y, w, h)];
+                    let p = [
+                        st.predict(0, br[0], x, y, w, h),
+                        st.predict(1, br[1], x, y, w, h),
+                    ];
                     let mut m = [Mv::ZERO; 2];
                     let mut cc = [0u32; 2];
                     for l in 0..2 {
                         let a = t.mv[(y / 4) * 4 + x / 4][l];
                         let b = t.mv[((y + h) / 4 - 1) * 4 + (x + w) / 4 - 1][l];
-                        let (mv, _, k) =
-                            search(l, x, y, w, h, p[l], &[a, b, m16[l], p[l]], &cfg.me_sub);
+                        let (mv, _, k) = search(
+                            l,
+                            br[l],
+                            x,
+                            y,
+                            w,
+                            h,
+                            p[l],
+                            &[a, b, m16[l], p[l]],
+                            &cfg.me_sub,
+                        );
                         m[l] = mv;
                         cc[l] = k;
                     }
@@ -2109,14 +2207,22 @@ pub(crate) fn b_mb<S: Sample>(
                     }
                     let m = if bp.1 == PRED_BI { mb } else { m };
                     c.est += bp.0;
-                    c.fill((x, y, w, h), bp.1, m, [sub(m[0], p[0]), sub(m[1], p[1])]);
+                    c.fill(
+                        (x, y, w, h),
+                        bp.1,
+                        m,
+                        [sub(m[0], p[0]), sub(m[1], p[1])],
+                        br,
+                    );
                     let used = lists(bp.1);
-                    st.commit_part(
+                    st.commit_part_b(
                         x,
                         y,
                         w,
                         h,
                         [used[0].then_some(m[0]), used[1].then_some(m[1])],
+                        br,
+                        refs.ids_at(br),
                     );
                 }
                 let slot = if kind == BMbKind::B16x8 { 3 } else { 2 };

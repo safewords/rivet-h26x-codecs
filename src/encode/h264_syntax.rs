@@ -660,9 +660,11 @@ pub struct SliceHeader {
     /// (`modification_of_pic_nums_idc` 0, `abs_diff_pic_num_minus1` n).
     /// `None` keeps the default order.
     pub l0_mod: Option<u32>,
-    /// `num_ref_idx_l0_active_minus1 + 1` of a P slice — overriding the
-    /// PPS's one when it differs.
+    /// `num_ref_idx_l0_active_minus1 + 1` of a P or B slice — overriding
+    /// the PPS's one when it differs.
     pub l0_active: u32,
+    /// `num_ref_idx_l1_active_minus1 + 1` of a B slice (1 otherwise).
+    pub l1_active: u32,
 }
 
 /// `slice_type` for an I, P or B slice, in the "all slices of this picture
@@ -704,10 +706,14 @@ pub fn write_slice_header(h: &SliceHeader, pps_qp: u8, w: &mut BitWriter) {
         w.flag(h.direct_spatial); // direct_spatial_mv_pred_flag
     }
     if h.kind == Kind::P || h.kind == Kind::B {
-        let over = h.kind == Kind::P && h.l0_active != 1;
+        debug_assert!(h.kind == Kind::B || h.l1_active == 1);
+        let over = h.l0_active != 1 || h.l1_active != 1;
         w.flag(over); // num_ref_idx_active_override_flag
         if over {
             w.ue(h.l0_active - 1); // num_ref_idx_l0_active_minus1
+            if h.kind == Kind::B {
+                w.ue(h.l1_active - 1); // num_ref_idx_l1_active_minus1
+            }
         }
         // ref_pic_list_modification
         match h.l0_mod {
@@ -1370,6 +1376,7 @@ mod tests {
                                 delta_poc_bottom: delta,
                                 l0_mod: None,
                                 l0_active: 1,
+                                l1_active: 1,
                             },
                             26,
                             &mut w,
@@ -1463,6 +1470,7 @@ mod tests {
                         delta_poc_bottom: 0,
                         l0_mod: None,
                         l0_active: 1,
+                        l1_active: 1,
                     },
                     26,
                     &mut w,
@@ -1884,6 +1892,7 @@ mod tests {
                             delta_poc_bottom: 0,
                             l0_mod: None,
                             l0_active: 1,
+                            l1_active: 1,
                         },
                         26,
                         &mut w,
@@ -2066,6 +2075,7 @@ mod tests {
                             delta_poc_bottom: 0,
                             l0_mod: None,
                             l0_active: 1,
+                            l1_active: 1,
                         },
                         26,
                         &mut w,

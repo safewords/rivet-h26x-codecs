@@ -131,6 +131,20 @@ fn write_intra_body(
     }
 }
 
+/// `ref_idx_lX` = `v` as CABAC bins (unary, ctxIdxOffset 54 of Table
+/// 9-34): bin 0 at 54 + `inc`, bin 1 at 58, the rest at 59.
+fn write_ref_idx_bins(e: &mut impl BinEnc, st: &mut CabacState, inc: u32, v: i8) {
+    for k in 0..=v {
+        let c = 54
+            + match k {
+                0 => inc as usize,
+                1 => 4,
+                _ => 5,
+            };
+        e.encode_decision(&mut st.ctx[c], (k < v) as u32);
+    }
+}
+
 /// One coded `P_L0_16x16` macroblock after its skip flag: mb_type, mvd
 /// (no `ref_idx` — exactly one reference is active, so the element is
 /// absent, as in the CAVLC writer), cbp, then qp_delta and residual when
@@ -302,13 +316,14 @@ fn write_b_body(
     bit_depth: u32,
     field: bool,
     ref_idx_zeros: bool,
+    num_ref: [u32; 2],
 ) {
     debug_assert!(
         !matches!(d.kind, BMbKind::BSkip | BMbKind::UseIntra),
         "only a coded B macroblock carries this syntax"
     );
     debug_assert!(
-        d.ref_idx.iter().flatten().all(|&r| r <= 0),
+        num_ref.iter().any(|&n| n > 1) || d.ref_idx.iter().flatten().all(|&r| r <= 0),
         "more than one reference needs ref_idx writing"
     );
     let lnb = left.map(|m| &m.nb);
@@ -334,6 +349,59 @@ fn write_b_body(
                 for &(x, y, _, _) in crate::h264::cavlc::mb_partitions(d.kind.dec_kind()) {
                     if d.used(part_index_of(x, y))[list] {
                         write_ref_idx_16x16_cabac(e, st, None, None, 0);
+                    }
+                }
+            }
+        }
+    } else if d.kind != BMbKind::BDirect16 && num_ref.iter().any(|&n| n > 1) {
+        // Several active references in a list: each explicit partition
+        // using it spells its index, all of list 0's before list 1's, the
+        // first bin's context counting the left and upper neighbouring
+        // partitions that predict from that list at an index above 0 —
+        // never a skipped, intra or direct one (9.3.3.1.1.6).
+        for list in 0..2 {
+            if num_ref[list] < 2 {
+                continue;
+            }
+            let cond = |bx: i32, by: i32| -> u32 {
+                if bx < 0 || by < 0 {
+                    let m = if bx < 0 { left } else { above };
+                    let blk = if bx < 0 {
+                        (by * 4 + 3) as usize
+                    } else {
+                        (12 + bx) as usize
+                    };
+                    return m.map_or(0, |m| {
+                        let r = if list == 0 {
+                            m.nb.ref_idx[blk]
+                        } else {
+                            m.nb.ref_idx_l1[blk]
+                        };
+                        (!m.nb.skip && !m.nb.intra && r > 0) as u32
+                    });
+                }
+                let part = ((by / 2) * 2 + bx / 2) as usize;
+                (!d.is_direct_part(part) && d.used(part)[list] && d.ref_idx[part][list] > 0) as u32
+            };
+            let mut write = |bx: i32, by: i32, v: i8| {
+                let inc = cond(bx - 1, by) + 2 * cond(bx, by - 1);
+                write_ref_idx_bins(e, st, inc, v);
+            };
+            if d.kind == BMbKind::B8x8 {
+                for part in 0..4 {
+                    if !d.is_direct_part(part) && d.used(part)[list] {
+                        write(
+                            ((part & 1) * 2) as i32,
+                            ((part >> 1) * 2) as i32,
+                            d.ref_idx[part][list],
+                        );
+                    }
+                }
+            } else {
+                for &(x, y, _, _) in crate::h264::cavlc::mb_partitions(d.kind.dec_kind()) {
+                    let part = part_index_of(x, y);
+                    if d.used(part)[list] {
+                        write((x / 4) as i32, (y / 4) as i32, d.ref_idx[part][list]);
                     }
                 }
             }
@@ -511,6 +579,7 @@ fn b_mb_cabac(
     cfi: u32,
     t8x8: bool,
     g: &Geometry,
+    num_ref: [u32; 2],
 ) -> Coded {
     let lnb = left.map(|m| &m.nb);
     let anb = above.map(|m| &m.nb);
@@ -542,6 +611,7 @@ fn b_mb_cabac(
                 g.bit_depth,
                 g.field_pic,
                 false,
+                num_ref,
             );
             Coded {
                 nb: WrittenMb::from_b_decision(dec, cfi == 3),
@@ -698,9 +768,11 @@ pub fn write_b_picture_cabac<S: Sample>(
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
     refs: [&[Recon<S>]; 2],
+    more: crate::encode::h264_me::BMore<'_, S>,
     col: &Colocated,
     weights: crate::encode::h264_me::BWeights<'_>,
 ) -> PicMotion {
+    let num_ref = [more.count(0) as u32, more.count(1) as u32];
     let mbw = g.mbs_wide as usize;
     let total = mbw * g.mbs_high as usize;
     let cfi = cfi_of(g.chroma);
@@ -717,6 +789,7 @@ pub fn write_b_picture_cabac<S: Sample>(
         planes,
         rec,
         refs,
+        more,
         col,
         weights,
         Some(&live),
@@ -727,10 +800,10 @@ pub fn write_b_picture_cabac<S: Sample>(
             if trial {
                 let mut ce = crate::cabac_enc::CabacEstimator::new();
                 let mut st2 = st.clone();
-                let _ = b_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g);
+                let _ = b_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g, num_ref);
                 return ce.fractional_bits();
             }
-            let entry = b_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g);
+            let entry = b_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g, num_ref);
             live.borrow_mut().copy_from_slice(&st.ctx);
             coded.push(entry);
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
@@ -969,6 +1042,7 @@ fn write_mbaff_mb(
                 p.bit_depth,
                 field,
                 field,
+                [1, 1],
             );
             Coded {
                 nb: WrittenMb::from_b_decision(d, p.cfi == 3),
@@ -1327,6 +1401,7 @@ mod tests {
                     8,
                     false,
                     false,
+                    [1, 1],
                 );
                 coded.push(Coded {
                     nb: WrittenMb::from_b_decision(d, false),

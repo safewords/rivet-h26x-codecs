@@ -408,6 +408,38 @@ impl MbMotionState {
         }
     }
 
+    /// [`MbMotionState::commit_part`] at reference indices `rf` of a B
+    /// slice with several active references per list, the pictures' own
+    /// identities `ids` stored for the loop filter.
+    pub fn commit_part_b(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        per_list: [Option<Mv>; 2],
+        rf: [i8; 2],
+        ids: [u16; 2],
+    ) {
+        for (list, mv) in per_list.iter().enumerate() {
+            let m = match mv {
+                Some(mv) => BlockMotion {
+                    mv: *mv,
+                    ref_idx: rf[list],
+                    ref_parity: PARITY_FRAME,
+                    ref_id: ids[list],
+                },
+                None => BlockMotion::default(),
+            };
+            fill_motion(&mut self.cur, list, x, y, w, h, m);
+        }
+        for by in y / 4..(y + h) / 4 {
+            for bx in x / 4..(x + w) / 4 {
+                self.done |= 1 << (by * 4 + bx);
+            }
+        }
+    }
+
     /// [`MbMotionState::commit_part`] for a list-0 prediction from
     /// reference index `ref_idx` of a P slice with several active
     /// references: the index is stored, and the picture identity the loop
@@ -494,6 +526,40 @@ pub struct BRefs<'a, S: Sample> {
     /// indices are these too. `Weighting::Default` throughout without a
     /// table that weights something.
     pub weighting: [Weighting; 3],
+    /// Each list's references past index 0 (default weighting only).
+    pub more: BMore<'a, S>,
+}
+
+/// Most references a B list holds active (`BMore`'s identities).
+pub const MAX_B_REFS: usize = 4;
+
+/// A B slice's references past index 0 per list, in list order, and
+/// every list entry's picture identity — the `ref_id` the motion records
+/// carry and the loop filter compares: one per *picture*, because a
+/// picture can sit in both lists (list 0's first is list 1's second for
+/// the pyramid's last B). Index 0's are 1 (list 0) and 2 (list 1), the
+/// identities a slice with one reference per list has always used.
+#[derive(Clone, Copy)]
+pub struct BMore<'a, S: Sample> {
+    /// `planes[l][r - 1]`: list `l`'s reference `r`.
+    pub planes: [&'a [&'a [Recon<S>]]; 2],
+    /// `ids[l][r]`: the identity of list `l`'s reference `r`.
+    pub ids: [[u16; MAX_B_REFS]; 2],
+}
+
+impl<S: Sample> BMore<'_, S> {
+    /// One reference per list.
+    pub fn none() -> Self {
+        BMore {
+            planes: [&[], &[]],
+            ids: [[1, 0, 0, 0], [2, 0, 0, 0]],
+        }
+    }
+
+    /// Active references in list `l`.
+    pub fn count(&self, l: usize) -> usize {
+        1 + self.planes[l].len()
+    }
 }
 
 /// How a B slice weights its predictions: what its PPS's
@@ -552,7 +618,24 @@ impl<'a, S: Sample> BRefs<'a, S> {
             planes,
             search: [&planes[0][0], &planes[1][0]],
             weighting: [Weighting::Default; 3],
+            more: BMore::none(),
         }
+    }
+
+    /// Each list's planes at reference indices `rf` (-1 or 0: index 0).
+    pub fn planes_at(&self, rf: [i8; 2]) -> [&'a [Recon<S>]; 2] {
+        [0, 1].map(|l| {
+            if rf[l] <= 0 {
+                self.planes[l]
+            } else {
+                self.more.planes[l][rf[l] as usize - 1]
+            }
+        })
+    }
+
+    /// The identities of the pictures at reference indices `rf`.
+    pub fn ids_at(&self, rf: [i8; 2]) -> [u16; 2] {
+        [0, 1].map(|l| self.more.ids[l][rf[l].max(0) as usize])
     }
 
     /// The weighting of a prediction from the lists `used` — the reference
@@ -2701,18 +2784,20 @@ pub(crate) fn rect_satd_under<S: Sample>(
     used: [bool; 2],
     mv: [Mv; 2],
     weighting: Weighting,
+    rf: [i8; 2],
 ) -> u32 {
+    let planes = refs.planes_at(rf);
     let mut a = [S::default(); 16 * PRED_STRIDE];
     let mut c = [S::default(); 16 * PRED_STRIDE];
     if used[0] && used[1] {
         let mut b = [S::default(); 16 * PRED_STRIDE];
-        luma_pred_into(ctx, &refs.planes[0][0], x, y, mv[0], w, h, &mut a);
-        luma_pred_into(ctx, &refs.planes[1][0], x, y, mv[1], w, h, &mut b);
+        luma_pred_into(ctx, &planes[0][0], x, y, mv[0], w, h, &mut a);
+        luma_pred_into(ctx, &planes[1][0], x, y, mv[1], w, h, &mut b);
         put_bi(ctx, &mut c, PRED_STRIDE, &a, &b, w, h, weighting, 0);
         (ctx.dist.satd)(src, src_stride, &c, PRED_STRIDE, w, h)
     } else {
         let l = if used[0] { 0 } else { 1 };
-        luma_pred_into(ctx, &refs.planes[l][0], x, y, mv[l], w, h, &mut a);
+        luma_pred_into(ctx, &planes[l][0], x, y, mv[l], w, h, &mut a);
         if matches!(weighting, Weighting::Default) {
             return (ctx.dist.satd)(src, src_stride, &a, PRED_STRIDE, w, h);
         }
@@ -2747,6 +2832,7 @@ fn rect_satd<S: Sample>(
         used,
         mv,
         refs.weighting_for(used),
+        [0, 0],
     )
 }
 
@@ -2823,6 +2909,7 @@ pub(crate) fn weighting_gain_b<S: Sample>(
             used,
             mv,
             Weighting::Default,
+            [0, 0],
         ));
         weighted += u64::from(rect_satd(
             ctx,
@@ -4283,6 +4370,7 @@ mod tests {
             planes: [&ref0, &ref1],
             search: [&ref0[0], &ref1[0]],
             weighting: b_weightings(Some(&table), 8),
+            more: BMore::none(),
         };
         // The colocated macroblock moves, so colZeroFlag never holds and
         // direct's vectors are the neighbours' zero medians.

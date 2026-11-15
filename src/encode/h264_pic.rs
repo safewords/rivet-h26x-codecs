@@ -29,7 +29,7 @@ use crate::encode::h264_intra::{
     IntraCtx, MbAvail, MbDecision, MbKind, code_macroblock, code_macroblock_modes8,
 };
 use crate::encode::h264_me::{
-    BDecision, BMbKind, BRefs, BWeights, InterDecision, InterMbKind, MbMotionState, PRef,
+    BDecision, BMbKind, BMore, BRefs, BWeights, InterDecision, InterMbKind, MbMotionState, PRef,
     code_macroblock_b, code_macroblock_p, weighted_search_plane, weighting_gain, weighting_gain_b,
 };
 use crate::encode::h264_syntax::{Geometry, Plane, Recon};
@@ -1234,6 +1234,7 @@ pub(crate) fn code_b_picture<S: Sample>(
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
     refs: [&[Recon<S>]; 2],
+    more: BMore<'_, S>,
     col: &Colocated,
     weights: BWeights<'_>,
     live: Option<&std::cell::RefCell<[u8; 1024]>>,
@@ -1266,6 +1267,7 @@ pub(crate) fn code_b_picture<S: Sample>(
         planes: refs,
         search: [0usize, 1].map(|l| weighted_luma[l].as_ref().unwrap_or(&refs[l][0])),
         weighting,
+        more,
     };
     let luma_weighted = weighted_luma.iter().any(Option::is_some);
     let mut wstats = WeightCensus {
@@ -1286,6 +1288,16 @@ pub(crate) fn code_b_picture<S: Sample>(
             tools.hpel_for(brefs.search[1], ctx.max),
         ]
     });
+    let hpel_more: [Vec<_>; 2] = [0, 1].map(|l| {
+        if analysis.is_some() {
+            more.planes[l]
+                .iter()
+                .map(|r| tools.hpel_for(&r[0], ctx.max))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    });
     let mut an = analysis.map(|cfg| {
         let h = hpel.as_ref().expect("built with the analysis");
         PicAn::new(
@@ -1302,6 +1314,15 @@ pub(crate) fn code_b_picture<S: Sample>(
                 .filter(|_| tools.reference || cfg.trellis_nonref),
             g.bit_depth,
         )
+        .with_b_more([0, 1].map(|l| {
+            more.planes[l]
+                .iter()
+                .zip(&hpel_more[l])
+                .map(|(r, h)| MeRef {
+                    p: [&r[0], &h.h, &h.v, &h.c],
+                })
+                .collect()
+        }))
     });
     let srcmb = SrcMb {
         y: src_y,

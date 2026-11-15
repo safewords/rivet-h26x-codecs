@@ -858,13 +858,14 @@ fn write_b_macroblock(
     top: bool,
     t8x8_mode: bool,
     ref_idx_zeros: bool,
+    num_ref: [u32; 2],
 ) {
     debug_assert!(
         !matches!(dec.kind, BMbKind::BSkip | BMbKind::UseIntra),
         "only a coded B macroblock carries this syntax"
     );
     debug_assert!(
-        dec.ref_idx.iter().flatten().all(|&r| r <= 0),
+        num_ref.iter().any(|&n| n > 1) || dec.ref_idx.iter().flatten().all(|&r| r <= 0),
         "multi-reference lists need te(v) ref_idx"
     );
     w.ue(dec.mb_type());
@@ -894,10 +895,32 @@ fn write_b_macroblock(
                 }
             }
         }
+    } else if dec.kind != BMbKind::BDirect16 {
+        // Several active references in a list: each partition using it
+        // (not direct) spells its index, te(v) over the list, all of list
+        // 0's before list 1's (7.3.5.1, 7.3.5.2).
+        for list in 0..2 {
+            if num_ref[list] < 2 {
+                continue;
+            }
+            if dec.kind == BMbKind::B8x8 {
+                for part in 0..4 {
+                    if !dec.is_direct_part(part) && dec.used(part)[list] {
+                        w.te(dec.ref_idx[part][list] as u32, num_ref[list] - 1);
+                    }
+                }
+            } else {
+                for &(x, y, _, _) in crate::h264::cavlc::mb_partitions(dec.kind.dec_kind()) {
+                    let part = part_index_of(x, y);
+                    if dec.used(part)[list] {
+                        w.te(dec.ref_idx[part][list] as u32, num_ref[list] - 1);
+                    }
+                }
+            }
+        }
     }
     if dec.kind != BMbKind::BDirect16 {
-        // `ref_idx_lX` is absent throughout (one active reference per
-        // list). Then the mvds, list-major, one per explicit rectangle in
+        // Then the mvds, list-major, one per explicit rectangle in
         // syntax order, x then y.
         let mut rects = [(0usize, 0usize, 0usize, 0usize); 16];
         let n = dec.rects(&mut rects);
@@ -966,9 +989,11 @@ pub fn write_b_picture<S: Sample>(
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
     refs: [&[Recon<S>]; 2],
+    more: crate::encode::h264_me::BMore<'_, S>,
     col: &Colocated,
     weights: crate::encode::h264_me::BWeights<'_>,
 ) -> PicMotion {
+    let num_ref = [more.count(0) as u32, more.count(1) as u32];
     let mbs_wide = g.mbs_wide as usize;
     let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 {
         0
@@ -990,6 +1015,7 @@ pub fn write_b_picture<S: Sample>(
         planes,
         rec,
         refs,
+        more,
         col,
         weights,
         None,
@@ -1010,6 +1036,7 @@ pub fn write_b_picture<S: Sample>(
                             mb_y > 0,
                             t8x8,
                             false,
+                            num_ref,
                         );
                         (w2.position() + run_bits) as f64
                     }
@@ -1036,7 +1063,17 @@ pub fn write_b_picture<S: Sample>(
                 BMb::Direct(dec) | BMb::Explicit(dec) => {
                     w.ue(skip_run);
                     skip_run = 0;
-                    write_b_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+                    write_b_macroblock(
+                        w,
+                        dec,
+                        &mut st,
+                        mb_x,
+                        mb_x > 0,
+                        mb_y > 0,
+                        t8x8,
+                        false,
+                        num_ref,
+                    );
                 }
                 BMb::Intra(idec) => {
                     w.ue(skip_run);
@@ -1185,7 +1222,9 @@ fn write_pair_cavlc(
             PairMb::P(d) => {
                 write_p16_macroblock(w, d, &mut st, 0, left, above, t8x8, pair.field, 1)
             }
-            PairMb::B(d) => write_b_macroblock(w, d, &mut st, 0, left, above, t8x8, pair.field),
+            PairMb::B(d) => {
+                write_b_macroblock(w, d, &mut st, 0, left, above, t8x8, pair.field, [1, 1])
+            }
         }
         local[b] = Some(MbCounts::of_mb(mb));
     }
@@ -1518,7 +1557,7 @@ mod tests {
         for dec in &cases {
             let mut st = NzState::new(1, 2, false);
             let mut w = BitWriter::new();
-            write_b_macroblock(&mut w, dec, &mut st, 0, false, false, false, false);
+            write_b_macroblock(&mut w, dec, &mut st, 0, false, false, false, false, [1, 1]);
             w.rbsp_trailing_bits();
             let rbsp = w.into_rbsp();
 

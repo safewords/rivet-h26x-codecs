@@ -1303,6 +1303,10 @@ pub(crate) struct WrittenMb {
     /// 0 for `P_Skip`, -1 for intra. The contexts only ever ask `> 0`
     /// (refIdxZeroFlag), and never of a skipped or intra macroblock.
     pub ref_idx: [i8; 16],
+    /// The same for list 1 (B macroblocks; 0 elsewhere). Both lists hold 0
+    /// over direct-predicted blocks, whose index is derived rather than
+    /// coded: the contexts count none of them (9.3.3.1.1.6).
+    pub ref_idx_l1: [i8; 16],
     /// `mvd_lX` per list and 4x4 block (raster), as the decoder's
     /// per-picture mvd arrays hold them: the partition's mvd replicated
     /// over its blocks, zero for intra, skipped and direct macroblocks
@@ -1435,6 +1439,7 @@ impl WrittenMb {
             skip: false,
             intra: true,
             ref_idx: [-1; 16],
+            ref_idx_l1: [0; 16],
             mvd: [[Mv::ZERO; 16]; 2],
             direct: false,
         }
@@ -1467,6 +1472,7 @@ impl WrittenMb {
                     skip: true,
                     intra: false,
                     ref_idx: [0; 16],
+                    ref_idx_l1: [0; 16],
                     mvd: [[Mv::ZERO; 16]; 2],
                     direct: false,
                 }
@@ -1498,6 +1504,7 @@ impl WrittenMb {
                     skip: false,
                     intra: false,
                     ref_idx: [d.ref_idx; 16],
+                    ref_idx_l1: [0; 16],
                     // Each partition's mvd over its own 4x4 blocks, which is
                     // what the decoder's CABAC parser stores and what the
                     // *next* macroblock's mvd contexts read across the edge
@@ -1526,6 +1533,7 @@ impl WrittenMb {
             skip: false,
             intra: true,
             ref_idx: [-1; 16],
+            ref_idx_l1: [0; 16],
             mvd: [[Mv::ZERO; 16]; 2],
             direct: false,
         }
@@ -1540,10 +1548,18 @@ impl WrittenMb {
     /// `decode_mb_type` counts it, and its direct blocks carry the zero
     /// mvd the reader's `is_direct_block` reads for them.
     pub(crate) fn from_b_decision(d: &BDecision, c444: bool) -> Self {
-        // The list-0 reference index per 4x4, from its 8x8 partition's.
+        // Each list's reference index per 4x4, from its 8x8 partition's;
+        // 0 over direct blocks (and the whole of a direct macroblock).
         let mut ref_idx = [0i8; 16];
-        for (blk, r) in ref_idx.iter_mut().enumerate() {
-            *r = d.ref_idx[(blk / 8) * 2 + (blk % 4) / 2][0];
+        let mut ref_idx_l1 = [0i8; 16];
+        let direct_mb = matches!(d.kind, BMbKind::BSkip | BMbKind::BDirect16);
+        for blk in 0..16 {
+            let part = (blk / 8) * 2 + (blk % 4) / 2;
+            if direct_mb || d.is_direct_part(part) {
+                continue;
+            }
+            ref_idx[blk] = d.ref_idx[part][0];
+            ref_idx_l1[blk] = d.ref_idx[part][1];
         }
         match d.kind {
             BMbKind::UseIntra => {
@@ -1565,6 +1581,7 @@ impl WrittenMb {
                     skip: true,
                     intra: false,
                     ref_idx,
+                    ref_idx_l1,
                     mvd: [[Mv::ZERO; 16]; 2],
                     direct: true,
                 }
@@ -1594,6 +1611,7 @@ impl WrittenMb {
                     skip: false,
                     intra: false,
                     ref_idx,
+                    ref_idx_l1,
                     // Each partition's mvd over its own 4x4 blocks per list,
                     // as the decoder's CABAC parser stores them; zero over
                     // direct-predicted blocks, which carry none.

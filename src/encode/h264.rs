@@ -1779,7 +1779,77 @@ impl<S: Sample> Core<S> {
             }
             _ => Vec::new(),
         };
-        let l0_active = 1 + more.len() as u32;
+        // A B picture's further references per list, past each list's
+        // index 0, in the decoder's default order (8.2.4.2.3: list 0 the
+        // earlier pictures by descending order count, then the later ones
+        // ascending; list 1 the other way round) — indices into
+        // `self.refs`. Only under default weighting, whose predictions
+        // need no per-pair weights.
+        let bidx: [Vec<usize>; 2] = match (c.kind, past, future) {
+            (Kind::B, Some(_), Some(_))
+                if transform_b
+                    && wp.is_none()
+                    && syn::b_weighting(&self.cfg) == BWeighting::Default =>
+            {
+                // List 0 only, and only in pictures nothing references:
+                // list 1's second entry is mostly a picture list 0 already
+                // holds, and a reference picture's further indices cost the
+                // pictures predicting from it their colocated zero motion
+                // (measured, medium: both lists +0.86 %, list 0 in every B
+                // picture -0.25 %, list 0 in non-reference ones -0.36 %).
+                let n = if c.reference {
+                    1
+                } else {
+                    self.tools.analysis.map_or(1, |a| a.b_refs)
+                };
+                let nl = [n, 1];
+                let mut before: Vec<usize> = (0..self.refs.len())
+                    .filter(|&i| self.refs[i].0 < c.poc)
+                    .collect();
+                before.sort_by_key(|&i| std::cmp::Reverse(self.refs[i].0));
+                let mut after: Vec<usize> = (0..self.refs.len())
+                    .filter(|&i| self.refs[i].0 > c.poc)
+                    .collect();
+                after.sort_by_key(|&i| self.refs[i].0);
+                let l0: Vec<usize> = before.iter().chain(&after).copied().collect();
+                let l1: Vec<usize> = after.iter().chain(&before).copied().collect();
+                debug_assert_eq!((l0[0], l1[0]), (past.unwrap(), future.unwrap()));
+                [0, 1].map(|l| {
+                    let v = if l == 0 { &l0 } else { &l1 };
+                    let n = nl[l];
+                    v.iter()
+                        .skip(1)
+                        .take(n.saturating_sub(1).min(super::h264_me::MAX_B_REFS - 1))
+                        .copied()
+                        .collect()
+                })
+            }
+            _ => [Vec::new(), Vec::new()],
+        };
+        let bplanes: [Vec<&[syn::Recon<S>]>; 2] =
+            [0, 1].map(|l| bidx[l].iter().map(|&i| &self.refs[i].1[..]).collect());
+        let mut bids = [[1u16, 0, 0, 0], [2u16, 0, 0, 0]];
+        for l in 0..2 {
+            for (r, &i) in bidx[l].iter().enumerate() {
+                // One identity per picture: the anchors keep 1 and 2.
+                bids[l][r + 1] = if Some(i) == past {
+                    1
+                } else if Some(i) == future {
+                    2
+                } else {
+                    3 + i as u16
+                };
+            }
+        }
+        let bmore = super::h264_me::BMore {
+            planes: [&bplanes[0][..], &bplanes[1][..]],
+            ids: bids,
+        };
+        let (l0_active, l1_active) = if c.kind == Kind::B {
+            (1 + bidx[0].len() as u32, 1 + bidx[1].len() as u32)
+        } else {
+            (1 + more.len() as u32, 1)
+        };
         let mut w = BitWriter::with_capacity(self.frame_bytes + 256);
         syn::write_slice_header(
             &syn::SliceHeader {
@@ -1807,6 +1877,7 @@ impl<S: Sample> Core<S> {
                 delta_poc_bottom: 0,
                 l0_mod,
                 l0_active,
+                l1_active,
             },
             self.pps_qp,
             &mut w,
@@ -1957,6 +2028,7 @@ impl<S: Sample> Core<S> {
                     &planes,
                     &mut recon,
                     refs2,
+                    bmore,
                     &col,
                     weights,
                 );
@@ -1969,6 +2041,7 @@ impl<S: Sample> Core<S> {
                     &planes,
                     &mut recon,
                     refs2,
+                    bmore,
                     &col,
                     weights,
                 );
@@ -2139,6 +2212,7 @@ impl<S: Sample> Core<S> {
                 delta_poc_bottom: 0,
                 l0_mod: None,
                 l0_active: 1,
+                l1_active: 1,
             };
             // The header as the decoder reads it: written alone, closed, and
             // parsed by the production slice header parser.
@@ -2325,6 +2399,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             refs2,
+                            crate::encode::h264_me::BMore::none(),
                             &col,
                             super::h264_me::BWeights::Default,
                         )
@@ -2337,6 +2412,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             refs2,
+                            crate::encode::h264_me::BMore::none(),
                             &col,
                             super::h264_me::BWeights::Default,
                         );
@@ -2483,6 +2559,7 @@ impl<S: Sample> Core<S> {
             delta_poc_bottom: delta,
             l0_mod: None,
             l0_active: 1,
+            l1_active: 1,
         };
         let hdr = f.read_back(&header, self.pps_qp, nal_type, nal_ref_idc)?;
         if hdr.is_idr() || model.dpb.pics.is_empty() {
@@ -2699,6 +2776,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             refs2,
+                            crate::encode::h264_me::BMore::none(),
                             &col,
                             super::h264_me::BWeights::Default,
                         )
@@ -2711,6 +2789,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             refs2,
+                            crate::encode::h264_me::BMore::none(),
                             &col,
                             super::h264_me::BWeights::Default,
                         );
@@ -3808,6 +3887,61 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// B pictures nothing references predict from a second list-0
+    /// reference (`AnalysisCfg::b_refs`) once the buffer holds one: the
+    /// `ref_idx_l0` syntax of every B shape, both entropy coders, the
+    /// direct derivation off neighbours at index 1, and the loop filter's
+    /// picture identities, all held to the decoder (SELF) under the
+    /// pyramid with four references kept, at both preset tiers that use it.
+    #[test]
+    fn non_reference_b_pictures_round_trip_with_two_list0_references() {
+        for (preset, entropy, chroma, bit_depth) in [
+            (
+                crate::encode::Preset::Medium,
+                Entropy::Cabac,
+                ChromaFormat::Yuv420,
+                8u32,
+            ),
+            (
+                crate::encode::Preset::Medium,
+                Entropy::Cavlc,
+                ChromaFormat::Yuv420,
+                8,
+            ),
+            (
+                crate::encode::Preset::Slow,
+                Entropy::Cabac,
+                ChromaFormat::Yuv422,
+                10,
+            ),
+            (
+                crate::encode::Preset::Slow,
+                Entropy::Cavlc,
+                ChromaFormat::Yuv444,
+                8,
+            ),
+        ] {
+            let tag = format!("{preset:?} {entropy:?} {chroma:?} {bit_depth}-bit");
+            assert!(super::super::h264_analyse::AnalysisCfg::of(preset).b_refs > 1);
+            let frames = woven_frames(64, 64, chroma, bit_depth, 17, 0);
+            encode_and_self_check(
+                &tag,
+                Config {
+                    gop: 32,
+                    bframes: 3,
+                    pyramid: true,
+                    max_refs: 4,
+                    entropy,
+                    transform_8x8: true,
+                    subparts: true,
+                    preset,
+                    ..cfg(64, 64, chroma, bit_depth)
+                },
+                &frames,
+            );
         }
     }
 
