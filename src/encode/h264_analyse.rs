@@ -70,6 +70,9 @@ pub(crate) struct AnalysisCfg {
     pub(crate) rd_max: usize,
     /// Re-quantise the chosen macroblock by the trellis (CABAC streams).
     pub(crate) trellis: bool,
+    /// Quantise every candidate the comparison codes by the trellis too,
+    /// so the decision sees the levels it would write (CABAC streams).
+    pub(crate) trellis_rd: bool,
     /// Decide by coding candidates and pricing them (`SSD + lambda * R`);
     /// false decides on the estimates alone and codes only the winner.
     pub(crate) rd: bool,
@@ -103,6 +106,7 @@ impl AnalysisCfg {
         rd_ratio: 1.1,
         rd_max: 2,
         trellis: true,
+        trellis_rd: false,
         rd: true,
         refs: 3,
     };
@@ -135,6 +139,7 @@ impl AnalysisCfg {
         rd_ratio: 1.0,
         rd_max: 1,
         trellis: true,
+        trellis_rd: false,
         rd: true,
         refs: 1,
     };
@@ -165,6 +170,7 @@ impl AnalysisCfg {
         rd_ratio: 1.25,
         rd_max: 3,
         trellis: true,
+        trellis_rd: true,
         rd: true,
         refs: 4,
     };
@@ -1311,7 +1317,18 @@ pub(crate) fn p_mb<S: Sample>(
         });
     }
 
-    // The comparison, in coded form.
+    // The comparison, in coded form (by the trellis where it decides).
+    let rctx_store;
+    let rctx: &IntraCtx<S> = match an.trellis().filter(|_| cfg.trellis_rd && !ctx.c444) {
+        Some(t) => {
+            rctx_store = IntraCtx {
+                trellis: Some(t),
+                ..*ctx
+            };
+            &rctx_store
+        }
+        None => ctx,
+    };
     let mut best_j = skip_ssd as f64 + lam2 * rate(PMb::Skip(&skip_dec));
     let mut best: MbChoice<InterDecision> = MbChoice::Inter(skip_dec);
     let mut best_pix = MbPix::new();
@@ -1356,7 +1373,7 @@ pub(crate) fn p_mb<S: Sample>(
                 }
             }
             let mut r = code_inter_mb_residual_parts(
-                ctx,
+                rctx,
                 rec,
                 mb_x,
                 mb_y,
@@ -1423,7 +1440,7 @@ pub(crate) fn p_mb<S: Sample>(
     if i_est < best_est * cfg.intra_ratio {
         let (idec, modes, j) = intra_mb(
             &cfg,
-            ctx,
+            rctx,
             rec,
             mb_x,
             mb_y,
@@ -1440,7 +1457,7 @@ pub(crate) fn p_mb<S: Sample>(
         if j < best_j {
             st.reset_mb();
             let mut idec = idec;
-            if let Some(t) = an.trellis().filter(|_| !ctx.c444) {
+            if let Some(t) = an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd) {
                 let tctx = IntraCtx {
                     trellis: Some(t),
                     ..*ctx
@@ -1456,7 +1473,7 @@ pub(crate) fn p_mb<S: Sample>(
         predict(rec, 0, 0, 16, 16, skip_mv);
         return best;
     }
-    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444), &mut best) {
+    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd), &mut best) {
         // The winner's residual again, by the trellis, from its prediction.
         best_pred.restore(ctx, rec, mb_x, mb_y);
         let tctx = IntraCtx {
@@ -1987,6 +2004,17 @@ pub(crate) fn b_mb<S: Sample>(
         });
     }
 
+    let rctx_store;
+    let rctx: &IntraCtx<S> = match an.trellis().filter(|_| cfg.trellis_rd && !ctx.c444) {
+        Some(t) => {
+            rctx_store = IntraCtx {
+                trellis: Some(t),
+                ..*ctx
+            };
+            &rctx_store
+        }
+        None => ctx,
+    };
     let mut best_j = skip_ssd as f64 + lam2 * rate(BMb::Skip(&skip_dec));
     let mut best: MbChoice<BDecision> = MbChoice::Inter(skip_dec);
     let mut best_pix = MbPix::new();
@@ -2018,7 +2046,7 @@ pub(crate) fn b_mb<S: Sample>(
                 }
             }
             let mut r = code_inter_mb_residual_parts(
-                ctx,
+                rctx,
                 rec,
                 mb_x,
                 mb_y,
@@ -2080,7 +2108,7 @@ pub(crate) fn b_mb<S: Sample>(
     if i_est < best_est * cfg.intra_ratio {
         let (idec, modes, j) = intra_mb(
             &cfg,
-            ctx,
+            rctx,
             rec,
             mb_x,
             mb_y,
@@ -2095,7 +2123,7 @@ pub(crate) fn b_mb<S: Sample>(
         if j < best_j {
             st.reset_mb();
             let mut idec = idec;
-            if let Some(t) = an.trellis().filter(|_| !ctx.c444) {
+            if let Some(t) = an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd) {
                 let tctx = IntraCtx {
                     trellis: Some(t),
                     ..*ctx
@@ -2110,7 +2138,7 @@ pub(crate) fn b_mb<S: Sample>(
         predict_cand(rec, st, &direct);
         return best;
     }
-    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444), &mut best) {
+    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd), &mut best) {
         best_pred.restore(ctx, rec, mb_x, mb_y);
         let tctx = IntraCtx {
             trellis: Some(t),
