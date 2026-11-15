@@ -173,6 +173,8 @@ fn install_simd<S: Sample>(d: &mut DistortionDsp<S>, cpu: Cpu) {
     }
     #[cfg(target_arch = "x86_64")]
     super::sao_x86::install(d, cpu);
+    #[cfg(target_arch = "aarch64")]
+    super::sao_neon::install(d, cpu);
     let d = d as &mut dyn Any;
     if let Some(d) = d.downcast_mut::<DistortionDsp<u8>>() {
         #[cfg(target_arch = "x86_64")]

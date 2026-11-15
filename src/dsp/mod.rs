@@ -79,6 +79,8 @@ pub(crate) mod hevc_wasm128;
 pub(crate) mod hevc_x86_128;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod neon_dotprod;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod sao_neon;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod sao_x86;
 #[cfg(target_arch = "x86_64")]
