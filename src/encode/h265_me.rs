@@ -246,8 +246,8 @@ use crate::dsp::hevc_enc::{qbits, quant_offset, quant_scale};
 use crate::encode::InterParts;
 use crate::encode::h265_intra::{
     CuDecision, Geo, IntraCtx, MIN_CB_LOG2, RegionSave, Srcs, TreeCu, chroma_tbs,
-    code_cu_2nx2n_intra, code_cu_nxn_intra, cu_ssd, restore4, satd_lambda_scale, save4, ssd_lambda,
-    sub_wh,
+    code_cu_2nx2n_intra, code_cu_nxn_intra, cu_ssd, restore4, satd_lambda_scale, save4, save4_into,
+    ssd_lambda, sub_wh,
 };
 use crate::encode::h265_search;
 use crate::hevc::ctu::{
@@ -531,6 +531,33 @@ pub struct InterCuDecision {
     pub cbf_chroma_tu: [[bool; 4]; 2],
 }
 
+impl InterCuDecision {
+    /// Every field back to its default for a CU of `1 << log2_cu` decided
+    /// under `ctx`, except the coefficient arrays, which keep whatever
+    /// they held: each is written before it is read, over the blocks the
+    /// cbfs then name.
+    fn reset<S: Sample>(&mut self, log2_cu: u32, ctx: &MeCtx<'_, S>) {
+        self.log2_cu = log2_cu;
+        self.bypass = ctx.bypass;
+        self.sign_hiding = ctx.sign_hiding;
+        self.qp_y = ctx.qp;
+        self.kind = InterCuKind::Skip { merge_idx: 0 };
+        self.part = PartMode::P2Nx2N;
+        self.pus = [PuPick::default(); 2];
+        self.mv = Mv::ZERO;
+        self.ref_idx = 0;
+        self.mv_l1 = Mv::ZERO;
+        self.ref_idx_l1 = -1;
+        self.rqt_root_cbf = false;
+        self.cbf_luma = false;
+        self.cbf_chroma = [false; 2];
+        self.cbf_chroma_bot = [false; 2];
+        self.split_tu = false;
+        self.cbf_luma_tu = [false; 4];
+        self.cbf_chroma_tu = [[false; 4]; 2];
+    }
+}
+
 impl Default for InterCuDecision {
     fn default() -> Self {
         InterCuDecision {
@@ -659,6 +686,11 @@ pub struct InterPicture<S: Sample> {
     tu_save: Vec<S>,
     tu_keep: Vec<S>,
     tu_alt: Box<InterCuDecision>,
+    /// Inter decisions the quadtree walk discarded, kept for the next
+    /// unit rather than allocated, zeroed and copied each time.
+    pool: Vec<Box<InterCuDecision>>,
+    /// Trial saves finished with, for [`Self::take_save`].
+    saves: Vec<TrialSave<S>>,
     /// The slice is B (the initial contexts a rate falls back to).
     pub slice_b: bool,
     /// `slice_temporal_mvp_enabled_flag`: the SPS enables temporal MVP and
@@ -861,6 +893,8 @@ impl<S: Sample> InterPicture<S> {
             tu_save: Vec::new(),
             tu_keep: Vec::new(),
             tu_alt: Box::default(),
+            pool: Vec::new(),
+            saves: Vec::new(),
             slice_b: false,
         }
     }
@@ -986,7 +1020,8 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
     ) -> InterCuDecision {
         let n = 1usize << self.log2_ctb;
-        self.code_cu(
+        let mut out = InterCuDecision::default();
+        self.code_cu_into(
             ctx,
             refs_l0,
             cu_x * n,
@@ -998,7 +1033,9 @@ impl<S: Sample> InterPicture<S> {
             src_cb,
             src_cr,
             c_stride,
-        )
+            &mut out,
+        );
+        out
     }
 
     /// [`Self::code_ctu`] for one coding unit of `1 << log2_cu` at luma
@@ -1009,7 +1046,7 @@ impl<S: Sample> InterPicture<S> {
     /// size serves; `depth` reaches the rate model only through
     /// `inter_pred_idc`'s context.
     #[allow(clippy::too_many_arguments)]
-    pub fn code_cu(
+    pub fn code_cu_into(
         &mut self,
         ctx: &MeCtx<'_, S>,
         refs_l0: &[&Frame<S>],
@@ -1022,15 +1059,10 @@ impl<S: Sample> InterPicture<S> {
         src_cb: &[S],
         src_cr: &[S],
         c_stride: usize,
-    ) -> InterCuDecision {
+        out: &mut InterCuDecision,
+    ) {
         let n = 1usize << log2_cu;
-        let out = InterCuDecision {
-            log2_cu,
-            bypass: ctx.bypass,
-            sign_hiding: ctx.sign_hiding,
-            qp_y: ctx.qp,
-            ..InterCuDecision::default()
-        };
+        out.reset(log2_cu, ctx);
 
         // Mark the CTB as this (single) slice's, as the decoder does at CTB
         // start: `avail_ctx` reads the current CTB's slice address, and
@@ -1067,7 +1099,7 @@ impl<S: Sample> InterPicture<S> {
         self.alts = Some((pick, parts));
         self.last_pick_cost = parts.map_or(pick.cost, |p| p.2.min(pick.cost));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
-            return self.code_parts(
+            self.code_parts(
                 ctx,
                 TreeRefs::P(refs_l0),
                 out,
@@ -1082,6 +1114,7 @@ impl<S: Sample> InterPicture<S> {
                 src_cr,
                 c_stride,
             );
+            return;
         }
         self.code_whole(
             ctx,
@@ -1096,7 +1129,7 @@ impl<S: Sample> InterPicture<S> {
             src_cb,
             src_cr,
             c_stride,
-        )
+        );
     }
 
     /// The motion decision for one prediction unit `pu` of a P CU: the
@@ -1363,7 +1396,8 @@ impl<S: Sample> InterPicture<S> {
         c_stride: usize,
     ) -> InterCuDecision {
         let n = 1usize << self.log2_ctb;
-        self.code_cu_b(
+        let mut out = InterCuDecision::default();
+        self.code_cu_b_into(
             ctx,
             ref0,
             ref1,
@@ -1376,14 +1410,16 @@ impl<S: Sample> InterPicture<S> {
             src_cb,
             src_cr,
             c_stride,
-        )
+            &mut out,
+        );
+        out
     }
 
     /// [`Self::code_ctu_b`] for one coding unit of `1 << log2_cu` at luma
     /// `(x0, y0)` and coding-tree depth `depth`, as [`Self::code_cu`] is
     /// to [`Self::code_ctu`].
     #[allow(clippy::too_many_arguments)]
-    pub fn code_cu_b(
+    pub fn code_cu_b_into(
         &mut self,
         ctx: &MeCtx<'_, S>,
         ref0: &Frame<S>,
@@ -1397,15 +1433,10 @@ impl<S: Sample> InterPicture<S> {
         src_cb: &[S],
         src_cr: &[S],
         c_stride: usize,
-    ) -> InterCuDecision {
+        out: &mut InterCuDecision,
+    ) {
         let n = 1usize << log2_cu;
-        let out = InterCuDecision {
-            log2_cu,
-            bypass: ctx.bypass,
-            sign_hiding: ctx.sign_hiding,
-            qp_y: ctx.qp,
-            ..InterCuDecision::default()
-        };
+        out.reset(log2_cu, ctx);
 
         let ctb = self.info.ctb_of(x0, y0);
         self.info.ctb_slice_addr[ctb] = 0;
@@ -1438,7 +1469,7 @@ impl<S: Sample> InterPicture<S> {
         self.alts = Some((pick, parts));
         self.last_pick_cost = parts.map_or(pick.cost, |p| p.2.min(pick.cost));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
-            return self.code_parts(
+            self.code_parts(
                 ctx,
                 TreeRefs::B(ref0, ref1),
                 out,
@@ -1453,6 +1484,7 @@ impl<S: Sample> InterPicture<S> {
                 src_cr,
                 c_stride,
             );
+            return;
         }
         self.code_whole(
             ctx,
@@ -1467,7 +1499,7 @@ impl<S: Sample> InterPicture<S> {
             src_cb,
             src_cr,
             c_stride,
-        )
+        );
     }
 
     /// [`Self::pick_pu`] for one prediction unit of a B CU: merge over the
@@ -1769,7 +1801,7 @@ impl<S: Sample> InterPicture<S> {
         &mut self,
         ctx: &MeCtx<'_, S>,
         refs: TreeRefs<'_, S>,
-        mut out: InterCuDecision,
+        out: &mut InterCuDecision,
         pick: PuPick,
         x0: usize,
         y0: usize,
@@ -1779,7 +1811,7 @@ impl<S: Sample> InterPicture<S> {
         src_cb: &[S],
         src_cr: &[S],
         c_stride: usize,
-    ) -> InterCuDecision {
+    ) {
         let n = 1usize << log2_cu;
         let src = &src_y[y0 * y_stride + x0..];
         let w4 = self.info.w4;
@@ -1809,44 +1841,10 @@ impl<S: Sample> InterPicture<S> {
             // the quadtree the area may still hold a skip mark from a
             // trial that lost.
             PicInfo::fill4(&mut self.info.skip, w4, x0, y0, n, n, 0);
-            return out;
+            return;
         }
 
-        match refs {
-            TreeRefs::P(l0) => {
-                let r = pick.ref_idx[0] as usize;
-                let wp = self.wp_for(r);
-                predict_block(
-                    ctx.dsp,
-                    &mut self.scratch,
-                    &mut self.recon,
-                    x0,
-                    y0,
-                    n,
-                    n,
-                    Some((l0[r], pick.mv[0])),
-                    None,
-                    wp,
-                );
-            }
-            TreeRefs::B(r0, r1) => {
-                let a = (pick.ref_idx[0] >= 0).then_some((r0, pick.mv[0]));
-                let b = (pick.ref_idx[1] >= 0).then_some((r1, pick.mv[1]));
-                let wp = self.wp_b_for(pick.ref_idx);
-                predict_block(
-                    ctx.dsp,
-                    &mut self.scratch,
-                    &mut self.recon,
-                    x0,
-                    y0,
-                    n,
-                    n,
-                    a,
-                    b,
-                    wp,
-                );
-            }
-        }
+        self.predict_cu(ctx, refs, &pick, x0, y0, n);
 
         let any = if self.no_residual {
             out.rqt_root_cbf = false;
@@ -1856,7 +1854,7 @@ impl<S: Sample> InterPicture<S> {
             false
         } else {
             self.code_residual_cu(
-                ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out,
+                ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, out,
             )
         };
         out.kind = match (pick.merge_idx, any, refs) {
@@ -1885,7 +1883,6 @@ impl<S: Sample> InterPicture<S> {
             n,
             matches!(out.kind, InterCuKind::Skip { .. }) as u8,
         );
-        out
     }
 
     /// The cheapest partitioned alternative for the CU of `1 << log2_cu` at
@@ -2011,7 +2008,7 @@ impl<S: Sample> InterPicture<S> {
         &mut self,
         ctx: &MeCtx<'_, S>,
         refs: TreeRefs<'_, S>,
-        mut out: InterCuDecision,
+        out: &mut InterCuDecision,
         part: PartMode,
         pus: [PuPick; 2],
         x0: usize,
@@ -2022,7 +2019,7 @@ impl<S: Sample> InterPicture<S> {
         src_cb: &[S],
         src_cr: &[S],
         c_stride: usize,
-    ) -> InterCuDecision {
+    ) {
         let n = 1usize << log2_cu;
         let src = &src_y[y0 * y_stride + x0..];
         let w4 = self.info.w4;
@@ -2052,7 +2049,7 @@ impl<S: Sample> InterPicture<S> {
             );
             PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 1);
             PicInfo::fill4(&mut self.info.skip, w4, x0, y0, n, n, 0);
-            return out;
+            return;
         }
         let rects = part.pus(n as i32);
         for (pk, &(px, py, pw, ph)) in pus.iter().zip(rects.iter()) {
@@ -2094,7 +2091,7 @@ impl<S: Sample> InterPicture<S> {
             }
         }
         self.code_residual_cu(
-            ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out,
+            ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, out,
         );
         out.kind = InterCuKind::Parts;
         for (pk, &(px, py, pw, ph)) in pus.iter().zip(rects.iter()) {
@@ -2111,7 +2108,6 @@ impl<S: Sample> InterPicture<S> {
         }
         PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 0);
         PicInfo::fill4(&mut self.info.skip, w4, x0, y0, n, n, 0);
-        out
     }
 
     /// The residual of one 2Nx2N CU, luma then every chroma TB this
@@ -2594,6 +2590,82 @@ impl<S: Sample> InterPicture<S> {
         out
     }
 
+    /// Make the inter prediction of `pick` over the `n`-square unit at
+    /// `(x0, y0)` in the reconstruction.
+    fn predict_cu(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refs: TreeRefs<'_, S>,
+        pick: &PuPick,
+        x0: usize,
+        y0: usize,
+        n: usize,
+    ) {
+        match refs {
+            TreeRefs::P(l0) => {
+                let r = pick.ref_idx[0] as usize;
+                let wp = self.wp_for(r);
+                predict_block(
+                    ctx.dsp,
+                    &mut self.scratch,
+                    &mut self.recon,
+                    x0,
+                    y0,
+                    n,
+                    n,
+                    Some((l0[r], pick.mv[0])),
+                    None,
+                    wp,
+                );
+            }
+            TreeRefs::B(r0, r1) => {
+                let a = (pick.ref_idx[0] >= 0).then_some((r0, pick.mv[0]));
+                let b = (pick.ref_idx[1] >= 0).then_some((r1, pick.mv[1]));
+                let wp = self.wp_b_for(pick.ref_idx);
+                predict_block(
+                    ctx.dsp,
+                    &mut self.scratch,
+                    &mut self.recon,
+                    x0,
+                    y0,
+                    n,
+                    n,
+                    a,
+                    b,
+                    wp,
+                );
+            }
+        }
+    }
+
+    /// A decision to decide into: one the walk discarded, or a new one.
+    fn fresh(&mut self, log2_cu: u32, ctx: &MeCtx<'_, S>) -> Box<InterCuDecision> {
+        let mut d = self.pool.pop().unwrap_or_default();
+        d.reset(log2_cu, ctx);
+        d
+    }
+
+    /// What a trial over the `n`-square region at `(x0, y0)` may write, as
+    /// it stands, in buffers an earlier trial has finished with.
+    fn take_save(&mut self, x0: usize, y0: usize, n: usize) -> TrialSave<S> {
+        let mut t = self.saves.pop().unwrap_or_else(TrialSave::empty);
+        t.fill(self, x0, y0, n);
+        t
+    }
+
+    /// Put back what [`Self::take_save`] copied, and keep its buffers.
+    fn restore(&mut self, t: TrialSave<S>, x0: usize, y0: usize, n: usize) {
+        t.put(self, x0, y0, n);
+        self.saves.push(t);
+    }
+
+    /// Keep a discarded decision for [`Self::fresh`].
+    fn recycle(&mut self, d: PCuDecision) {
+        if let PCuDecision::Inter(b) = d {
+            self.pool.push(b);
+        }
+    }
+
     /// One node of [`Self::code_ctu_tree`]: returns its cost, having
     /// pushed its winning units onto `out`.
     #[allow(clippy::too_many_arguments)]
@@ -2674,7 +2746,7 @@ impl<S: Sample> InterPicture<S> {
             return j_whole;
         }
         let n = 1usize << log2;
-        let saved = TrialSave::take(self, x0, y0, n);
+        let saved = self.take_save(x0, y0, n);
         let mark = out.len();
         let mut j_split = lam * f64::from(crate::encode::h265::split_flag_bits(init, qp, true));
         let half = n / 2;
@@ -2696,8 +2768,11 @@ impl<S: Sample> InterPicture<S> {
             );
         }
         if j_whole <= j_split {
-            saved.put(self, x0, y0, n);
-            out.truncate(mark);
+            self.restore(saved, x0, y0, n);
+            while out.len() > mark {
+                let cu = out.pop().expect("above the mark");
+                self.recycle(cu.d);
+            }
             out.push(TreeCu {
                 x0,
                 y0,
@@ -2708,6 +2783,8 @@ impl<S: Sample> InterPicture<S> {
             });
             j_whole
         } else {
+            self.recycle(d);
+            self.saves.push(saved);
             j_split
         }
     }
@@ -2758,7 +2835,7 @@ impl<S: Sample> InterPicture<S> {
             TreeRefs::P(l0) => (l0.len() as u32, false),
             TreeRefs::B(..) => (1, true),
         };
-        let saved = TrialSave::take(self, x0, y0, n);
+        let saved = self.take_save(x0, y0, n);
         // A cheap look first: the best intra mode's SATD cost against the
         // inter unit's search cost, both in the SATD domain.
         if let Some(g) = self.intra_satd_gate {
@@ -2783,7 +2860,7 @@ impl<S: Sample> InterPicture<S> {
                 src.y_stride,
             );
             if est > g * self.last_pick_cost {
-                saved.put(self, x0, y0, n);
+                self.restore(saved, x0, y0, n);
                 return (coded, ssd, bits);
             }
         }
@@ -2821,7 +2898,7 @@ impl<S: Sample> InterPicture<S> {
         // `PART_NxN`, four 4x4 luma blocks with a mode each; tried where
         // the 2Nx2N intra unit came within a quarter of the inter one.
         if log2 == MIN_CB_LOG2 && j_i < self.nxn_trial * j {
-            let mid = TrialSave::take(self, x0, y0, n);
+            let mid = self.take_save(x0, y0, n);
             let nxn = PCuDecision::Intra(Box::new(self.code_cu_intra_nxn(
                 ctx,
                 x0,
@@ -2838,14 +2915,16 @@ impl<S: Sample> InterPicture<S> {
             );
             let j_n = ssd_n as f64 + lam * f64::from(bits_n);
             if j_n < j_i.min(j) {
+                self.recycle(coded);
                 return (nxn, ssd_n, bits_n);
             }
-            mid.put(self, x0, y0, n);
+            self.restore(mid, x0, y0, n);
         }
         if j_i < j {
+            self.recycle(coded);
             return (intra, ssd_i, bits_i);
         }
-        saved.put(self, x0, y0, n);
+        self.restore(saved, x0, y0, n);
         (coded, ssd, bits)
     }
 
@@ -2903,19 +2982,13 @@ impl<S: Sample> InterPicture<S> {
             TreeRefs::B(..) => (1, true),
         };
         let n = 1usize << log2;
-        let saved = TrialSave::take(self, x0, y0, n);
-        let out = InterCuDecision {
-            log2_cu: log2,
-            bypass: ctx.bypass,
-            sign_hiding: ctx.sign_hiding,
-            qp_y: ctx.qp,
-            ..InterCuDecision::default()
-        };
+        let saved = self.take_save(x0, y0, n);
+        let mut alt = self.fresh(log2, ctx);
         self.no_residual = true;
-        let alt = self.code_whole(
+        self.code_whole(
             ctx,
             refs,
-            out,
+            &mut alt,
             pick,
             x0,
             y0,
@@ -2927,18 +3000,20 @@ impl<S: Sample> InterPicture<S> {
             src.c_stride,
         );
         self.no_residual = false;
-        if alt.kind != InterCuKind::UseIntra {
-            let alt = PCuDecision::Inter(Box::new(alt));
+        let alt = PCuDecision::Inter(alt);
+        if !matches!(&alt, PCuDecision::Inter(a) if a.kind == InterCuKind::UseIntra) {
             let ssd_a = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
             let bits_a = crate::encode::h265::p_cu_bits(
                 &alt, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
             );
             let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
             if (ssd_a as f64) + lam * f64::from(bits_a) < (ssd as f64) + lam * f64::from(bits) {
+                self.recycle(coded);
                 return (alt, ssd_a, bits_a);
             }
         }
-        saved.put(self, x0, y0, n);
+        self.recycle(alt);
+        self.restore(saved, x0, y0, n);
         (coded, ssd, bits)
     }
 
@@ -2953,9 +3028,10 @@ impl<S: Sample> InterPicture<S> {
         depth: u32,
         src: &Srcs<'_, S>,
     ) -> (PCuDecision, u64, f32) {
-        let (d, nref, is_b) = match refs {
-            TreeRefs::P(l0) => (
-                self.code_cu(
+        let mut d = self.fresh(log2, ctx);
+        let (nref, is_b) = match refs {
+            TreeRefs::P(l0) => {
+                self.code_cu_into(
                     ctx,
                     l0,
                     x0,
@@ -2967,12 +3043,12 @@ impl<S: Sample> InterPicture<S> {
                     src.cb,
                     src.cr,
                     src.c_stride,
-                ),
-                l0.len() as u32,
-                false,
-            ),
-            TreeRefs::B(r0, r1) => (
-                self.code_cu_b(
+                    &mut d,
+                );
+                (l0.len() as u32, false)
+            }
+            TreeRefs::B(r0, r1) => {
+                self.code_cu_b_into(
                     ctx,
                     r0,
                     r1,
@@ -2985,12 +3061,13 @@ impl<S: Sample> InterPicture<S> {
                     src.cb,
                     src.cr,
                     src.c_stride,
-                ),
-                1,
-                true,
-            ),
+                    &mut d,
+                );
+                (1, true)
+            }
         };
         let coded = if matches!(d.kind, InterCuKind::UseIntra) {
+            self.pool.push(d);
             PCuDecision::Intra(Box::new(self.code_cu_intra(
                 ctx,
                 x0,
@@ -3003,7 +3080,7 @@ impl<S: Sample> InterPicture<S> {
                 src.c_stride,
             )))
         } else {
-            PCuDecision::Inter(Box::new(d))
+            PCuDecision::Inter(d)
         };
         let n = 1usize << log2;
         let ssd = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
@@ -3023,19 +3100,13 @@ impl<S: Sample> InterPicture<S> {
                 (whole.cost, parts_cost)
             };
             if other <= mine * (1.0 + PARTS_RD_MARGIN) {
-                let saved = TrialSave::take(self, x0, y0, n);
-                let out = InterCuDecision {
-                    log2_cu: log2,
-                    bypass: ctx.bypass,
-                    sign_hiding: ctx.sign_hiding,
-                    qp_y: ctx.qp,
-                    ..InterCuDecision::default()
-                };
-                let alt = if chose_parts {
+                let saved = self.take_save(x0, y0, n);
+                let mut alt = self.fresh(log2, ctx);
+                if chose_parts {
                     self.code_whole(
                         ctx,
                         refs,
-                        out,
+                        &mut alt,
                         whole,
                         x0,
                         y0,
@@ -3050,7 +3121,7 @@ impl<S: Sample> InterPicture<S> {
                     self.code_parts(
                         ctx,
                         refs,
-                        out,
+                        &mut alt,
                         part,
                         pus,
                         x0,
@@ -3061,10 +3132,10 @@ impl<S: Sample> InterPicture<S> {
                         src.cb,
                         src.cr,
                         src.c_stride,
-                    )
-                };
-                if alt.kind != InterCuKind::UseIntra {
-                    let alt = PCuDecision::Inter(Box::new(alt));
+                    );
+                }
+                let alt = PCuDecision::Inter(alt);
+                if !matches!(&alt, PCuDecision::Inter(a) if a.kind == InterCuKind::UseIntra) {
                     let ssd_a = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
                     let bits_a = crate::encode::h265::p_cu_bits(
                         &alt, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
@@ -3073,17 +3144,19 @@ impl<S: Sample> InterPicture<S> {
                     if (ssd_a as f64) + lam * f64::from(bits_a)
                         < (ssd as f64) + lam * f64::from(bits)
                     {
+                        self.recycle(coded);
                         return (alt, ssd_a, bits_a);
                     }
                 }
-                saved.put(self, x0, y0, n);
+                self.recycle(alt);
+                self.restore(saved, x0, y0, n);
             }
         }
         // An intra unit at the minimum coding block has a second shape, as
         // in an I picture: code `PART_NxN` too and keep the cheaper, the
         // loser's state put back from a copy.
         if log2 == MIN_CB_LOG2 && matches!(coded, PCuDecision::Intra(_)) && self.nxn_trial > 0.0 {
-            let saved = TrialSave::take(self, x0, y0, n);
+            let saved = self.take_save(x0, y0, n);
             let nxn = PCuDecision::Intra(Box::new(self.code_cu_intra_nxn(
                 ctx,
                 x0,
@@ -3100,9 +3173,10 @@ impl<S: Sample> InterPicture<S> {
             );
             let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
             if ssd_n as f64 + lam * f64::from(bits_n) < ssd as f64 + lam * f64::from(bits) {
+                self.recycle(coded);
                 return (nxn, ssd_n, bits_n);
             }
-            saved.put(self, x0, y0, n);
+            self.restore(saved, x0, y0, n);
         }
         (coded, ssd, bits)
     }
@@ -3729,15 +3803,23 @@ struct TrialSave<S: Sample> {
 }
 
 impl<S: Sample> TrialSave<S> {
-    fn take(pic: &InterPicture<S>, x0: usize, y0: usize, n: usize) -> Self {
-        let w4 = pic.info.w4;
+    fn empty() -> Self {
         TrialSave {
-            planes: RegionSave::take(&pic.recon, pic.cat, x0, y0, n),
-            motion: save4(&pic.recon.motion, pic.recon.w4, x0, y0, n),
-            pred_mode: save4(&pic.info.pred_mode, w4, x0, y0, n),
-            skip: save4(&pic.info.skip, w4, x0, y0, n),
-            intra_mode: save4(&pic.info.intra_mode, w4, x0, y0, n),
+            planes: RegionSave::empty(),
+            motion: Vec::new(),
+            pred_mode: Vec::new(),
+            skip: Vec::new(),
+            intra_mode: Vec::new(),
         }
+    }
+
+    fn fill(&mut self, pic: &InterPicture<S>, x0: usize, y0: usize, n: usize) {
+        let w4 = pic.info.w4;
+        self.planes.take_into(&pic.recon, pic.cat, x0, y0, n);
+        save4_into(&pic.recon.motion, pic.recon.w4, x0, y0, n, &mut self.motion);
+        save4_into(&pic.info.pred_mode, w4, x0, y0, n, &mut self.pred_mode);
+        save4_into(&pic.info.skip, w4, x0, y0, n, &mut self.skip);
+        save4_into(&pic.info.intra_mode, w4, x0, y0, n, &mut self.intra_mode);
     }
 
     fn put(&self, pic: &mut InterPicture<S>, x0: usize, y0: usize, n: usize) {

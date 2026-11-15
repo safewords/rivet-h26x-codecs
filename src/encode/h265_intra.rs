@@ -939,6 +939,27 @@ impl<S: Sample> RegionSave<S> {
         }
     }
 
+    /// Nothing saved yet: buffers for [`RegionSave::take_into`].
+    pub(crate) fn empty() -> Self {
+        RegionSave {
+            y: Vec::new(),
+            cb: Vec::new(),
+            cr: Vec::new(),
+        }
+    }
+
+    /// [`RegionSave::take`] into the buffers this one already holds.
+    pub(crate) fn take_into(&mut self, f: &Frame<S>, cat: u32, x0: usize, y0: usize, n: usize) {
+        copy_out_into(&f.y, x0, y0, n, n, &mut self.y);
+        self.cb.clear();
+        self.cr.clear();
+        if cat != 0 {
+            let (sw, sh) = sub_wh(cat);
+            copy_out_into(&f.cb, x0 / sw, y0 / sh, n / sw, n / sh, &mut self.cb);
+            copy_out_into(&f.cr, x0 / sw, y0 / sh, n / sw, n / sh, &mut self.cr);
+        }
+    }
+
     /// Put the region back where [`RegionSave::take`] found it.
     pub(crate) fn put(&self, f: &mut Frame<S>, cat: u32, x0: usize, y0: usize, n: usize) {
         copy_in(&mut f.y, x0, y0, n, n, &self.y);
@@ -959,6 +980,21 @@ fn copy_out<S: Sample>(p: &Plane16<S>, x: usize, y: usize, w: usize, h: usize) -
     v
 }
 
+fn copy_out_into<S: Sample>(
+    p: &Plane16<S>,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    v: &mut Vec<S>,
+) {
+    v.clear();
+    for r in 0..h {
+        let o = p.offset(x as isize, (y + r) as isize);
+        v.extend_from_slice(&p.data[o..o + w]);
+    }
+}
+
 fn copy_in<S: Sample>(p: &mut Plane16<S>, x: usize, y: usize, w: usize, h: usize, v: &[S]) {
     for r in 0..h {
         let o = p.offset(x as isize, (y + r) as isize);
@@ -973,6 +1009,23 @@ pub(crate) fn save4<T: Copy>(grid: &[T], w4: usize, x0: usize, y0: usize, n: usi
     (0..k * k)
         .map(|i| grid[(by + i / k) * w4 + bx + i % k])
         .collect()
+}
+
+/// [`save4`] into `out`, reusing its buffer.
+pub(crate) fn save4_into<T: Copy>(
+    grid: &[T],
+    w4: usize,
+    x0: usize,
+    y0: usize,
+    n: usize,
+    out: &mut Vec<T>,
+) {
+    let (bx, by, k) = (x0 >> 2, y0 >> 2, n >> 2);
+    out.clear();
+    for r in 0..k {
+        let o = (by + r) * w4 + bx;
+        out.extend_from_slice(&grid[o..o + k]);
+    }
 }
 
 /// Put back what [`save4`] copied out.
