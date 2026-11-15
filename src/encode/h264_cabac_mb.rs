@@ -147,14 +147,15 @@ fn write_p16_body(
     bit_depth: u32,
     field: bool,
     ref_idx_zeros: bool,
+    num_ref: u32,
 ) {
     debug_assert!(
         !matches!(d.kind, InterMbKind::PSkip | InterMbKind::UseIntra),
         "only a coded P macroblock carries this syntax"
     );
-    debug_assert_eq!(
-        d.ref_idx, 0,
-        "more than one reference needs ref_idx writing"
+    debug_assert!(
+        num_ref > 1 || d.refs == [0; 4],
+        "one active reference has no other index"
     );
     write_mb_type_p_cabac(e, st, d.kind.p_mb_type());
     let lnb = left.map(|m| &m.nb);
@@ -180,6 +181,64 @@ fn write_p16_body(
         };
         for _ in 0..parts {
             write_ref_idx_16x16_cabac(e, st, None, None, 0);
+        }
+    } else if num_ref > 1 {
+        // Several active references: each partition's index, its first
+        // bin's context counting the left and upper neighbouring
+        // partitions that predict from an index above 0 (9.3.3.1.1.6) —
+        // inside this macroblock the partitions already written, outside
+        // the neighbours' blocks as written.
+        let cond = |bx: i32, by: i32| -> u32 {
+            if bx < 0 || by < 0 {
+                let m = if bx < 0 { left } else { above };
+                let blk = if bx < 0 {
+                    (by * 4 + 3) as usize
+                } else {
+                    (12 + bx) as usize
+                };
+                return m.map_or(0, |m| {
+                    (!m.nb.skip && !m.nb.intra && m.nb.ref_idx[blk] > 0) as u32
+                });
+            }
+            (d.refs[((by / 2) * 2 + bx / 2) as usize] > 0) as u32
+        };
+        let mut write = |bx: i32, by: i32, v: i8| {
+            let inc = cond(bx - 1, by) + 2 * cond(bx, by - 1);
+            // ctxIdxOffset 54 (Table 9-34): bin 0 at 54 + inc, bin 1 at
+            // 58, the rest at 59.
+            for k in 0..v {
+                let c = 54
+                    + if k == 0 {
+                        inc as usize
+                    } else if k == 1 {
+                        4
+                    } else {
+                        5
+                    };
+                e.encode_decision(&mut st.ctx[c], 1);
+            }
+            let c = 54
+                + if v == 0 {
+                    inc as usize
+                } else if v == 1 {
+                    4
+                } else {
+                    5
+                };
+            e.encode_decision(&mut st.ctx[c], 0);
+        };
+        if d.kind == InterMbKind::P8x8 {
+            for part in 0..4 {
+                write(
+                    ((part & 1) * 2) as i32,
+                    ((part >> 1) * 2) as i32,
+                    d.refs[part],
+                );
+            }
+        } else {
+            for &(x, y, _, _) in d.kind.parts() {
+                write((x / 4) as i32, (y / 4) as i32, d.refs[part_index_of(x, y)]);
+            }
         }
     }
     // Then one mvd per
@@ -372,6 +431,7 @@ fn p_mb_cabac(
     cfi: u32,
     t8x8: bool,
     g: &Geometry,
+    num_ref: u32,
 ) -> Coded {
     let lnb = left.map(|m| &m.nb);
     let anb = above.map(|m| &m.nb);
@@ -402,9 +462,16 @@ fn p_mb_cabac(
                 g.bit_depth,
                 g.field_pic,
                 false,
+                num_ref,
             );
+            let mut nb = WrittenMb::from_inter_decision(dec, cfi == 3);
+            // Each block's own partition index, for the next macroblocks'
+            // ref_idx contexts.
+            for (blk, r) in nb.ref_idx.iter_mut().enumerate() {
+                *r = dec.refs[(blk / 8) * 2 + (blk % 4) / 2];
+            }
             Coded {
-                nb: WrittenMb::from_inter_decision(dec, cfi == 3),
+                nb,
                 not_nxn: true,
                 chroma_nonzero: false,
             }
@@ -570,8 +637,10 @@ pub fn write_p_picture_cabac<S: Sample>(
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
     refp: &[Recon<S>],
+    more: &[&[Recon<S>]],
     weights: Option<&crate::h264::slice::PredWeightTable>,
 ) -> PicMotion {
+    let num_ref = 1 + more.len() as u32;
     let mbw = g.mbs_wide as usize;
     let total = mbw * g.mbs_high as usize;
     let cfi = cfi_of(g.chroma);
@@ -588,6 +657,7 @@ pub fn write_p_picture_cabac<S: Sample>(
         planes,
         rec,
         refp,
+        more,
         weights,
         Some(&live),
         |mb_x, mb_y, mb, trial| {
@@ -597,10 +667,10 @@ pub fn write_p_picture_cabac<S: Sample>(
             if trial {
                 let mut ce = CabacEncoder::estimating();
                 let mut st2 = st.clone();
-                let _ = p_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g);
+                let _ = p_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g, num_ref);
                 return ce.fractional_bits();
             }
-            let entry = p_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g);
+            let entry = p_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g, num_ref);
             live.borrow_mut().copy_from_slice(&st.ctx);
             coded.push(entry);
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
@@ -879,7 +949,7 @@ fn write_mbaff_mb(
             }
         }
         PairMb::P(d) => {
-            write_p16_body(e, st, d, l, a, p.cfi, p.t8x8, p.bit_depth, field, field);
+            write_p16_body(e, st, d, l, a, p.cfi, p.t8x8, p.bit_depth, field, field, 1);
             Coded {
                 nb: WrittenMb::from_inter_decision(d, p.cfi == 3),
                 not_nxn: true,

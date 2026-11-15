@@ -78,6 +78,8 @@ pub(crate) struct AnalysisCfg {
     /// Decide by coding candidates and pricing them (`SSD + lambda * R`);
     /// false decides on the estimates alone and codes only the winner.
     pub(crate) rd: bool,
+    /// Active list-0 references of a P picture, at most.
+    pub(crate) refs: usize,
 }
 
 impl AnalysisCfg {
@@ -103,6 +105,9 @@ impl AnalysisCfg {
             }
             if f.len() > 10 {
                 self.early_skip = f[10] != 0.0;
+            }
+            if f.len() > 11 {
+                self.refs = f[11] as usize;
             }
         }
         self
@@ -136,6 +141,7 @@ impl AnalysisCfg {
         bidir_refine: false,
         trellis: true,
         rd: true,
+        refs: 3,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, one
@@ -169,6 +175,7 @@ impl AnalysisCfg {
         bidir_refine: false,
         trellis: true,
         rd: true,
+        refs: 1,
     };
 
     /// The most thorough tier: the multi-hexagon search, more refinement,
@@ -200,6 +207,7 @@ impl AnalysisCfg {
         bidir_refine: false,
         trellis: true,
         rd: true,
+        refs: 4,
     };
 
     /// The tier for a preset.
@@ -241,6 +249,8 @@ pub(crate) fn lambda_satd(qp: i32) -> f32 {
 pub(crate) struct PicAn<'a, S: Sample> {
     pub(crate) cfg: AnalysisCfg,
     pub(crate) me: [Option<MeRef<'a, S>>; 2],
+    /// A P picture's further list-0 references, by index from 1.
+    pub(crate) me_more: Vec<MeRef<'a, S>>,
     costs: Vec<Option<MvCostTable>>,
     /// The trellis's context states and multiplier, when it runs.
     trellis: Option<Trellis>,
@@ -251,6 +261,7 @@ impl<'a, S: Sample> PicAn<'a, S> {
         PicAn {
             cfg,
             me,
+            me_more: Vec::new(),
             costs: (0..52).map(|_| None).collect(),
             trellis: None,
         }
@@ -1010,6 +1021,8 @@ struct PCand {
     sub_shape: [SubMbShape; 4],
     mvs: [Mv; 16],
     mvds: [Mv; 16],
+    /// List-0 reference index per 8x8.
+    refs: [i8; 4],
     est: f32,
 }
 
@@ -1048,6 +1061,7 @@ pub(crate) fn p_mb<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut [Recon<S>],
     pref: &PRef<S>,
+    more: &[&[Recon<S>]],
     mb_x: usize,
     mb_y: usize,
     src: &SrcMb<S>,
@@ -1070,6 +1084,26 @@ pub(crate) fn p_mb<S: Sample>(
         ..InterDecision::default()
     };
     let sy = &src.y[py * src.ys + px..];
+    let predict_r =
+        |rec: &mut [Recon<S>], x: usize, y: usize, w: usize, h: usize, mv: Mv, r: i8| {
+            let pl = if r == 0 {
+                pref.planes
+            } else {
+                more[r as usize - 1]
+            };
+            predict_inter_rect(
+                ctx,
+                rec,
+                [pl, pl],
+                px + x,
+                py + y,
+                w,
+                h,
+                [true, false],
+                [mv, Mv::ZERO],
+                pref.weighting,
+            );
+        };
     let predict = |rec: &mut [Recon<S>], x: usize, y: usize, w: usize, h: usize, mv: Mv| {
         predict_inter_rect(
             ctx,
@@ -1139,31 +1173,65 @@ pub(crate) fn p_mb<S: Sample>(
             nc += 1;
         }
     }
-    let run = |x: usize, y: usize, w: usize, h: usize, pred: Mv, cands: &[Mv], mc: &MeCfg| {
-        let s = Search {
-            dist: ctx.dist,
-            r: me,
-            src: &sy[y * src.ys + x..],
-            src_stride: src.ys,
-            x: (px + x) as i32,
-            y: (py + y) as i32,
-            w,
-            h,
-            pred,
-            cost: costs,
-            bounds: search_bounds(pref.search, (px + x) as i32, (py + y) as i32, w, h, vr),
+    let nref = 1 + more.len();
+    let run_r =
+        |r: usize, x: usize, y: usize, w: usize, h: usize, pred: Mv, cands: &[Mv], mc: &MeCfg| {
+            let s = Search {
+                dist: ctx.dist,
+                r: if r == 0 { me } else { &an.me_more[r - 1] },
+                src: &sy[y * src.ys + x..],
+                src_stride: src.ys,
+                x: (px + x) as i32,
+                y: (py + y) as i32,
+                w,
+                h,
+                pred,
+                cost: costs,
+                bounds: search_bounds(pref.search, (px + x) as i32, (py + y) as i32, w, h, vr),
+            };
+            s.run(cands, mc)
         };
-        s.run(cands, mc)
+    // 16x16 against every active reference, each at its own predictor and
+    // charged its index (te(v): one bit over two entries, else ue(v)).
+    let ref_bits = |r: usize| -> f32 {
+        if nref == 1 {
+            0.0
+        } else if nref == 2 {
+            1.0
+        } else {
+            (2 * (32 - (r as u32 + 1).leading_zeros()) - 1) as f32
+        }
     };
-    let (mv16, _, c16) = run(0, 0, 16, 16, pmv, &cands[..nc], &cfg.me);
+    let (mut mv16, mut c16, mut pmv16, mut r16) = (Mv::ZERO, u32::MAX, pmv, 0usize);
+    for r in 0..nref {
+        let p = if r == 0 {
+            pmv
+        } else {
+            st.predict(0, r as i8, 0, 0, 16, 16)
+        };
+        if r > 0 && nc < cands.len() {
+            cands[nc] = p;
+        }
+        let k = if r > 0 { (nc + 1).min(cands.len()) } else { nc };
+        let (m, _, c) = run_r(r, 0, 0, 16, 16, p, &cands[..k], &cfg.me);
+        let c = c + (lam1 * ref_bits(r)) as u32;
+        if c < c16 {
+            (mv16, c16, pmv16, r16) = (m, c, p, r);
+        }
+    }
+    let run = |x: usize, y: usize, w: usize, h: usize, pred: Mv, cands: &[Mv], mc: &MeCfg| {
+        run_r(r16, x, y, w, h, pred, cands, mc)
+    };
+    let rr = r16 as i8;
     let mut c16v = PCand {
         kind: InterMbKind::P16x16,
         sub_shape: [SubMbShape::S8x8; 4],
         mvs: [mv16; 16],
-        mvds: [sub(mv16, pmv); 16],
+        mvds: [sub(mv16, pmv16); 16],
+        refs: [rr; 4],
         est: c16 as f32 + lam1,
     };
-    c16v.fill((0, 0, 16, 16), mv16, sub(mv16, pmv));
+    c16v.fill((0, 0, 16, 16), mv16, sub(mv16, pmv16));
     let mut shapes: [Option<PCand>; 4] = [Some(c16v), None, None, None];
     if ctx.subparts {
         // 8x8 first; the two-partition shapes only when it beat 16x16.
@@ -1175,11 +1243,11 @@ pub(crate) fn p_mb<S: Sample>(
         };
         for part in 0..4 {
             let (x, y) = ((part & 1) * 8, (part >> 1) * 8);
-            let p = st.predict(0, 0, x, y, 8, 8);
+            let p = st.predict(0, rr, x, y, 8, 8);
             let (mv, _, c) = run(x, y, 8, 8, p, &[mv16, p, Mv::ZERO], &cfg.me_sub);
             t.est += c as f32;
             t.fill((x, y, 8, 8), mv, sub(mv, p));
-            st.commit_part(x, y, 8, 8, [Some(mv), None]);
+            st.commit_part_ref(x, y, 8, 8, mv, rr);
         }
         let c8 = t.est;
         shapes[3] = Some(t);
@@ -1192,13 +1260,13 @@ pub(crate) fn p_mb<S: Sample>(
                     ..c16v
                 };
                 for &(x, y, w, h) in kind.parts() {
-                    let p = st.predict(0, 0, x, y, w, h);
+                    let p = st.predict(0, rr, x, y, w, h);
                     let m8a = t.mvs[(y / 4) * 4 + x / 4];
                     let m8b = t.mvs[((y + h) / 4 - 1) * 4 + (x + w) / 4 - 1];
                     let (mv, _, cc) = run(x, y, w, h, p, &[m8a, m8b, mv16, p], &cfg.me_sub);
                     c.est += cc as f32;
                     c.fill((x, y, w, h), mv, sub(mv, p));
-                    st.commit_part(x, y, w, h, [Some(mv), None]);
+                    st.commit_part_ref(x, y, w, h, mv, rr);
                 }
                 shapes[i] = Some(c);
             }
@@ -1249,8 +1317,9 @@ pub(crate) fn p_mb<S: Sample>(
         let n = best.rects(&mut rects);
         for &(x, y, w, h) in rects.iter().take(n) {
             let mv = best.mvs[(y / 4) * 4 + x / 4];
-            st.commit_part(x, y, w, h, [Some(mv), None]);
-            predict(rec, x, y, w, h, mv);
+            let r = best.refs[crate::h264::cavlc::part_index_of(x, y)];
+            st.commit_part_ref(x, y, w, h, mv, r);
+            predict_r(rec, x, y, w, h, mv, r);
         }
         let allow8 = ctx.t8x8
             && (best.kind != InterMbKind::P8x8 || best.sub_shape.iter().all(|s| s.count() == 1));
@@ -1267,7 +1336,11 @@ pub(crate) fn p_mb<S: Sample>(
             Some(allow8),
         );
         let residual = r.cbp_luma != 0 || r.cbp_chroma != 0;
-        let kind = if best.kind == InterMbKind::P16x16 && !residual && best.mvs[0] == skip_mv {
+        let kind = if best.kind == InterMbKind::P16x16
+            && !residual
+            && best.mvs[0] == skip_mv
+            && best.refs[0] == 0
+        {
             InterMbKind::PSkip
         } else {
             best.kind
@@ -1278,6 +1351,7 @@ pub(crate) fn p_mb<S: Sample>(
             mvd: best.mvds,
             sub_shape: best.sub_shape,
             ref_idx: 0,
+            refs: best.refs,
             cbp_luma: r.cbp_luma,
             cbp_chroma: r.cbp_chroma,
             qp_delta: delta(ctx.qp, qp_pred, residual),
@@ -1313,8 +1387,9 @@ pub(crate) fn p_mb<S: Sample>(
         let n = cand.rects(&mut rects);
         for &(x, y, w, h) in rects.iter().take(n) {
             let mv = cand.mvs[(y / 4) * 4 + x / 4];
-            st.commit_part(x, y, w, h, [Some(mv), None]);
-            predict(rec, x, y, w, h, mv);
+            let r = cand.refs[crate::h264::cavlc::part_index_of(x, y)];
+            st.commit_part_ref(x, y, w, h, mv, r);
+            predict_r(rec, x, y, w, h, mv, r);
         }
         let allow8 = ctx.t8x8
             && (cand.kind != InterMbKind::P8x8 || cand.sub_shape.iter().all(|s| s.count() == 1));
@@ -1361,7 +1436,11 @@ pub(crate) fn p_mb<S: Sample>(
                 continue; // the same macroblock as the 4x4 one
             }
             let residual = r.cbp_luma != 0 || r.cbp_chroma != 0;
-            if cand.kind == InterMbKind::P16x16 && !residual && cand.mvs[0] == skip_mv {
+            if cand.kind == InterMbKind::P16x16
+                && !residual
+                && cand.mvs[0] == skip_mv
+                && cand.refs[0] == 0
+            {
                 continue; // skip, at a higher price
             }
             let dec = InterDecision {
@@ -1370,6 +1449,7 @@ pub(crate) fn p_mb<S: Sample>(
                 mvd: cand.mvds,
                 sub_shape: cand.sub_shape,
                 ref_idx: 0,
+                refs: cand.refs,
                 cbp_luma: r.cbp_luma,
                 cbp_chroma: r.cbp_chroma,
                 qp_delta: delta(ctx.qp, qp_pred, residual),
@@ -1457,7 +1537,11 @@ pub(crate) fn p_mb<S: Sample>(
         dec.chroma_ac = r.chroma_ac;
         dec.nz_chroma = r.nz_chroma;
         dec.qp_delta = delta(ctx.qp, qp_pred, residual);
-        if dec.kind == InterMbKind::P16x16 && !residual && st.motion()[0][0].mv == skip_mv {
+        if dec.kind == InterMbKind::P16x16
+            && !residual
+            && st.motion()[0][0].mv == skip_mv
+            && dec.refs[0] == 0
+        {
             // Nothing left to say: the macroblock is P_Skip.
             dec.kind = InterMbKind::PSkip;
         }

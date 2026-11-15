@@ -893,6 +893,7 @@ pub(crate) fn code_p_picture<S: Sample>(
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
     refp: &[Recon<S>],
+    more: &[&[Recon<S>]],
     weights: Option<&PredWeightTable>,
     live: Option<&std::cell::RefCell<[u8; 1024]>>,
     mut emit: impl FnMut(usize, usize, PMb<'_>, bool) -> f64,
@@ -935,9 +936,14 @@ pub(crate) fn code_p_picture<S: Sample>(
     let mut chain = QpChain::new(ctx.qp, g.bit_depth);
     let analysis = tools.analysis.filter(|_| !g.field_pic);
     let hpel = analysis.map(|_| build_hpel(pref.search, ctx.max));
+    let hpel_more: Vec<_> = if analysis.is_some() {
+        more.iter().map(|r| build_hpel(&r[0], ctx.max)).collect()
+    } else {
+        Vec::new()
+    };
     let mut an = analysis.map(|cfg| {
         let h = hpel.as_ref().expect("built with the analysis");
-        PicAn::new(
+        let mut a = PicAn::new(
             cfg,
             [
                 Some(MeRef {
@@ -949,7 +955,15 @@ pub(crate) fn code_p_picture<S: Sample>(
         .with_trellis(
             tools.trellis_states(crate::h264::SliceType::P, qp, g.field_pic),
             g.bit_depth,
-        )
+        );
+        a.me_more = more
+            .iter()
+            .zip(&hpel_more)
+            .map(|(r, h)| MeRef {
+                p: [&r[0], &h.h, &h.v, &h.c],
+            })
+            .collect();
+        a
     });
     let srcmb = SrcMb {
         y: src_y,
@@ -993,6 +1007,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                     ctx,
                     rec,
                     &pref,
+                    more,
                     mb_x,
                     mb_y,
                     &srcmb,

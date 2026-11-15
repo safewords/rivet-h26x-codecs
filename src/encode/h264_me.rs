@@ -137,6 +137,10 @@ pub struct InterDecision {
     /// exactly one reference picture. The field exists so the serialiser's
     /// contract does not change when more arrive.
     pub ref_idx: i8,
+    /// The list-0 reference index of each 8x8 partition (the 16x16 and
+    /// two-partition shapes repeat theirs over the 8x8s they cover), for
+    /// a slice with more than one active reference; all zero otherwise.
+    pub refs: [i8; 4],
     /// `CodedBlockPatternLuma`: one bit per 8x8, set when any of its 4x4
     /// blocks has a nonzero level.
     pub cbp_luma: u8,
@@ -215,6 +219,7 @@ impl Default for InterDecision {
             mvd: [Mv::ZERO; 16],
             sub_shape: [SubMbShape::S8x8; 4],
             ref_idx: 0,
+            refs: [0; 4],
             cbp_luma: 0,
             cbp_chroma: 0,
             qp_delta: 0,
@@ -396,6 +401,26 @@ impl MbMotionState {
             };
             fill_motion(&mut self.cur, list, x, y, w, h, m);
         }
+        for by in y / 4..(y + h) / 4 {
+            for bx in x / 4..(x + w) / 4 {
+                self.done |= 1 << (by * 4 + bx);
+            }
+        }
+    }
+
+    /// [`MbMotionState::commit_part`] for a list-0 prediction from
+    /// reference index `ref_idx` of a P slice with several active
+    /// references: the index is stored, and the picture identity the loop
+    /// filter compares (`ref_id`) is one per index.
+    pub fn commit_part_ref(&mut self, x: usize, y: usize, w: usize, h: usize, mv: Mv, ref_idx: i8) {
+        let m = BlockMotion {
+            mv,
+            ref_idx,
+            ref_parity: PARITY_FRAME,
+            ref_id: 1 + 2 * ref_idx as u16,
+        };
+        fill_motion(&mut self.cur, 0, x, y, w, h, m);
+        fill_motion(&mut self.cur, 1, x, y, w, h, BlockMotion::default());
         for by in y / 4..(y + h) / 4 {
             for bx in x / 4..(x + w) / 4 {
                 self.done |= 1 << (by * 4 + bx);

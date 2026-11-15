@@ -325,14 +325,15 @@ fn write_p16_macroblock(
     top: bool,
     t8x8_mode: bool,
     ref_idx_zeros: bool,
+    num_ref: u32,
 ) {
     debug_assert!(
         !matches!(dec.kind, InterMbKind::PSkip | InterMbKind::UseIntra),
         "only a coded P macroblock carries this syntax"
     );
-    debug_assert_eq!(
-        dec.ref_idx, 0,
-        "more than one reference needs te(v) ref_idx writing"
+    debug_assert!(
+        num_ref > 1 || dec.refs == [0; 4],
+        "one active reference has no other index"
     );
     w.ue(dec.kind.p_mb_type()); // Table 7-13
     // `P_8x8` first spells its four `sub_mb_type`s (Table 7-17), all of
@@ -356,6 +357,18 @@ fn write_p16_macroblock(
         };
         for _ in 0..parts {
             w.te(0, 1);
+        }
+    } else if num_ref > 1 {
+        // Several active references: each partition's index, te(v) over
+        // `num_ref` entries (7.3.5.1, 9.1.2).
+        if dec.kind == InterMbKind::P8x8 {
+            for part in 0..4 {
+                w.te(dec.refs[part] as u32, num_ref - 1);
+            }
+        } else {
+            for &(x, y, _, _) in dec.kind.parts() {
+                w.te(dec.refs[part_index_of(x, y)] as u32, num_ref - 1);
+            }
         }
     }
     //
@@ -718,8 +731,10 @@ pub fn write_p_picture<S: Sample>(
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
     refp: &[Recon<S>],
+    more: &[&[Recon<S>]],
     weights: Option<&crate::h264::slice::PredWeightTable>,
 ) -> PicMotion {
+    let num_ref = 1 + more.len() as u32;
     let mbs_wide = g.mbs_wide as usize;
     let rows = if g.chroma == crate::picture::ChromaFormat::Yuv444 {
         0
@@ -745,6 +760,7 @@ pub fn write_p_picture<S: Sample>(
         planes,
         rec,
         refp,
+        more,
         weights,
         None,
         |mb_x, mb_y, mb, trial| {
@@ -766,6 +782,7 @@ pub fn write_p_picture<S: Sample>(
                             mb_y > 0,
                             t8x8,
                             false,
+                            num_ref,
                         );
                         (w2.position() + run_bits) as f64
                     }
@@ -792,7 +809,17 @@ pub fn write_p_picture<S: Sample>(
                 PMb::Coded(dec) => {
                     w.ue(skip_run);
                     skip_run = 0;
-                    write_p16_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+                    write_p16_macroblock(
+                        w,
+                        dec,
+                        &mut st,
+                        mb_x,
+                        mb_x > 0,
+                        mb_y > 0,
+                        t8x8,
+                        false,
+                        num_ref,
+                    );
                 }
                 PMb::Intra(idec) => {
                     w.ue(skip_run);
@@ -1155,7 +1182,9 @@ fn write_pair_cavlc(
             PairMb::Intra(d) => write_macroblock(w, d, &mut st, 0, left, above, 0, t8x8),
             PairMb::PIntra(d) => write_macroblock(w, d, &mut st, 0, left, above, 5, t8x8),
             PairMb::BIntra(d) => write_macroblock(w, d, &mut st, 0, left, above, 23, t8x8),
-            PairMb::P(d) => write_p16_macroblock(w, d, &mut st, 0, left, above, t8x8, pair.field),
+            PairMb::P(d) => {
+                write_p16_macroblock(w, d, &mut st, 0, left, above, t8x8, pair.field, 1)
+            }
             PairMb::B(d) => write_b_macroblock(w, d, &mut st, 0, left, above, t8x8, pair.field),
         }
         local[b] = Some(MbCounts::of_mb(mb));
@@ -1355,7 +1384,7 @@ mod tests {
 
             let mut st = NzState::new(1, 2, false);
             let mut w = BitWriter::new();
-            write_p16_macroblock(&mut w, &dec, &mut st, 0, false, false, false, false);
+            write_p16_macroblock(&mut w, &dec, &mut st, 0, false, false, false, false, 1);
             w.rbsp_trailing_bits();
             let rbsp = w.into_rbsp();
 
@@ -2265,7 +2294,7 @@ mod tests {
 
             let mut st = NzState::new(1, 2, false);
             let mut w = BitWriter::new();
-            write_p16_macroblock(&mut w, &dec, &mut st, 0, false, false, true, false);
+            write_p16_macroblock(&mut w, &dec, &mut st, 0, false, false, true, false, 1);
             w.rbsp_trailing_bits();
             let rbsp = w.into_rbsp();
 

@@ -1759,6 +1759,27 @@ impl<S: Sample> Core<S> {
             }
             _ => None,
         };
+        // A P picture's further references, in list 0's order after index
+        // 0: the decoder's default order (descending PicNum: most recently
+        // decoded first) without the picture the modification moved to the
+        // front. Not under a weighted table, whose entries are one per
+        // reference.
+        let more: Vec<usize> = match (c.kind, past) {
+            (Kind::P, Some(p)) if transform_p && wp.is_none() => {
+                let n = self
+                    .tools
+                    .analysis
+                    .map_or(1, |a| a.refs)
+                    .min(self.refs.len());
+                (0..self.refs.len())
+                    .rev()
+                    .filter(|&i| i != p)
+                    .take(n.saturating_sub(1))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let l0_active = 1 + more.len() as u32;
         let mut w = BitWriter::with_capacity(self.frame_bytes + 256);
         syn::write_slice_header(
             &syn::SliceHeader {
@@ -1785,6 +1806,7 @@ impl<S: Sample> Core<S> {
                 bottom_field: None,
                 delta_poc_bottom: 0,
                 l0_mod,
+                l0_active,
             },
             self.pps_qp,
             &mut w,
@@ -1875,6 +1897,8 @@ impl<S: Sample> Core<S> {
             // free, the intra decision where inter loses. One decision
             // walk, two spellings (`encode::h264_pic`).
             let p0 = past.expect("checked above");
+            let more_planes: Vec<&[syn::Recon<S>]> =
+                more.iter().map(|&i| &self.refs[i].1[..]).collect();
             if cabac {
                 motion = super::h264_cabac_mb::write_p_picture_cabac(
                     &mut w,
@@ -1884,6 +1908,7 @@ impl<S: Sample> Core<S> {
                     &planes,
                     &mut recon,
                     &self.refs[p0].1,
+                    &more_planes,
                     wp.as_ref().map(|p| &p.table),
                 );
             } else {
@@ -1895,6 +1920,7 @@ impl<S: Sample> Core<S> {
                     &planes,
                     &mut recon,
                     &self.refs[p0].1,
+                    &more_planes,
                     wp.as_ref().map(|p| &p.table),
                 );
                 w.rbsp_trailing_bits();
@@ -2112,6 +2138,7 @@ impl<S: Sample> Core<S> {
                 bottom_field: Some(parity == 1),
                 delta_poc_bottom: 0,
                 l0_mod: None,
+                l0_active: 1,
             };
             // The header as the decoder reads it: written alone, closed, and
             // parsed by the production slice header parser.
@@ -2248,6 +2275,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             &r.planes,
+                            &[],
                             None,
                         )
                     } else {
@@ -2259,6 +2287,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             &r.planes,
+                            &[],
                             None,
                         );
                         w.rbsp_trailing_bits();
@@ -2453,6 +2482,7 @@ impl<S: Sample> Core<S> {
             bottom_field: None,
             delta_poc_bottom: delta,
             l0_mod: None,
+            l0_active: 1,
         };
         let hdr = f.read_back(&header, self.pps_qp, nal_type, nal_ref_idc)?;
         if hdr.is_idr() || model.dpb.pics.is_empty() {
@@ -2628,6 +2658,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             &r.frame,
+                            &[],
                             None,
                         )
                     } else {
@@ -2639,6 +2670,7 @@ impl<S: Sample> Core<S> {
                             &planes,
                             &mut recon,
                             &r.frame,
+                            &[],
                             None,
                         );
                         w.rbsp_trailing_bits();
