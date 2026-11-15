@@ -91,6 +91,7 @@ pub mod h264_pic;
 pub mod h264_syntax;
 pub(crate) mod h264_trellis;
 pub mod h265;
+pub(crate) mod h265_cutree;
 pub mod h265_deblock;
 pub mod h265_intra;
 pub mod h265_me;

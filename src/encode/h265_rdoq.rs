@@ -236,7 +236,6 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     let n = 1usize << b.log2;
     let log2_sb = b.log2 - 2;
     let sb_w = 1usize << log2_sb;
-    let n_sb = sb_w * sb_w;
     let scale = i64::from(crate::dsp::hevc_enc::quant_scale((b.qp % 6) as usize));
     let qbits = crate::dsp::hevc_enc::qbits(b.qp, b.log2, b.bit_depth);
     let step = 1i64 << qbits;
@@ -251,24 +250,21 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     let scan = b.scan_idx as usize;
     let half = step >> 1;
     let mut last = None;
-    for sb in 0..n_sb {
-        let (xs, ys) = scan_pos(b.scan_idx, log2_sb, sb);
-        for p in 0..16 {
-            let (xp, yp) = tabs.pos[scan][p];
-            let idx = ((ys << 2) + yp as usize) * n + (xs << 2) + xp as usize;
-            let scaled = i64::from(coeffs[idx].unsigned_abs()) * scale;
-            let k = sb * 16 + p;
-            pos[k] = Pos {
-                idx,
-                scaled,
-                zero: 0.0,
-                ..Pos::default()
-            };
-            if scaled >= half {
-                last = Some(k);
-            }
+    let raster = raster_of(b.scan_idx, b.log2);
+    for (k, &r) in raster.iter().enumerate() {
+        let idx = r as usize;
+        let scaled = i64::from(coeffs[idx].unsigned_abs()) * scale;
+        pos[k] = Pos {
+            idx,
+            scaled,
+            zero: 0.0,
+            ..Pos::default()
+        };
+        if scaled >= half {
+            last = Some(k);
         }
     }
+    let _ = (tabs, scan);
     levels[..n * n].fill(0);
     let Some(last) = last else {
         return 0;
@@ -450,6 +446,37 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     nz
 }
 
+/// The raster index of every scan position of a block, sub-block by
+/// sub-block (`[scan_idx][log2 - 2]`), built once.
+fn raster_of(scan_idx: u32, log2: u32) -> &'static [u16] {
+    static T: std::sync::OnceLock<Vec<Vec<Vec<u16>>>> = std::sync::OnceLock::new();
+    let t = T.get_or_init(|| {
+        let tabs = sub_block_tables();
+        (0..3u32)
+            .map(|scan| {
+                (2..=5u32)
+                    .map(|log2| {
+                        let n = 1usize << log2;
+                        let log2_sb = log2 - 2;
+                        let mut v = vec![0u16; n * n];
+                        for sb in 0..1usize << (2 * log2_sb) {
+                            let (xs, ys) = scan_pos(scan, log2_sb, sb);
+                            for p in 0..16 {
+                                let (xp, yp) = tabs.pos[scan as usize][p];
+                                v[sb * 16 + p] =
+                                    (((ys << 2) + yp as usize) * n + (xs << 2) + xp as usize)
+                                        as u16;
+                            }
+                        }
+                        v
+                    })
+                    .collect()
+            })
+            .collect()
+    });
+    &t[scan_idx as usize][(log2 - 2) as usize]
+}
+
 #[inline]
 fn cx_state(cx: &Contexts, i: usize) -> u8 {
     cx.c[i]
@@ -461,36 +488,31 @@ fn cx_state(cx: &Contexts, i: usize) -> u8 {
 /// the move that adds least distortion. Returns the nonzero count.
 pub(crate) fn hide_signs(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u32 {
     let n = 1usize << b.log2;
+    let nz = levels[..n * n].iter().filter(|&&v| v != 0).count() as u32;
+    // A sub-block hides a sign only with two significant coefficients at
+    // least four scan positions apart.
+    if nz < 2 {
+        return nz;
+    }
     let log2_sb = b.log2 - 2;
     let n_sb = 1usize << (2 * log2_sb);
     let scale = i64::from(crate::dsp::hevc_enc::quant_scale((b.qp % 6) as usize));
     let qbits = crate::dsp::hevc_enc::qbits(b.qp, b.log2, b.bit_depth);
     let step = 1i64 << qbits;
-    let tabs = sub_block_tables();
-    let scan = b.scan_idx as usize;
-    let idx_of = |sb: usize, p: usize| -> usize {
-        let (xs, ys) = scan_pos(b.scan_idx, log2_sb, sb);
-        let (xp, yp) = tabs.pos[scan][p];
-        ((ys << 2) + yp as usize) * n + (xs << 2) + xp as usize
-    };
+    let idx = raster_of(b.scan_idx, b.log2);
+    let at = |k: usize| idx[k] as usize;
     // The block's last significant position, which no move may empty.
-    let mut last_k = None;
-    for sb in 0..n_sb {
-        for p in 0..16 {
-            if levels[idx_of(sb, p)] != 0 {
-                last_k = Some(sb * 16 + p);
-            }
-        }
-    }
-    let Some(last_k) = last_k else {
+    let Some(last_k) = (0..n_sb * 16).rev().find(|&k| levels[at(k)] != 0) else {
         return 0;
     };
+    let mut nz = nz;
     for sb in 0..=last_k / 16 {
+        let base = sb * 16;
         let mut first = None;
         let mut lastp = None;
         let mut sum = 0i32;
         for p in 0..16 {
-            let l = levels[idx_of(sb, p)];
+            let l = levels[at(base + p)];
             if l != 0 {
                 first.get_or_insert(p);
                 lastp = Some(p);
@@ -503,7 +525,7 @@ pub(crate) fn hide_signs(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u
         if lastp - first <= 3 {
             continue;
         }
-        let neg = levels[idx_of(sb, first)] < 0;
+        let neg = levels[at(base + first)] < 0;
         if (sum % 2 == 1) == neg {
             continue;
         }
@@ -513,7 +535,7 @@ pub(crate) fn hide_signs(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u
         let mut best: Option<(i64, usize, i32)> = None;
         let top = if sb == last_k / 16 { last_k % 16 } else { 15 };
         for p in first..=top {
-            let i = idx_of(sb, p);
+            let i = at(base + p);
             let l = i32::from(levels[i].unsigned_abs());
             let scaled = i64::from(coeffs[i].unsigned_abs()) * scale;
             let err = |lv: i32| {
@@ -522,7 +544,7 @@ pub(crate) fn hide_signs(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u
             };
             for delta in [1i32, -1] {
                 let nl = l + delta;
-                if nl < 0 || (nl == 0 && (p == first || sb * 16 + p == last_k)) {
+                if nl < 0 || (nl == 0 && (p == first || base + p == last_k)) {
                     continue;
                 }
                 let cost = err(nl) - err(l);
@@ -532,12 +554,13 @@ pub(crate) fn hide_signs(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u
             }
         }
         if let Some((_, i, delta)) = best {
-            let l = i32::from(levels[i].unsigned_abs()) + delta;
-            let neg = coeffs[i] < 0;
-            levels[i] = if neg { -l } else { l } as i16;
+            let l = i32::from(levels[i].unsigned_abs());
+            let nl = l + delta;
+            nz = nz + u32::from(l == 0) - u32::from(nl == 0);
+            levels[i] = if coeffs[i] < 0 { -nl } else { nl } as i16;
         }
     }
-    levels[..n * n].iter().filter(|&&v| v != 0).count() as u32
+    nz
 }
 
 #[cfg(test)]

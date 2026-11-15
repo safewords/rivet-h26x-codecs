@@ -397,6 +397,9 @@ pub struct IntraCtx<'a, S: Sample> {
     /// Rate-distortion optimised quantisation (`h265_rdoq::quantise`),
     /// pricing bins at these contexts; `None` quantises with a dead zone.
     pub rdoq: Option<&'a crate::hevc::ctx::Contexts>,
+    /// Search intra angles coarse to fine (`search_luma_mode`) rather than
+    /// all 33.
+    pub fast_intra: bool,
 }
 
 /// The fixed picture geometry the availability rules need, copied out of
@@ -2062,35 +2065,113 @@ fn search_luma_mode<S: Sample>(
     prepare(plane, sc, x, y, n, ctx.bit_depth);
     let rate_scale = satd_lambda_scale(ctx.bit_depth);
     let mut best = (f32::MAX, 1u8);
-    for mode in 0..35u8 {
-        // The decoder's flags for a luma block under this SPS: reference
-        // smoothing on (predict itself skips DC and 4x4), boundary filter
-        // on (no implicit RDPCM to suspend it).
-        predict_prepared(
-            ctx.dsp,
-            plane,
-            sc,
-            x,
-            y,
-            n,
-            mode as u32,
-            0,
-            true,
-            true,
-            ctx.bit_depth,
-            ctx.strong_smoothing,
-        );
-        let satd = (ctx.dist.satd)(src, src_stride, &plane.data[off..], plane.stride, n, n);
-        let signal = match cands.iter().position(|&c| c == mode as u32) {
-            Some(i) => ModeSignal::LumaMpm(i as u8),
-            None => ModeSignal::LumaEscape,
-        };
-        let cost = satd as f32 + mode_signalling_cost(ctx.qp, signal) * rate_scale;
-        if cost < best.0 {
-            best = (cost, mode);
+    // Under `fast_intra` the 33 angles are searched coarse to fine:
+    // every fourth, then the two either side of the best at distance two,
+    // then at one — 9 + 2 + 2 angles with planar, DC and the three most
+    // probable modes, about half the predictions of the full search.
+    let mut tried = [false; 35];
+    let mut order: Vec<u8> = if ctx.fast_intra {
+        let mut v: Vec<u8> = vec![0, 1];
+        v.extend((2..35u8).step_by(4));
+        v.extend(cands.iter().map(|&c| c as u8));
+        v
+    } else {
+        (0..35u8).collect()
+    };
+    let mut stage = 0;
+    loop {
+        for mode in order.drain(..) {
+            if tried[mode as usize] {
+                continue;
+            }
+            tried[mode as usize] = true;
+            // The decoder's flags for a luma block under this SPS: reference
+            // smoothing on (predict itself skips DC and 4x4), boundary filter
+            // on (no implicit RDPCM to suspend it).
+            predict_prepared(
+                ctx.dsp,
+                plane,
+                sc,
+                x,
+                y,
+                n,
+                mode as u32,
+                0,
+                true,
+                true,
+                ctx.bit_depth,
+                ctx.strong_smoothing,
+            );
+            let satd = (ctx.dist.satd)(src, src_stride, &plane.data[off..], plane.stride, n, n);
+            let signal = match cands.iter().position(|&c| c == mode as u32) {
+                Some(i) => ModeSignal::LumaMpm(i as u8),
+                None => ModeSignal::LumaEscape,
+            };
+            let cost = satd as f32 + mode_signalling_cost(ctx.qp, signal) * rate_scale;
+            if cost < best.0 {
+                best = (cost, mode);
+            }
         }
+        if !ctx.fast_intra || stage == 2 || best.1 < 2 {
+            break;
+        }
+        let d = if stage == 0 { 2 } else { 1 };
+        stage += 1;
+        let b = i32::from(best.1);
+        order.extend(
+            [b - d, b + d]
+                .into_iter()
+                .filter(|m| (2..35).contains(m))
+                .map(|m| m as u8),
+        );
     }
+    sc_cost_set(best.0);
     best.1
+}
+
+thread_local! {
+    /// The cost the last [`search_luma_mode`] on this thread chose its mode
+    /// at (SATD plus lambda times the mode's bins).
+    static LAST_MODE_COST: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+fn sc_cost_set(c: f32) {
+    LAST_MODE_COST.with(|v| v.set(c));
+}
+
+/// The SATD-domain cost of the best 2Nx2N intra mode for the unit at
+/// `(x0, y0)` of `1 << log2`, predicted from `recon` as it stands: the
+/// estimate an inter picture compares its inter unit's search cost with
+/// before it codes the unit intra (`InterPicture::intra_satd_gate`).
+/// Writes predictions into the unit's area of `recon.y`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn intra_estimate<S: Sample>(
+    ctx: &IntraCtx<'_, S>,
+    geo: Geo,
+    recon: &mut Frame<S>,
+    modes: &[u8],
+    pred_mode: Option<&[u8]>,
+    scratch: &mut IntraScratch,
+    x0: usize,
+    y0: usize,
+    log2: u32,
+    src_y: &[S],
+    y_stride: usize,
+) -> f32 {
+    let cands = mpm_candidates(geo, modes, pred_mode, x0, y0);
+    search_luma_mode(
+        ctx,
+        geo,
+        &mut recon.y,
+        scratch,
+        x0,
+        y0,
+        log2,
+        &src_y[y0 * y_stride + x0..],
+        y_stride,
+        cands,
+    );
+    LAST_MODE_COST.with(|v| v.get())
 }
 
 /// Predict one luma transform block with the CU's chosen mode and code
@@ -2201,7 +2282,6 @@ fn rdoq_trim<S: Sample>(
     nz: u32,
 ) -> u32 {
     use crate::cabac_enc::CabacEncoder;
-    use crate::hevc::ctx::Contexts;
     use crate::hevc::residual::{ResidualParams, residual_scan_idx, scan_pos, write_residual};
 
     /// How many trailing significant coefficients the search will consider
@@ -2269,7 +2349,7 @@ fn rdoq_trim<S: Sample>(
     // Cost one candidate: real bits from the writer, real SSD from the
     // decoder's own reconstruction of it.
     let cost_of = |cand: &[i16], scratch: &mut [i16]| -> f32 {
-        let mut cx = Contexts::new(0, qp);
+        let mut cx = crate::encode::h265::initial_contexts(0, qp);
         let mut e = CabacEncoder::estimating();
         let all_zero = cand[..n * n].iter().all(|&v| v == 0);
         let bits = if all_zero {
@@ -2963,8 +3043,7 @@ fn code_cu_2nx2n<S: Sample>(
 /// this function.
 fn cu_bits(d: &CuDecision, cat: u32, qp: i32, bypass: bool) -> f32 {
     use crate::cabac_enc::CabacEncoder;
-    use crate::hevc::ctx::Contexts;
-    let mut cx = Contexts::new(0, qp);
+    let mut cx = crate::encode::h265::initial_contexts(0, qp);
     let mut e = CabacEncoder::estimating();
     // The production serialiser, over the decision as coded: every
     // signalling bin AND every residual block, at their real widths.
@@ -3074,6 +3153,7 @@ mod tests {
                 free_to_trim: false,
                 sign_hiding: false,
                 rdoq: None,
+                fast_intra: false,
             }
         }
     }

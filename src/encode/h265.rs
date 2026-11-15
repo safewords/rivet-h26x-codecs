@@ -305,6 +305,13 @@ struct Core<S: Sample> {
     /// picture under a bitrate is never planned finer than that
     /// (`pick_picture_qp`).
     last_anchor_qp: Option<u8>,
+    /// Lookahead quantiser propagation (`h265_cutree`), when the tier
+    /// asks for it: every held picture at half resolution by display
+    /// index, the motion between pairs of them, the displays of the
+    /// reference pictures already coded, how far ahead the encoder holds
+    /// pictures for it, and the offsets of the picture being coded.
+    tree: Option<TreeState>,
+    tree_offsets: Option<Vec<f32>>,
     geom: syn::Geometry,
     /// Reference pictures as the decoder holds them — full `Frame`s with
     /// their motion grids and extended borders, not cropped bytes: the
@@ -591,9 +598,13 @@ impl<S: Sample> Core<S> {
         // a table. Without B pictures the second flag would be a PPS bit
         // no slice reads, and one every such stream coded before B slices
         // were weighted does not have.
+        let tree_on = super::h265_tune::Tune::of(&cfg).cutree > 0.0
+            && !matches!(cfg.rate, RateControl::Lossless);
         let pps_opts = PpsOptions {
-            cu_qp_delta_depth: (cfg.aq_strength > 0.0)
-                .then_some(u32::from(tree_depth(&cfg, &g) > 0 && cfg.gop != 0)),
+            cu_qp_delta_depth: (cfg.aq_strength > 0.0
+                || (super::h265_tune::Tune::of(&cfg).cutree > 0.0
+                    && !matches!(cfg.rate, RateControl::Lossless)))
+            .then_some(u32::from(tree_depth(&cfg, &g) > 0 && cfg.gop != 0)),
             weighted_pred: cfg.weighted_pred,
             weighted_bipred: cfg.weighted_pred && cfg.bframes > 0,
             sign_hiding: super::h265_tune::Tune::of(&cfg).sign_hiding
@@ -687,6 +698,8 @@ impl<S: Sample> Core<S> {
             refs: Vec::new(),
             half: Vec::new(),
             last_anchor_qp: None,
+            tree: tree_on.then(TreeState::default),
+            tree_offsets: None,
         })
     }
 
@@ -736,12 +749,28 @@ impl<S: Sample> Core<S> {
             self.costs.insert(display, cost);
             self.last_luma = Some(samples[..dw * dh].to_vec());
         }
+        if let Some(t) = self.tree.as_mut() {
+            let (dw, dh) = (self.cfg.width as usize, self.cfg.height as usize);
+            let dist8 = DistortionDsp::<u8>::new(Cpu::detect_honouring_env());
+            t.lowres.insert(
+                display,
+                std::sync::Arc::new(super::h265_cutree::LowRes::new(
+                    &samples[..dw * dh],
+                    dw,
+                    dh,
+                    self.cfg.bit_depth,
+                    &dist8,
+                )),
+            );
+        }
         self.held.insert(display, samples);
         // Offer the scheduler everything but the last `lookahead` pictures.
         // Without a lookahead that is the picture just pushed, once, which
         // is the path every stream took before one existed.
         let mut out = Vec::new();
-        while self.next_display - self.offered > u64::from(self.cfg.lookahead) {
+        let hold =
+            u64::from(self.cfg.lookahead).max(if self.tree.is_some() { TREE_AHEAD } else { 0 });
+        while self.next_display - self.offered > hold {
             self.offered += 1;
             let ready = self.sched.push();
             out.extend(self.code(ready)?);
@@ -772,7 +801,22 @@ impl<S: Sample> Core<S> {
             })?;
             // The pictures released alongside this one and not yet coded
             // are part of what a lookahead can see.
+            self.tree_offsets = self.tree_offsets_for(&c, &ready[i + 1..]);
             let mut access = self.code_picture(c, &src, &ready[i + 1..])?;
+            self.tree_offsets = None;
+            if let Some(t) = self.tree.as_mut() {
+                if c.reference {
+                    t.coded_refs.push(c.display);
+                }
+                if c.kind == Kind::Idr {
+                    t.coded_refs = vec![c.display];
+                }
+                // Keep what a later picture may still be searched against.
+                let keep = c.display.saturating_sub(TREE_AHEAD + 8);
+                t.lowres.retain(|&d, _| d >= keep);
+                t.motion.retain(|&(a, b), _| a >= keep && b >= keep);
+                t.coded_refs.retain(|&d| d >= keep);
+            }
             let filler = self.stuff(&mut access);
             self.costs.remove(&c.display);
             // A cut at or below every picture still held separates none of
@@ -1141,6 +1185,7 @@ impl<S: Sample> Core<S> {
             free_to_trim: self.cfg.gop == 0,
             sign_hiding: self.pps_opts.sign_hiding,
             rdoq: (tune.rdoq && !bypass).then_some(&rdoq_cx),
+            fast_intra: tune.fast_intra,
         };
         let mut pic = IntraPicture::<S>::new_with_chroma(cw, ch, g.log2_ctb, bit_depth, chroma);
         // The transform-split search is on: a CU may carry four quarter-size
@@ -1630,6 +1675,7 @@ impl<S: Sample> Core<S> {
             free_to_trim: false,
             sign_hiding: self.pps_opts.sign_hiding,
             rdoq: (tune.rdoq && !bypass).then_some(&rdoq_cx),
+            fast_intra: tune.fast_intra,
         };
         // The reconstruction takes its sample depth from the parsed SPS —
         // the same field a decoder of this stream sizes its frames by.
@@ -1639,6 +1685,17 @@ impl<S: Sample> Core<S> {
         pic.search_rings = tune.search_rings;
         pic.rd_intra = tune.rd_intra;
         pic.rskip = tune.rskip;
+        pic.drop_trial = tune.drop_trial;
+        pic.nxn_trial = tune.nxn_trial;
+        pic.quarter_cross = tune.quarter_cross;
+        pic.intra_satd_gate = tune.intra_satd_gate;
+        pic.limit_refs = tune.limit_refs;
+        if !c.reference && tune.nonref_fast {
+            // A picture nothing references: its decisions shape only itself.
+            pic.rskip = Some(f32::MAX);
+            pic.intra_satd_gate = Some(pic.intra_satd_gate.unwrap_or(1.0));
+            pic.nxn_trial = 0.0;
+        }
         pic.split_depth = tune.intra_split_depth;
 
         // Weighted prediction, for a P slice under `weighted_pred_flag` and
@@ -2048,7 +2105,7 @@ impl<S: Sample> Core<S> {
     /// and the decisions keep the context's. Reads the configuration
     /// only: an attempt stays free of writes to `self`.
     fn aq_offsets(&self, py: &[S], cw: usize, ch: usize, log2_qg: u32) -> Option<Vec<i32>> {
-        (self.cfg.aq_strength > 0.0).then(|| {
+        let aq = (self.cfg.aq_strength > 0.0).then(|| {
             aq::ctb_offsets(
                 py,
                 cw,
@@ -2058,7 +2115,151 @@ impl<S: Sample> Core<S> {
                 self.cfg.bit_depth,
                 self.cfg.aq_strength,
             )
-        })
+        });
+        if self.tree.is_none() {
+            return aq;
+        }
+        // Under quantiser propagation every picture carries offsets, zero
+        // where nothing propagates: the PPS enables the deltas, and a
+        // picture without offsets would write none the reader expects.
+        let qg = 1usize << log2_qg;
+        let n = cw.div_ceil(qg) * ch.div_ceil(qg);
+        let mut out = aq.unwrap_or_else(|| vec![0; n]);
+        if let Some(t) = &self.tree_offsets {
+            for (o, d) in out.iter_mut().zip(t) {
+                *o += d.round() as i32;
+            }
+        }
+        Some(out)
+    }
+
+    /// The quantiser propagation offsets of `c` (`h265_cutree`): the
+    /// inheritance of every picture coded after it in the window — the
+    /// pictures released with it (`upcoming`) and those the scheduler
+    /// still holds — walked back through the coding order. `None` without
+    /// propagation, and for a picture nothing references.
+    fn tree_offsets_for(&mut self, c: &Coded, upcoming: &[Coded]) -> Option<Vec<f32>> {
+        use super::h265_cutree as ct;
+        let strength = super::h265_tune::Tune::of(&self.cfg).cutree;
+        let ahead = self.next_display - self.offered;
+        let preview = self.sched.preview(ahead);
+        let t = self.tree.as_mut()?;
+        if !c.reference {
+            return None;
+        }
+        let mut window: Vec<Coded> = vec![*c];
+        window.extend(upcoming.iter().copied());
+        window.extend(preview);
+        window.retain(|w| t.lowres.contains_key(&w.display));
+        let dist8 = DistortionDsp::<u8>::new(Cpu::detect_honouring_env());
+        // Each picture's references: the nearest reference picture before
+        // it in display order among those coded before it, and for a B
+        // picture the nearest after.
+        let mut refs_of: Vec<(Option<u64>, Option<u64>)> = Vec::with_capacity(window.len());
+        for (j, y) in window.iter().enumerate() {
+            if y.kind.is_intra() {
+                refs_of.push((None, None));
+                continue;
+            }
+            let before = t.coded_refs.iter().copied().chain(
+                window[..j]
+                    .iter()
+                    .filter(|w| w.reference)
+                    .map(|w| w.display),
+            );
+            let (mut past, mut future) = (None::<u64>, None::<u64>);
+            for d in before {
+                if d < y.display && past.is_none_or(|p| d > p) {
+                    past = Some(d);
+                }
+                if d > y.display && future.is_none_or(|f| d < f) {
+                    future = Some(d);
+                }
+            }
+            if y.kind != Kind::B {
+                future = None;
+            }
+            refs_of.push((
+                past.filter(|d| t.lowres.contains_key(d)),
+                future.filter(|d| t.lowres.contains_key(d)),
+            ));
+        }
+        let lr_c = t.lowres.get(&c.display)?.clone();
+        let nb = lr_c.bw * lr_c.bh;
+        let mut prop: std::collections::HashMap<u64, Vec<f32>> =
+            window.iter().map(|w| (w.display, vec![0f32; nb])).collect();
+        for j in (1..window.len()).rev() {
+            let y = window[j];
+            let (past, future) = refs_of[j];
+            if past.is_none() && future.is_none() {
+                continue;
+            }
+            let lr_y = t.lowres[&y.display].clone();
+            let mut get = |r: u64| -> std::sync::Arc<ct::Motion> {
+                t.motion
+                    .entry((y.display, r))
+                    .or_insert_with(|| {
+                        std::sync::Arc::new(ct::search(&lr_y, &t.lowres[&r], &dist8))
+                    })
+                    .clone()
+            };
+            let m0 = past.map(&mut get);
+            let m1 = future.map(&mut get);
+            let mine = prop.remove(&y.display).unwrap_or_else(|| vec![0f32; nb]);
+            for b in 0..nb {
+                let own = lr_y.intra[b] as f32;
+                let c0 = m0.as_ref().map_or(u32::MAX, |m| m.cost[b]);
+                let c1 = m1.as_ref().map_or(u32::MAX, |m| m.cost[b]);
+                let cb = match (&m0, &m1, past, future) {
+                    (Some(a), Some(bm), Some(p), Some(f)) => ct::bi_cost(
+                        &lr_y,
+                        &t.lowres[&p],
+                        a.mv[b],
+                        &t.lowres[&f],
+                        bm.mv[b],
+                        b,
+                        &dist8,
+                    ),
+                    _ => u32::MAX,
+                };
+                let inter = c0.min(c1).min(cb) as f32;
+                if inter >= own {
+                    continue;
+                }
+                let amount = (own + mine[b]) * (1.0 - inter / own);
+                if cb as f32 == inter {
+                    for (r, m) in [(past, &m0), (future, &m1)] {
+                        if let (Some(r), Some(m)) = (r, m)
+                            && let Some(into) = prop.get_mut(&r)
+                        {
+                            ct::spread(into, lr_c.bw, lr_c.bh, b, m.mv[b], amount * 0.5);
+                        }
+                    }
+                } else {
+                    let (r, m) = if c0 as f32 == inter {
+                        (past, &m0)
+                    } else {
+                        (future, &m1)
+                    };
+                    if let (Some(r), Some(m)) = (r, m)
+                        && let Some(into) = prop.get_mut(&r)
+                    {
+                        ct::spread(into, lr_c.bw, lr_c.bh, b, m.mv[b], amount);
+                    }
+                }
+            }
+        }
+        let g = self.geom;
+        let log2_qg = self.log2_qg();
+        let inherited = prop.remove(&c.display)?;
+        Some(ct::offsets(
+            &lr_c,
+            &inherited,
+            strength,
+            g.coded_width as usize,
+            g.coded_height as usize,
+            log2_qg,
+        ))
     }
 
     /// How many quadtree levels below the CTB this stream's units may
@@ -2076,6 +2277,17 @@ impl<S: Sample> Core<S> {
 }
 
 /// The rate controller's kind for a scheduled picture.
+/// How many pictures the encoder holds back for quantiser propagation.
+const TREE_AHEAD: u64 = 16;
+
+/// The quantiser propagation's state (`Core::tree`).
+#[derive(Default)]
+struct TreeState {
+    lowres: std::collections::BTreeMap<u64, std::sync::Arc<super::h265_cutree::LowRes>>,
+    motion: std::collections::HashMap<(u64, u64), std::sync::Arc<super::h265_cutree::Motion>>,
+    coded_refs: Vec<u64>,
+}
+
 /// How far below its anchors' quantiser a B picture may be planned under
 /// a bitrate (`Core::pick_picture_qp`). At 0 the gate's monochrome
 /// detail clip underspent (0.49x of 64 kbit/s with lookahead and two B
@@ -2819,7 +3031,7 @@ fn write_tree<D: CodedUnit>(
 /// neutral neighbour context — the terms every other counted price in this
 /// encoder is taken in (see `h265_me::Rate`).
 pub(crate) fn split_flag_bits(init_type: usize, qp: i32, split: bool) -> f32 {
-    let mut cx = Contexts::new(init_type, qp);
+    let mut cx = initial_contexts(init_type, qp);
     let mut e = CabacEncoder::estimating();
     write_split_cu_flag(
         &mut e,
@@ -2838,7 +3050,7 @@ pub(crate) fn split_flag_bits(init_type: usize, qp: i32, split: bool) -> f32 {
 /// writer, in fractional bits under the slice's initial contexts: the
 /// quadtree's rate term, residual included.
 pub(crate) fn intra_cu_bits(d: &CuDecision, cat: u32, qp: i32, pps_bypass: bool) -> f32 {
-    let mut cx = Contexts::new(0, qp);
+    let mut cx = initial_contexts(0, qp);
     let mut e = CabacEncoder::estimating();
     write_cu_intra_i(&mut e, &mut cx, d, pps_bypass, cat, None);
     e.fractional_bits() as f32
@@ -2848,6 +3060,24 @@ pub(crate) fn intra_cu_bits(d: &CuDecision, cat: u32, qp: i32, pps_bypass: bool)
 /// with neutral skip contexts, `nref` active list-0 references and the
 /// unit at quadtree depth `depth`.
 #[allow(clippy::too_many_arguments)]
+/// A slice's initial context states for `init_type` at quantiser `qp`
+/// (9.3.2.2): `Contexts::new`, computed once per thread and pair and
+/// copied after. Every rate a decision prices starts from these, a few
+/// hundred thousand times a picture, and the initialisation is a formula
+/// per context.
+pub(crate) fn initial_contexts(init_type: usize, qp: i32) -> Contexts {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<Option<Box<Contexts>>>> =
+            std::cell::RefCell::new(vec![None; 3 * 52]);
+    }
+    let i = init_type * 52 + qp.clamp(0, 51) as usize;
+    CACHE.with_borrow_mut(|c| {
+        c[i].get_or_insert_with(|| Box::new(Contexts::new(init_type, qp.clamp(0, 51))))
+            .as_ref()
+            .clone()
+    })
+}
+
 pub(crate) fn p_cu_bits(
     d: &PCuDecision,
     cat: u32,
@@ -2857,7 +3087,7 @@ pub(crate) fn p_cu_bits(
     nref: u32,
     depth: u32,
 ) -> f32 {
-    let mut cx = Contexts::new(if is_b { 2 } else { 1 }, qp);
+    let mut cx = initial_contexts(if is_b { 2 } else { 1 }, qp);
     let mut e = CabacEncoder::estimating();
     match d {
         PCuDecision::Inter(d) => write_cu_inter(
@@ -5194,6 +5424,7 @@ mod tests {
             free_to_trim: false,
             sign_hiding: false,
             rdoq: None,
+            fast_intra: false,
         };
         let split = |f: &[u8]| -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let (y, c) = f.split_at(w * h);
@@ -5508,6 +5739,7 @@ mod tests {
             free_to_trim: false,
             sign_hiding: false,
             rdoq: None,
+            fast_intra: false,
         };
         let split = |f: &[u8]| -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let (y, c) = f.split_at(w * h);
@@ -5592,6 +5824,7 @@ mod tests {
             free_to_trim: false,
             sign_hiding: false,
             rdoq: None,
+            fast_intra: false,
         };
         let mut pic = IntraPicture::<u8>::new(64, 64, 5, 8);
         pic.split_depth = 1;
@@ -5732,6 +5965,7 @@ mod tests {
             free_to_trim: false,
             sign_hiding: false,
             rdoq: None,
+            fast_intra: false,
         };
         let mut pic = InterPicture::<u8>::new(&sps, &pps, 1);
         let (py, pc) = flat.split_at(w * h);
@@ -5884,6 +6118,7 @@ mod tests {
             free_to_trim: false,
             sign_hiding: false,
             rdoq: None,
+            fast_intra: false,
         };
         let mut pic = InterPicture::<u8>::new(&sps, &pps, 1);
         let (py, pc) = split.split_at(w * h);

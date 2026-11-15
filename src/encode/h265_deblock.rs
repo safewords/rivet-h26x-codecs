@@ -383,6 +383,7 @@ mod tests {
                 free_to_trim: false,
                 sign_hiding: false,
                 rdoq: None,
+                fast_intra: false,
             }
         }
     }

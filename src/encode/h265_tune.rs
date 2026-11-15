@@ -24,7 +24,7 @@ pub fn apply_preset(cfg: &mut Config, p: Preset) {
             cfg.inter_parts = InterParts::None;
         }
         Preset::Medium => {
-            cfg.max_refs = 3;
+            cfg.max_refs = 2;
             cfg.inter_parts = InterParts::None;
         }
         // Symmetric partitions measured at slow (2026-11-15): +6.38% against
@@ -67,6 +67,24 @@ pub(crate) struct Tune {
     pub sign_hiding: bool,
     /// Rate-distortion optimised quantisation (`h265_rdoq::quantise`).
     pub rdoq: bool,
+    /// `h265_me::InterPicture::drop_trial`.
+    pub drop_trial: bool,
+    /// `h265_me::InterPicture::nxn_trial`.
+    pub nxn_trial: f64,
+    /// `h265_me::InterPicture::quarter_cross`.
+    pub quarter_cross: bool,
+    /// `h265_me::InterPicture::intra_satd_gate`.
+    pub intra_satd_gate: Option<f32>,
+    /// `h265_intra::IntraCtx::fast_intra`.
+    pub fast_intra: bool,
+    /// A picture nothing references decides with the cheapest settings:
+    /// every skip ends the recursion, intra only where its SATD estimate
+    /// beats the inter search, no `PART_NxN` trial.
+    pub nonref_fast: bool,
+    /// `h265_me::InterPicture::limit_refs`.
+    pub limit_refs: bool,
+    /// Lookahead quantiser propagation strength (`h265_cutree`), 0 off.
+    pub cutree: f32,
 }
 
 impl Tune {
@@ -80,6 +98,14 @@ impl Tune {
         intra_split_depth: 1,
         sign_hiding: false,
         rdoq: false,
+        drop_trial: true,
+        nxn_trial: 2.0,
+        quarter_cross: false,
+        intra_satd_gate: None,
+        fast_intra: false,
+        nonref_fast: false,
+        limit_refs: false,
+        cutree: 0.0,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -92,19 +118,41 @@ impl Tune {
         // mean against x265 medium): I/B1/B2 at -3/+2/+4 +1.85%, -4/+2/+5
         // +1.83%, -3/+3/+5 +1.96%; a flat GOP at its best (I -3, B +3)
         // +12.0%, a 5- or 7-picture pyramid at -3/+2/+3/+4 +6.3% / +4.7%.
-        Tune {
+        let base = Tune {
             i_qp_offset: -3,
             b_qp_offset: [2, 4, 5],
-            rskip: Some(0.25),
-            intra_split_depth: 0,
             // Measured 2026-11-15 (x265 parity against medium, `--preset
             // medium`): sign hiding -4.19% -> -6.06% BD-rate; RDOQ alone
             // -7.47% (ducks +10.7 -> -3.0, park_joy +6.0 -> +1.0, the CIF
             // clips 0.3-1.0 worse) and both -8.25%, at 1.3x the CPU for
             // RDOQ by interleaved one-thread runs: the slow tier's tool.
             sign_hiding: true,
-            rdoq: p == Preset::Slow,
             ..Tune::NEUTRAL
+        };
+        match p {
+            Preset::Slow => Tune {
+                rdoq: true,
+                search_rings: 1,
+                ..base
+            },
+            Preset::Medium => Tune {
+                rskip: Some(0.5),
+                intra_split_depth: 0,
+                intra_satd_gate: Some(1.0),
+                fast_intra: true,
+                nxn_trial: 0.0,
+                nonref_fast: true,
+                ..base
+            },
+            Preset::Veryfast => Tune {
+                rskip: Some(0.5),
+                intra_split_depth: 0,
+                intra_satd_gate: Some(1.0),
+                fast_intra: true,
+                nxn_trial: 0.0,
+                nonref_fast: true,
+                ..base
+            },
         }
     }
 

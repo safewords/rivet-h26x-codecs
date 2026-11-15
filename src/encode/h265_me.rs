@@ -682,6 +682,26 @@ pub struct InterPicture<S: Sample> {
     /// 32): every skip, -2.55% BD-rate where -4.37% was, at 0.82x the CPU;
     /// below 1.0 lambda -3.00%, 0.5 -3.77%, 0.25 -4.28% at 0.89x.
     pub rskip: Option<f32>,
+    /// Intra is coded only where the best intra mode's SATD cost comes
+    /// within this factor of the inter unit's search cost; `None` codes it
+    /// wherever `rd_intra` lets it.
+    pub intra_satd_gate: Option<f32>,
+    /// The SATD-domain search cost of the last inter unit decided.
+    last_pick_cost: f32,
+    /// Search only the nearest reference and the parent unit's below the
+    /// top of the coding tree (`ref_searched`).
+    pub limit_refs: bool,
+    /// The reference each depth's whole unit chose, by position.
+    parent_ref: [Option<(u32, u32, i8)>; 4],
+    /// Whether a unit with residual is also tried without it
+    /// ([`Self::tree_leaf_drop`]).
+    pub drop_trial: bool,
+    /// At the minimum coding block an intra unit also tries `PART_NxN`
+    /// when its 2Nx2N cost is below this many times the inter unit's; 0
+    /// never tries.
+    pub nxn_trial: f64,
+    /// The quarter-sample refinement scores the four axial neighbours only.
+    pub quarter_cross: bool,
     /// Set for one call of `code_whole`: predict, but code no residual —
     /// the rate-distortion trial of a unit without its coefficients.
     no_residual: bool,
@@ -778,6 +798,13 @@ impl<S: Sample> InterPicture<S> {
             no_residual: false,
             rd_intra: None,
             rskip: None,
+            drop_trial: true,
+            limit_refs: false,
+            parent_ref: [None; 4],
+            intra_satd_gate: None,
+            last_pick_cost: 0.0,
+            nxn_trial: 2.0,
+            quarter_cross: false,
             half: Vec::new(),
             search_rings: 0,
             seed_at: [[None; 16]; 4],
@@ -995,6 +1022,7 @@ impl<S: Sample> InterPicture<S> {
             lam,
         );
         self.alts = Some((pick, parts));
+        self.last_pick_cost = parts.map_or(pick.cost, |p| p.2.min(pick.cost));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
             return self.code_parts(
                 ctx,
@@ -1093,6 +1121,10 @@ impl<S: Sample> InterPicture<S> {
         // two sub-sample rings, per reference.
         let mut per_ref: Vec<(Mv, u32)> = Vec::with_capacity(refs_l0.len());
         for (r, rf) in refs_l0.iter().enumerate() {
+            if !self.ref_searched(pu, r) {
+                per_ref.push((Mv::ZERO, u32::MAX));
+                continue;
+            }
             let mut seeds: Vec<Mv> = vec![Mv::ZERO, mvp[r][0], mvp[r][1]];
             seeds.extend(
                 merge
@@ -1361,6 +1393,7 @@ impl<S: Sample> InterPicture<S> {
             lam,
         );
         self.alts = Some((pick, parts));
+        self.last_pick_cost = parts.map_or(pick.cost, |p| p.2.min(pick.cost));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
             return self.code_parts(
                 ctx,
@@ -2325,6 +2358,12 @@ impl<S: Sample> InterPicture<S> {
         };
         let lam = ssd_lambda(qp, ctx.bit_depth);
         let (d, ssd, unit_bits) = self.tree_leaf(&cctx, refs, x0, y0, log2, depth, src);
+        if (depth as usize) < 4 {
+            self.parent_ref[depth as usize] = match &d {
+                PCuDecision::Inter(i) => Some((x0 as u32, y0 as u32, i.ref_idx)),
+                PCuDecision::Intra(_) => None,
+            };
+        }
         let flag = if log2 > MIN_CB_LOG2 {
             crate::encode::h265::split_flag_bits(init, qp, false)
         } else {
@@ -2409,8 +2448,11 @@ impl<S: Sample> InterPicture<S> {
         src: &Srcs<'_, S>,
     ) -> (PCuDecision, u64, f32) {
         let (coded, ssd, bits) = self.tree_leaf_coded(ctx, refs, x0, y0, log2, depth, src);
-        let (coded, ssd, bits) =
-            self.tree_leaf_drop(ctx, refs, x0, y0, log2, depth, src, coded, ssd, bits);
+        let (coded, ssd, bits) = if self.drop_trial {
+            self.tree_leaf_drop(ctx, refs, x0, y0, log2, depth, src, coded, ssd, bits)
+        } else {
+            (coded, ssd, bits)
+        };
         let Some(gate) = self.rd_intra else {
             return (coded, ssd, bits);
         };
@@ -2431,6 +2473,34 @@ impl<S: Sample> InterPicture<S> {
             TreeRefs::B(..) => (1, true),
         };
         let saved = TrialSave::take(self, x0, y0, n);
+        // A cheap look first: the best intra mode's SATD cost against the
+        // inter unit's search cost, both in the SATD domain.
+        if let Some(g) = self.intra_satd_gate {
+            let InterPicture {
+                recon,
+                info,
+                intra_scratch,
+                geo,
+                ..
+            } = self;
+            let est = super::h265_intra::intra_estimate(
+                ctx,
+                *geo,
+                recon,
+                &info.intra_mode,
+                Some(&info.pred_mode),
+                intra_scratch,
+                x0,
+                y0,
+                log2,
+                src.y,
+                src.y_stride,
+            );
+            if est > g * self.last_pick_cost {
+                saved.put(self, x0, y0, n);
+                return (coded, ssd, bits);
+            }
+        }
         // The unit's grids say intra from here on: the intra decision's
         // own neighbours are outside it, and what it leaves must be what a
         // decoder of an intra unit holds.
@@ -2464,7 +2534,7 @@ impl<S: Sample> InterPicture<S> {
         // At the minimum coding block the intra unit may also take
         // `PART_NxN`, four 4x4 luma blocks with a mode each; tried where
         // the 2Nx2N intra unit came within a quarter of the inter one.
-        if log2 == MIN_CB_LOG2 && j_i < 2.0 * j {
+        if log2 == MIN_CB_LOG2 && j_i < self.nxn_trial * j {
             let mid = TrialSave::take(self, x0, y0, n);
             let nxn = PCuDecision::Intra(Box::new(self.code_cu_intra_nxn(
                 ctx,
@@ -2831,6 +2901,29 @@ impl<S: Sample> InterPicture<S> {
         hp.1.at(x, y, w, h, mvx, mvy)
     }
 
+    /// Whether reference `r` is searched for `pu`: always the nearest, and
+    /// under [`Self::limit_refs`] below the top of the tree only the one
+    /// the enclosing unit chose — a unit's best reference is most often
+    /// its parent's.
+    fn ref_searched(&self, pu: &PuPos, r: usize) -> bool {
+        if r == 0 || !self.limit_refs {
+            return true;
+        }
+        let d = self.depth_of(pu);
+        if d == 0 {
+            return true;
+        }
+        match self.parent_ref[d - 1] {
+            Some((px, py, pr)) => {
+                let n = (pu.n_cb as u32) * 2;
+                let inside =
+                    (pu.x_cb as u32).wrapping_sub(px) < n && (pu.y_cb as u32).wrapping_sub(py) < n;
+                !inside || pr as usize == r
+            }
+            None => true,
+        }
+    }
+
     /// The coding-tree depth of the unit `pu` belongs to.
     fn depth_of(&self, pu: &PuPos) -> usize {
         (self.log2_ctb - (pu.n_cb as u32).trailing_zeros()) as usize
@@ -3016,9 +3109,10 @@ impl<S: Sample> InterPicture<S> {
         let mut best_cost = best_satd + rate(start);
         for step in [2i16, 1] {
             let centre = best;
+            let cross = step == 1 && self.quarter_cross;
             for dy in [-step, 0, step] {
                 for dx in [-step, 0, step] {
-                    if dx == 0 && dy == 0 {
+                    if (dx == 0 && dy == 0) || (cross && dx != 0 && dy != 0) {
                         continue;
                     }
                     let mv = Mv::new(centre.x.wrapping_add(dx), centre.y.wrapping_add(dy));
@@ -3503,7 +3597,7 @@ impl Rate {
     /// `depth` of a P (`is_b` false) or B slice at quantiser `qp`.
     pub(crate) fn new_at(qp: i32, is_b: bool, log2_cu: u32, depth: u32) -> Self {
         Rate {
-            cx: Contexts::new(if is_b { 2 } else { 1 }, qp),
+            cx: crate::encode::h265::initial_contexts(if is_b { 2 } else { 1 }, qp),
             log2_cu,
             depth,
         }
@@ -3903,6 +3997,7 @@ mod tests {
                 free_to_trim: false,
                 sign_hiding: false,
                 rdoq: None,
+                fast_intra: false,
             }
         }
     }

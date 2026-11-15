@@ -273,8 +273,16 @@ impl Cat {
 /// only after a pass that used them (see [`Cat`]).
 #[derive(Default)]
 struct Stats {
-    bands: [Cat; 32],
-    edge: [Cat; 5],
+    /// Per component (`[c]`): the band statistics, and the edge statistics
+    /// of each class, of the CTB being decided — kept so the merge
+    /// candidates are priced from them rather than by a second pass
+    /// (`Comp::ssd_under`).
+    bands: [[Cat; 32]; 3],
+    edge: [[[Cat; 5]; 4]; 3],
+    /// Which of those hold this CTB's statistics: bit 0 the bands, bit
+    /// `1 + class` an edge class; and the component's do-nothing SSD.
+    valid: [u8; 3],
+    base: [i64; 3],
     /// The edge kernel's near-the-rail samples, `(category, rec, error)`.
     near: Vec<(u8, u16, i32)>,
 }
@@ -347,6 +355,8 @@ fn bins_of(p: &SaoParams, cmax: u32, first_two: bool) -> u32 {
 
 /// One component of one CTB, as the decision needs to see it.
 struct Comp<'a, S: Sample> {
+    /// Which component: 0 luma, 1 Cb, 2 Cr.
+    c: usize,
     /// The encoder's distortion kernels: the SSD, and the edge statistics.
     dist: &'a DistortionDsp<S>,
     rec: &'a Plane16<S>,
@@ -386,12 +396,48 @@ impl<S: Sample> Comp<'_, S> {
 
     /// Band statistics into `cats`: one bucket per band, `v >> shift`
     /// exactly as `sao_ctb`'s table lookup indexes it.
+    /// This component's do-nothing SSD, computed once per CTB.
+    fn base(&self, stats: &mut Stats) -> i64 {
+        if stats.valid[self.c] & 0x80 == 0 {
+            stats.base[self.c] = self.ssd_off();
+            stats.valid[self.c] |= 0x80;
+        }
+        stats.base[self.c]
+    }
+
+    /// This component's band statistics, gathered once per CTB.
+    fn bands_of(&self, stats: &mut Stats) {
+        if stats.valid[self.c] & 1 == 0 {
+            self.band_stats(&mut stats.bands[self.c]);
+            stats.valid[self.c] |= 1;
+        }
+    }
+
+    /// This component's statistics for edge class `class`, gathered once
+    /// per CTB.
+    fn edges_of(
+        &self,
+        class: u8,
+        usable: &dyn Fn(usize, usize, i32, i32) -> bool,
+        stats: &mut Stats,
+    ) {
+        let bit = 2 << class;
+        if stats.valid[self.c] & bit == 0 {
+            let Stats { edge, near, .. } = stats;
+            self.edge_stats(class, usable, &mut edge[self.c][class as usize], near);
+            stats.valid[self.c] |= bit;
+        }
+    }
+
     fn band_stats(&self, cats: &mut [Cat; 32]) {
         cats.iter_mut().for_each(Cat::clear);
         for y in self.y0..self.y0 + self.h {
-            for x in self.x0..self.x0 + self.w {
-                let v = self.rec_at(x, y);
-                cats[((v >> self.shift) & 31) as usize].add(v, self.err_at(x, y), self.max);
+            let r0 = self.rec.offset(self.x0 as isize, y as isize);
+            let rec = &self.rec.data[r0..r0 + self.w];
+            let src = &self.src[y * self.src_stride + self.x0..][..self.w];
+            for (r, s) in rec.iter().zip(src) {
+                let v = r.to_i32();
+                cats[((v >> self.shift) & 31) as usize].add(v, i64::from(s.to_i32() - v), self.max);
             }
         }
     }
@@ -489,15 +535,16 @@ impl<S: Sample> Comp<'_, S> {
         usable: &dyn Fn(usize, usize, i32, i32) -> bool,
         stats: &mut Stats,
     ) -> (SaoParams, f32, i64) {
-        let base = self.ssd_off();
+        let base = self.base(stats);
+        let ci = self.c;
         let mut best = SaoParams::default();
         let mut best_cost = base as f32 + lam * bins_of(&best, cmax as u32, first_two) as f32;
         let mut best_dist = base;
 
         // Band: every one of the 32 wrapping four-band windows.
-        self.band_stats(&mut stats.bands);
+        self.bands_of(stats);
         let mut per_band = [(0i64, 0i64); 32]; // (offset, delta)
-        for (b, c) in stats.bands.iter().enumerate() {
+        for (b, c) in stats.bands[ci].iter().enumerate() {
             per_band[b] = c.choose(-cmax, cmax);
         }
         for pos in 0..32usize {
@@ -531,7 +578,7 @@ impl<S: Sample> Comp<'_, S> {
         // so the clamp is one-sided and a category that wants the other
         // direction simply takes zero.
         for class in 0..4u8 {
-            self.edge_stats(class, usable, &mut stats.edge, &mut stats.near);
+            self.edges_of(class, usable, stats);
             let mut p = SaoParams {
                 type_idx: 2,
                 band_or_class: class,
@@ -542,7 +589,7 @@ impl<S: Sample> Comp<'_, S> {
             // categories 3, 4 take offsets 2, 3 (negative). Category 2 has
             // no offset in the syntax at all.
             for (slot, cat) in [(0usize, 0usize), (1, 1), (2, 3), (3, 4)] {
-                let c = &stats.edge[cat];
+                let c = &stats.edge[ci][class as usize][cat];
                 let (o, d) = if slot < 2 {
                     c.choose(0, cmax)
                 } else {
@@ -575,7 +622,8 @@ impl<S: Sample> Comp<'_, S> {
         usable: &dyn Fn(usize, usize, i32, i32) -> bool,
         stats: &mut Stats,
     ) -> i64 {
-        let base = self.ssd_off();
+        let base = self.base(stats);
+        let ci = self.c;
         match p.type_idx {
             0 => base,
             1 => {
@@ -583,15 +631,15 @@ impl<S: Sample> Comp<'_, S> {
                 for k in 0..4 {
                     table[(k + p.band_or_class as usize) & 31] = p.offsets[k];
                 }
-                self.band_stats(&mut stats.bands);
+                self.bands_of(stats);
                 let mut d = 0i64;
-                for (b, c) in stats.bands.iter().enumerate() {
+                for (b, c) in stats.bands[ci].iter().enumerate() {
                     d += c.delta(table[b] as i64);
                 }
                 base + d
             }
             _ => {
-                self.edge_stats(p.band_or_class, usable, &mut stats.edge, &mut stats.near);
+                self.edges_of(p.band_or_class, usable, stats);
                 let tab = [
                     p.offsets[0] as i64,
                     p.offsets[1] as i64,
@@ -600,7 +648,7 @@ impl<S: Sample> Comp<'_, S> {
                     p.offsets[3] as i64,
                 ];
                 let mut d = 0i64;
-                for (i, c) in stats.edge.iter().enumerate() {
+                for (i, c) in stats.edge[ci][p.band_or_class as usize].iter().enumerate() {
                     d += c.delta(tab[i]);
                 }
                 base + d
@@ -679,6 +727,7 @@ pub fn sao_picture<S: Sample>(
             let mut own_cost = 0f32;
             let mut own_dist = [0i64; 3];
             let mut comps: Vec<Comp<'_, S>> = Vec::with_capacity(ncomp);
+            stats.valid = [0; 3];
             for c in 0..ncomp {
                 let (csw, csh) = if c == 0 { (1, 1) } else { (sw, sh) };
                 let (plane, src, stride) = match c {
@@ -690,6 +739,7 @@ pub fn sao_picture<S: Sample>(
                 let x0 = rx * ctb / csw;
                 let y0 = ry * ctb / csh;
                 comps.push(Comp {
+                    c,
                     dist: ctx.dist,
                     rec: plane,
                     src,
@@ -850,7 +900,8 @@ impl<S: Sample> Comp<'_, S> {
         usable: &dyn Fn(usize, usize, i32, i32) -> bool,
         stats: &mut Stats,
     ) -> (SaoParams, f32, i64) {
-        let base = self.ssd_off();
+        let base = self.base(stats);
+        let ci = self.c;
         if type_idx == 0 {
             return (SaoParams::default(), base as f32, base);
         }
@@ -861,9 +912,9 @@ impl<S: Sample> Comp<'_, S> {
         };
         let mut delta = 0i64;
         if type_idx == 1 {
-            self.band_stats(&mut stats.bands);
+            self.bands_of(stats);
             for k in 0..4 {
-                let c = &stats.bands[(class as usize + k) & 31];
+                let c = &stats.bands[ci][(class as usize + k) & 31];
                 let (o, d) = c.choose(-cmax, cmax);
                 if o != 0 && d < 0 {
                     p.offsets[k] = o as i16;
@@ -871,9 +922,9 @@ impl<S: Sample> Comp<'_, S> {
                 }
             }
         } else {
-            self.edge_stats(class, usable, &mut stats.edge, &mut stats.near);
+            self.edges_of(class, usable, stats);
             for (slot, cat) in [(0usize, 0usize), (1, 1), (2, 3), (3, 4)] {
-                let c = &stats.edge[cat];
+                let c = &stats.edge[ci][class as usize][cat];
                 let (o, d) = if slot < 2 {
                     c.choose(0, cmax)
                 } else {
@@ -929,6 +980,7 @@ mod tests {
                 free_to_trim: false,
                 sign_hiding: false,
                 rdoq: None,
+                fast_intra: false,
             }
         }
     }
