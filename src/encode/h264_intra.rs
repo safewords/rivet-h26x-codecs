@@ -264,6 +264,10 @@ pub struct IntraCtx<'a, S: Sample> {
     /// vector range. [`MotionLimits::NONE`](crate::encode::level::MotionLimits::NONE)
     /// where nothing searches H.264 motion.
     pub motion: crate::encode::level::MotionLimits,
+    /// Quantise by the trellis ([`crate::encode::h264_trellis`]) rather
+    /// than the dead zone: set by the analysis for a macroblock's final
+    /// coding, `None` everywhere else.
+    pub(crate) trellis: Option<&'a crate::encode::h264_trellis::Trellis>,
 }
 
 /// Whether a 4x4 block's top-right neighbour has been reconstructed by the
@@ -378,13 +382,27 @@ pub(crate) fn code_block_8x8<S: Sample>(
     let qbits = qbits8(qp);
     let offset = quant_offset(qbits, intra);
     let mut levels = [0i16; 64];
-    let _ = (ctx.enc.quant8)(
-        &coeffs,
-        &mut levels,
-        &ctx.quant.mf8[list8][(qp % 6) as usize],
-        qbits,
-        offset,
-    );
+    match ctx.trellis {
+        Some(t) if list8 < 2 && !ctx.c444 => {
+            t.quant(
+                crate::encode::h264_trellis::Block::Luma8,
+                &coeffs,
+                &mut levels,
+                &ctx.quant.mf8[list8][(qp % 6) as usize],
+                qbits,
+                qp,
+            );
+        }
+        _ => {
+            let _ = (ctx.enc.quant8)(
+                &coeffs,
+                &mut levels,
+                &ctx.quant.mf8[list8][(qp % 6) as usize],
+                qbits,
+                offset,
+            );
+        }
+    }
     let counts = sub_block_counts_8x8_scan(&levels, ctx.field);
     (levels, counts)
 }
@@ -494,7 +512,21 @@ pub(crate) fn code_block_4x4<S: Sample>(
     let qbits = qbits4(qp);
     let offset = quant_offset(qbits, true);
     let mut levels = [0i16; 16];
-    let mut nz = (ctx.enc.quant4)(&coeffs, &mut levels, &ctx.quant.mf4[list][m], qbits, offset);
+    let mut nz = match ctx.trellis {
+        Some(t) if list == 0 && !ctx.c444 => t.quant(
+            if keep_dc {
+                crate::encode::h264_trellis::Block::Luma4
+            } else {
+                crate::encode::h264_trellis::Block::Luma16Ac
+            },
+            &coeffs,
+            &mut levels,
+            &ctx.quant.mf4[list][m],
+            qbits,
+            qp,
+        ),
+        _ => (ctx.enc.quant4)(&coeffs, &mut levels, &ctx.quant.mf4[list][m], qbits, offset),
+    };
     if !keep_dc {
         // The DC is carried by the macroblock's DC block instead.
         if levels[0] != 0 {
@@ -651,7 +683,7 @@ fn code_i16x16_plane<S: Sample>(
 /// plane loop does (`derive()` walks each plane's sixteen blocks with the
 /// shared `layer.intra_modes`).
 #[allow(clippy::too_many_arguments)]
-fn code_i4x4_plane_fixed<S: Sample>(
+pub(crate) fn code_i4x4_plane_fixed<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut Recon<S>,
     px: usize,
@@ -689,7 +721,7 @@ fn code_i4x4_plane_fixed<S: Sample>(
 /// src/h264/recon.rs walks each plane's four 8x8s with the shared
 /// `layer.intra_modes`).
 #[allow(clippy::too_many_arguments)]
-fn code_i8x8_plane_fixed<S: Sample>(
+pub(crate) fn code_i8x8_plane_fixed<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut Recon<S>,
     px: usize,
@@ -1006,7 +1038,17 @@ pub(crate) fn code_chroma<S: Sample>(
             let qbits = qbits4(qp);
             let offset = quant_offset(qbits, true);
             let mut lv = [0i16; 16];
-            let mut n = (ctx.enc.quant4)(&coeffs, &mut lv, &ctx.quant.mf4[list][m], qbits, offset);
+            let mut n = match ctx.trellis {
+                Some(t) => t.quant(
+                    crate::encode::h264_trellis::Block::ChromaAc,
+                    &coeffs,
+                    &mut lv,
+                    &ctx.quant.mf4[list][m],
+                    qbits,
+                    qp,
+                ),
+                None => (ctx.enc.quant4)(&coeffs, &mut lv, &ctx.quant.mf4[list][m], qbits, offset),
+            };
             if lv[0] != 0 {
                 n -= 1;
             }
@@ -1688,6 +1730,7 @@ mod tests {
                 field: false,
                 chroma_mv_dy: [0; 2],
                 motion: crate::encode::level::MotionLimits::NONE,
+                trellis: None,
             };
             // (the encoder's 8x8 list index, the plane it codes, whether
             // the macroblock is inter, and the QP that plane is coded at)
@@ -1784,6 +1827,7 @@ mod tests {
             field: false,
             chroma_mv_dy: [0; 2],
             motion: crate::encode::level::MotionLimits::NONE,
+            trellis: None,
         };
         let mut rec = crate::encode::h264_syntax::recon_plane(32, 32, 16);
         for v in rec.data.iter_mut() {

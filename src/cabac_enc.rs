@@ -93,6 +93,14 @@ static STATE_COST: LazyLock<[[f32; 2]; 64]> = LazyLock::new(|| {
     t
 });
 
+/// What coding `bin` in a context in probability state `state` (the
+/// context byte: `state << 1 | mps`) costs, in bits — [`STATE_COST`] for
+/// callers that price bins without running an encoder.
+#[inline]
+pub(crate) fn state_bits(state: u8, bin: u32) -> f32 {
+    STATE_COST[(state >> 1) as usize][(bin != (state & 1) as u32) as usize]
+}
+
 /// Where an encoder's output goes: a caller's writer, or nowhere.
 ///
 /// Counting exists so a decision can ask what a shape *costs* without

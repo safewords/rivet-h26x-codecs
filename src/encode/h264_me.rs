@@ -900,7 +900,21 @@ fn code_inter_4x4<S: Sample>(
     let qbits = qbits4(qp);
     let offset = quant_offset(qbits, false);
     let mut levels = [0i16; 16];
-    let mut nz = (ctx.enc.quant4)(&coeffs, &mut levels, &ctx.quant.mf4[list][m], qbits, offset);
+    let mut nz = match ctx.trellis {
+        Some(t) if !ctx.c444 => t.quant(
+            if keep_dc {
+                crate::encode::h264_trellis::Block::Luma4
+            } else {
+                crate::encode::h264_trellis::Block::ChromaAc
+            },
+            &coeffs,
+            &mut levels,
+            &ctx.quant.mf4[list][m],
+            qbits,
+            qp,
+        ),
+        _ => (ctx.enc.quant4)(&coeffs, &mut levels, &ctx.quant.mf4[list][m], qbits, offset),
+    };
     if !keep_dc {
         if levels[0] != 0 {
             nz -= 1;
@@ -3347,6 +3361,7 @@ mod tests {
                 field: false,
                 chroma_mv_dy: [0; 2],
                 motion: crate::encode::level::MotionLimits::NONE,
+                trellis: None,
             }
         }
     }

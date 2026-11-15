@@ -527,21 +527,31 @@ pub fn write_intra_picture_cabac<S: Sample>(
     let mut st = CabacState::new(SliceType::I, 0, qp as i32);
     let mut e = CabacEncoder::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
-    let fmbs = code_intra_picture(g, tools, qp, planes, rec, |mb_x, mb_y, dec, trial| {
-        let idx = coded.len();
-        let left = (mb_x > 0).then(|| &coded[idx - 1]);
-        let above = (mb_y > 0).then(|| &coded[idx - mbw]);
-        if trial {
-            let mut ce = CabacEncoder::estimating();
-            let mut st2 = st.clone();
-            let _ = intra_mb_cabac(&mut ce, &mut st2, dec, left, above, cfi, t8x8, g);
-            return ce.fractional_bits();
-        }
-        let entry = intra_mb_cabac(&mut e, &mut st, dec, left, above, cfi, t8x8, g);
-        coded.push(entry);
-        e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
-        0.0
-    });
+    let live = std::cell::RefCell::new(st.ctx);
+    let fmbs = code_intra_picture(
+        g,
+        tools,
+        qp,
+        planes,
+        rec,
+        Some(&live),
+        |mb_x, mb_y, dec, trial| {
+            let idx = coded.len();
+            let left = (mb_x > 0).then(|| &coded[idx - 1]);
+            let above = (mb_y > 0).then(|| &coded[idx - mbw]);
+            if trial {
+                let mut ce = CabacEncoder::estimating();
+                let mut st2 = st.clone();
+                let _ = intra_mb_cabac(&mut ce, &mut st2, dec, left, above, cfi, t8x8, g);
+                return ce.fractional_bits();
+            }
+            let entry = intra_mb_cabac(&mut e, &mut st, dec, left, above, cfi, t8x8, g);
+            live.borrow_mut().copy_from_slice(&st.ctx);
+            coded.push(entry);
+            e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
+            0.0
+        },
+    );
     w.align_zero();
     fmbs
 }
@@ -570,6 +580,7 @@ pub fn write_p_picture_cabac<S: Sample>(
     let mut st = CabacState::new(SliceType::P, 0, qp as i32);
     let mut e = CabacEncoder::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
+    let live = std::cell::RefCell::new(st.ctx);
     let fmbs = code_p_picture(
         g,
         tools,
@@ -578,6 +589,7 @@ pub fn write_p_picture_cabac<S: Sample>(
         rec,
         refp,
         weights,
+        Some(&live),
         |mb_x, mb_y, mb, trial| {
             let idx = coded.len();
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
@@ -589,6 +601,7 @@ pub fn write_p_picture_cabac<S: Sample>(
                 return ce.fractional_bits();
             }
             let entry = p_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g);
+            live.borrow_mut().copy_from_slice(&st.ctx);
             coded.push(entry);
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
             0.0
@@ -626,6 +639,7 @@ pub fn write_b_picture_cabac<S: Sample>(
     let mut st = CabacState::new(SliceType::B, 0, qp as i32);
     let mut e = CabacEncoder::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
+    let live = std::cell::RefCell::new(st.ctx);
     let fmbs = code_b_picture(
         g,
         tools,
@@ -635,6 +649,7 @@ pub fn write_b_picture_cabac<S: Sample>(
         refs,
         col,
         weights,
+        Some(&live),
         |mb_x, mb_y, mb, trial| {
             let idx = coded.len();
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
@@ -646,6 +661,7 @@ pub fn write_b_picture_cabac<S: Sample>(
                 return ce.fractional_bits();
             }
             let entry = b_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g);
+            live.borrow_mut().copy_from_slice(&st.ctx);
             coded.push(entry);
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
             0.0

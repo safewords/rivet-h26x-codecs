@@ -921,6 +921,7 @@ impl<S: Sample> Core<S> {
                 .with_analysis(
                     (std::env::var_os("H26X_OLD_DECISIONS").is_none())
                         .then_some(super::h264_analyse::AnalysisCfg::MEDIUM),
+                    cfg.entropy == Entropy::Cabac,
                 );
         // The buffer to declare, snapped to what the syntax can carry —
         // the same rules, and the same refusals, as the H.265 side.
@@ -1031,7 +1032,7 @@ impl<S: Sample> Core<S> {
                 std::env::var("H26X_TREE")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(1.0),
+                    .unwrap_or(1.5),
                 geom.mbs_wide as usize,
                 geom.mbs_high as usize,
             )

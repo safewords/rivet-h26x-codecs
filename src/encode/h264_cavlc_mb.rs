@@ -687,7 +687,7 @@ pub fn write_intra_picture<S: Sample>(
     );
     st.field = g.field_pic;
     let t8x8 = tools.transform_8x8;
-    code_intra_picture(g, tools, qp, planes, rec, |mb_x, mb_y, dec, trial| {
+    code_intra_picture(g, tools, qp, planes, rec, None, |mb_x, mb_y, dec, trial| {
         if trial {
             let mut w2 = BitWriter::new();
             let mut st2 = st.clone();
@@ -746,6 +746,7 @@ pub fn write_p_picture<S: Sample>(
         rec,
         refp,
         weights,
+        None,
         |mb_x, mb_y, mb, trial| {
             if trial {
                 // A skip lengthens the run; a coded macroblock closes it
@@ -964,6 +965,7 @@ pub fn write_b_picture<S: Sample>(
         refs,
         col,
         weights,
+        None,
         |mb_x, mb_y, mb, trial| {
             if trial {
                 let run_bits = ue_bits(skip_run);
@@ -1699,6 +1701,7 @@ mod tests {
                 field: false,
                 chroma_mv_dy: [0; 2],
                 motion: crate::encode::level::MotionLimits::NONE,
+                trellis: None,
             };
             let mut rec = vec![
                 recon_plane(16, 16, LUMA_PAD),
@@ -2042,6 +2045,7 @@ mod tests {
                     field: false,
                     chroma_mv_dy: [0; 2],
                     motion: crate::encode::level::MotionLimits::NONE,
+                    trellis: None,
                 };
                 let mut rec = vec![
                     recon_plane(16, 16, LUMA_PAD),
@@ -2131,6 +2135,7 @@ mod tests {
                     field: false,
                     chroma_mv_dy: [0; 2],
                     motion: crate::encode::level::MotionLimits::NONE,
+                    trellis: None,
                 };
                 let cpad = if c444 { LUMA_PAD } else { CHROMA_PAD };
                 let cw = if c444 { 16 } else { 8 };

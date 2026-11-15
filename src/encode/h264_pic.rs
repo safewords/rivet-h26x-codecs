@@ -91,6 +91,8 @@ pub struct IntraTools<S: Sample> {
     /// ([`crate::encode::h264_lookahead`]); set per picture by the encoder,
     /// `None` for none.
     pub(crate) mb_offsets: Option<Vec<i32>>,
+    /// The stream is CABAC: what the trellis prices bins for.
+    pub(crate) cabac: bool,
 }
 
 impl<S: Sample> IntraTools<S> {
@@ -119,13 +121,30 @@ impl<S: Sample> IntraTools<S> {
             motion: crate::encode::level::MotionLimits::NONE,
             analysis: None,
             mb_offsets: None,
+            cabac: false,
         }
     }
 
     /// The same tools deciding progressive pictures by `cfg`'s analysis.
-    pub(crate) fn with_analysis(mut self, cfg: Option<AnalysisCfg>) -> Self {
+    pub(crate) fn with_analysis(mut self, cfg: Option<AnalysisCfg>, cabac: bool) -> Self {
         self.analysis = cfg;
+        self.cabac = cabac;
         self
+    }
+
+    /// The CABAC context states a slice of `kind` at `qp` starts from, for
+    /// the trellis — `None` when it does not run.
+    fn trellis_states(
+        &self,
+        kind: crate::h264::SliceType,
+        qp: u8,
+        field: bool,
+    ) -> Option<[u8; 1024]> {
+        (self.cabac
+            && !field
+            && self.analysis.is_some_and(|a| a.trellis)
+            && std::env::var_os("H26X_NO_TRELLIS").is_none())
+        .then(|| crate::h264::cabac_mb::CabacState::new(kind, 0, qp as i32).ctx)
     }
 
     /// The same tools with adaptive quantisation at `strength` (0 off).
@@ -571,6 +590,7 @@ impl<'a, S: Sample> PicCoding<'a, S> {
             field: g.field_pic,
             chroma_mv_dy: g.chroma_mv_dy,
             motion: tools.motion,
+            trellis: None,
         };
         let (mbs_wide, mbs_high) = (g.mbs_wide as usize, g.mbs_high as usize);
         let luma_stride = g.coded_width as usize;
@@ -717,6 +737,7 @@ pub(crate) fn code_intra_picture<S: Sample>(
     qp: u8,
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
+    live: Option<&std::cell::RefCell<[u8; 1024]>>,
     mut emit: impl FnMut(usize, usize, &MbDecision, bool) -> f64,
 ) -> PicMotion {
     let pc = PicCoding::new(g, tools, qp, planes);
@@ -735,6 +756,13 @@ pub(crate) fn code_intra_picture<S: Sample>(
         c: [src_cb, src_cr],
         cs: pc.chroma_stride,
     };
+    let mut trellis = tools
+        .trellis_states(crate::h264::SliceType::I, qp, g.field_pic)
+        .map(|ctx| crate::encode::h264_trellis::Trellis {
+            ctx,
+            lambda: 0.0,
+            bd_off: 6 * (g.bit_depth as i32 - 8),
+        });
     for mb_y in 0..mbs_high {
         let mut left_modes: [Option<u8>; 4] = [None; 4];
         for mb_x in 0..mbs_wide {
@@ -747,6 +775,12 @@ pub(crate) fn code_intra_picture<S: Sample>(
             let addr = mb_y * mbs_wide + mb_x;
             let mctx = pc.ctx_at(pc.mb_qp(addr));
             let (mut dec, modes) = if let Some(cfg) = analysis {
+                if let Some(t) = trellis.as_mut() {
+                    t.lambda = crate::encode::h264_analyse::lambda_ssd(mctx.qp);
+                    if let Some(l) = live {
+                        t.ctx.copy_from_slice(&*l.borrow());
+                    }
+                }
                 let nb = Nb {
                     avail: mb,
                     left_modes: &left_modes,
@@ -763,6 +797,7 @@ pub(crate) fn code_intra_picture<S: Sample>(
                     &srcmb,
                     &nb,
                     chain.prev,
+                    trellis.as_ref(),
                     &mut |d: &MbDecision| emit(mb_x, mb_y, d, true),
                 );
                 (d, m)
@@ -847,6 +882,7 @@ pub(crate) fn code_p_picture<S: Sample>(
     rec: &mut [Recon<S>],
     refp: &[Recon<S>],
     weights: Option<&PredWeightTable>,
+    live: Option<&std::cell::RefCell<[u8; 1024]>>,
     mut emit: impl FnMut(usize, usize, PMb<'_>, bool) -> f64,
 ) -> PicMotion {
     let pc = PicCoding::new(g, tools, qp, planes);
@@ -898,6 +934,10 @@ pub(crate) fn code_p_picture<S: Sample>(
                 None,
             ],
         )
+        .with_trellis(
+            tools.trellis_states(crate::h264::SliceType::P, qp, g.field_pic),
+            g.bit_depth,
+        )
     });
     let srcmb = SrcMb {
         y: src_y,
@@ -914,6 +954,9 @@ pub(crate) fn code_p_picture<S: Sample>(
             let ctx = &mctx;
             let mut decided_intra = None;
             let mut dec = if let Some(an) = an.as_mut() {
+                if let Some(l) = live {
+                    an.refresh_trellis(&l.borrow());
+                }
                 let (cands, ncands) = nb_cands(&pm, mb_x, mb_y, mbs_wide);
                 let nb = Nb {
                     avail: MbAvail {
@@ -1126,6 +1169,7 @@ pub(crate) fn code_b_picture<S: Sample>(
     refs: [&[Recon<S>]; 2],
     col: &Colocated,
     weights: BWeights<'_>,
+    live: Option<&std::cell::RefCell<[u8; 1024]>>,
     mut emit: impl FnMut(usize, usize, BMb<'_>, bool) -> f64,
 ) -> PicMotion {
     let pc = PicCoding::new(g, tools, qp, planes);
@@ -1185,6 +1229,10 @@ pub(crate) fn code_b_picture<S: Sample>(
                 })
             }),
         )
+        .with_trellis(
+            tools.trellis_states(crate::h264::SliceType::B, qp, g.field_pic),
+            g.bit_depth,
+        )
     });
     let srcmb = SrcMb {
         y: src_y,
@@ -1201,6 +1249,9 @@ pub(crate) fn code_b_picture<S: Sample>(
             let ctx = &mctx;
             let mut decided_intra = None;
             let mut dec = if let Some(an) = an.as_mut() {
+                if let Some(l) = live {
+                    an.refresh_trellis(&l.borrow());
+                }
                 let (cands, ncands) = nb_cands(&pm, mb_x, mb_y, mbs_wide);
                 let nb = Nb {
                     avail: MbAvail {

@@ -26,8 +26,8 @@
 use crate::encode::h264_hpel::{MeCfg, MeRef, MvCostTable, Search, avg_into, search_bounds};
 use crate::encode::h264_intra::{
     IntraCtx, MbAvail, MbDecision, MbKind, as_syntax, avail_4x4, avail_8x8, code_block_4x4,
-    code_block_8x8, code_chroma, code_i16x16, code_macroblock_modes8, gather, predicted_mode,
-    quad_rasters, reconstruct_4x4, reconstruct_8x8,
+    code_block_8x8, code_chroma, code_i4x4_plane_fixed, code_i8x8_plane_fixed, code_i16x16,
+    code_macroblock_modes8, gather, predicted_mode, quad_rasters, reconstruct_4x4, reconstruct_8x8,
 };
 use crate::encode::h264_me::{
     BDecision, BMbKind, BRefs, InterDecision, InterMbKind, MbMotionState, PRef,
@@ -35,6 +35,7 @@ use crate::encode::h264_me::{
 };
 use crate::encode::h264_pic::{BMb, Colocated, PMb};
 use crate::encode::h264_syntax::Recon;
+use crate::encode::h264_trellis::Trellis;
 use crate::h264::cavlc::mb_partitions;
 use crate::h264::frame::Mv;
 use crate::h264::inter::Weighting;
@@ -65,6 +66,8 @@ pub(crate) struct AnalysisCfg {
     /// Refine a bi-predicted 16x16 by re-searching each list against the
     /// other's prediction.
     pub(crate) bidir_refine: bool,
+    /// Re-quantise the chosen macroblock by the trellis (CABAC streams).
+    pub(crate) trellis: bool,
 }
 
 impl AnalysisCfg {
@@ -88,6 +91,7 @@ impl AnalysisCfg {
         intra_ratio: 1.2,
         rd_ratio: 1.1,
         bidir_refine: false,
+        trellis: true,
     };
 }
 
@@ -108,6 +112,8 @@ pub(crate) struct PicAn<'a, S: Sample> {
     pub(crate) cfg: AnalysisCfg,
     pub(crate) me: [Option<MeRef<'a, S>>; 2],
     costs: Vec<Option<MvCostTable>>,
+    /// The trellis's context states and multiplier, when it runs.
+    trellis: Option<Trellis>,
 }
 
 impl<'a, S: Sample> PicAn<'a, S> {
@@ -116,10 +122,39 @@ impl<'a, S: Sample> PicAn<'a, S> {
             cfg,
             me,
             costs: (0..52).map(|_| None).collect(),
+            trellis: None,
         }
     }
 
+    /// Run the trellis from these CABAC context states (a CABAC picture's
+    /// at its start), when the configuration asks for it.
+    pub(crate) fn with_trellis(mut self, ctx: Option<[u8; 1024]>, bit_depth: u32) -> Self {
+        if self.cfg.trellis {
+            self.trellis = ctx.map(|ctx| Trellis {
+                ctx,
+                lambda: 0.0,
+                bd_off: 6 * (bit_depth as i32 - 8),
+            });
+        }
+        self
+    }
+
+    /// The trellis's context states, from the writer's as they stand.
+    pub(crate) fn refresh_trellis(&mut self, ctx: &[u8; 1024]) {
+        if let Some(t) = self.trellis.as_mut() {
+            t.ctx.copy_from_slice(ctx);
+        }
+    }
+
+    /// The trellis, set to the quantiser [`PicAn::prepare`] last saw.
+    pub(crate) fn trellis(&self) -> Option<&Trellis> {
+        self.trellis.as_ref()
+    }
+
     fn prepare(&mut self, qp: i32) {
+        if let Some(t) = self.trellis.as_mut() {
+            t.lambda = lambda_ssd(qp);
+        }
         let q = qp.clamp(0, 51) as usize;
         if self.costs[q].is_none() {
             self.costs[q] = Some(MvCostTable::new(lambda_satd(qp)));
@@ -602,6 +637,7 @@ pub(crate) fn intra_mb<S: Sample>(
     src: &SrcMb<S>,
     nb: &Nb,
     qp_pred: i32,
+    trellis: Option<&Trellis>,
     rate: &mut dyn FnMut(&MbDecision) -> f64,
 ) -> (MbDecision, [u8; 16], f64) {
     let lam1 = lambda_satd(ctx.qp);
@@ -699,9 +735,116 @@ pub(crate) fn intra_mb<S: Sample>(
         with_chroma(&mut d);
         consider(d, [2u8; 16], rec, rate);
     }
-    let (j, dec, modes) = best.expect("Intra_16x16 is always a candidate");
-    best_pix.restore_luma(rec, mb_x, mb_y);
+    let (j, mut dec, modes) = best.expect("Intra_16x16 is always a candidate");
+    match trellis {
+        Some(t) => {
+            let tctx = IntraCtx {
+                trellis: Some(t),
+                ..*ctx
+            };
+            requant_intra(&tctx, rec, mb_x, mb_y, src, nb, &mut dec, &modes, qp_pred);
+        }
+        None => best_pix.restore_luma(rec, mb_x, mb_y),
+    }
     (dec, modes, j)
+}
+
+/// Code an intra decision again at its chosen modes under `ctx` (the
+/// trellis's): luma by type, chroma at its mode, the coded block patterns
+/// and the delta re-derived. The reconstruction lands in `rec`.
+#[allow(clippy::too_many_arguments)]
+fn requant_intra<S: Sample>(
+    ctx: &IntraCtx<S>,
+    rec: &mut [Recon<S>],
+    mb_x: usize,
+    mb_y: usize,
+    src: &SrcMb<S>,
+    nb: &Nb,
+    dec: &mut MbDecision,
+    modes: &[u8; 16],
+    qp_pred: i32,
+) {
+    let (px, py) = (mb_x * 16, mb_y * 16);
+    let sy = &src.y[py * src.ys + px..];
+    match dec.kind {
+        MbKind::I16x16 => {
+            let mut d = MbDecision::default();
+            code_i16x16(
+                ctx,
+                &mut rec[0],
+                px,
+                py,
+                sy,
+                src.ys,
+                dec.intra16_mode,
+                nb.avail,
+                &mut d,
+            );
+            dec.luma = d.luma;
+            dec.luma_dc = d.luma_dc;
+            dec.nz_luma = d.nz_luma;
+            dec.cbp_luma = d.cbp_luma;
+        }
+        MbKind::I4x4 | MbKind::I8x8 => {
+            let (levels, nz) = if dec.kind == MbKind::I4x4 {
+                code_i4x4_plane_fixed(
+                    ctx,
+                    &mut rec[0],
+                    px,
+                    py,
+                    sy,
+                    src.ys,
+                    nb.avail,
+                    modes,
+                    0,
+                    ctx.qp_prime,
+                )
+            } else {
+                code_i8x8_plane_fixed(
+                    ctx,
+                    &mut rec[0],
+                    px,
+                    py,
+                    sy,
+                    src.ys,
+                    nb.avail,
+                    modes,
+                    0,
+                    ctx.qp_prime,
+                )
+            };
+            dec.luma = levels;
+            dec.nz_luma = nz;
+            dec.cbp_luma = 0;
+            for blk8 in 0..4 {
+                if quad_rasters(blk8).iter().any(|&r| nz[r] != 0) {
+                    dec.cbp_luma |= 1 << blk8;
+                }
+            }
+        }
+    }
+    if ctx.chroma_h != 0 {
+        let (cx, cy) = (mb_x * 8, mb_y * ctx.chroma_h);
+        let co = cy * src.cs + cx;
+        let mut c = MbDecision::default();
+        code_chroma(
+            ctx,
+            rec,
+            cx,
+            cy,
+            &[&src.c[0][co..], &src.c[1][co..]],
+            src.cs,
+            dec.chroma_mode,
+            nb.avail,
+            &mut c,
+        );
+        dec.cbp_chroma = c.cbp_chroma;
+        dec.chroma_dc = c.chroma_dc;
+        dec.chroma_ac = c.chroma_ac;
+        dec.nz_chroma = c.nz_chroma;
+    }
+    let residual = dec.kind == MbKind::I16x16 || dec.cbp_luma != 0 || dec.cbp_chroma != 0;
+    dec.qp_delta = delta(ctx.qp, qp_pred, residual);
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +1062,8 @@ pub(crate) fn p_mb<S: Sample>(
     let mut skip_won = true;
 
     let mut pred_pix = MbPix::new();
+    let mut best_pred = MbPix::new();
+    let mut best_t8 = (false, false);
     for cand in shapes.iter().flatten() {
         if cand.est > best_est * cfg.rd_ratio {
             continue;
@@ -934,9 +1079,7 @@ pub(crate) fn p_mb<S: Sample>(
         let allow8 = ctx.t8x8
             && (cand.kind != InterMbKind::P8x8 || cand.sub_shape.iter().all(|s| s.count() == 1));
         let tries: &[bool] = if allow8 { &[false, true] } else { &[false] };
-        if allow8 {
-            pred_pix.save(ctx, rec, mb_x, mb_y);
-        }
+        pred_pix.save(ctx, rec, mb_x, mb_y);
         for (k, &t8) in tries.iter().enumerate() {
             if k > 0 {
                 pred_pix.restore(ctx, rec, mb_x, mb_y);
@@ -980,6 +1123,8 @@ pub(crate) fn p_mb<S: Sample>(
                 best_j = j;
                 best = MbChoice::Inter(dec);
                 best_pix.save(ctx, rec, mb_x, mb_y);
+                best_pred.clone_from(&pred_pix);
+                best_t8 = (allow8, t8);
                 best_st = *st;
                 skip_won = false;
             }
@@ -996,6 +1141,7 @@ pub(crate) fn p_mb<S: Sample>(
             src,
             nb,
             qp_pred,
+            None,
             &mut |d: &MbDecision| rate(PMb::Intra(d)),
         );
         // `j` prices luma distortion only; chroma's must join it to be
@@ -1004,6 +1150,14 @@ pub(crate) fn p_mb<S: Sample>(
             j + (ssd_mb(ctx, rec, src, mb_x, mb_y) - ssd_luma(ctx, rec, src, mb_x, mb_y)) as f64;
         if j < best_j {
             st.reset_mb();
+            let mut idec = idec;
+            if let Some(t) = an.trellis().filter(|_| !ctx.c444) {
+                let tctx = IntraCtx {
+                    trellis: Some(t),
+                    ..*ctx
+                };
+                requant_intra(&tctx, rec, mb_x, mb_y, src, nb, &mut idec, &modes, qp_pred);
+            }
             return MbChoice::Intra(idec, modes);
         }
     }
@@ -1011,6 +1165,41 @@ pub(crate) fn p_mb<S: Sample>(
     *st = best_st;
     if skip_won {
         predict(rec, 0, 0, 16, 16, skip_mv);
+        return best;
+    }
+    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444), &mut best) {
+        // The winner's residual again, by the trellis, from its prediction.
+        best_pred.restore(ctx, rec, mb_x, mb_y);
+        let tctx = IntraCtx {
+            trellis: Some(t),
+            ..*ctx
+        };
+        let r = code_inter_mb_residual(
+            &tctx,
+            rec,
+            mb_x,
+            mb_y,
+            src.y,
+            src.ys,
+            src.c,
+            src.cs,
+            best_t8.0,
+            Some(best_t8.1),
+        );
+        let residual = r.cbp_luma != 0 || r.cbp_chroma != 0;
+        dec.transform_8x8 = r.transform_8x8;
+        dec.cbp_luma = r.cbp_luma;
+        dec.cbp_chroma = r.cbp_chroma;
+        dec.luma = r.luma;
+        dec.nz_luma = r.nz_luma;
+        dec.chroma_dc = r.chroma_dc;
+        dec.chroma_ac = r.chroma_ac;
+        dec.nz_chroma = r.nz_chroma;
+        dec.qp_delta = delta(ctx.qp, qp_pred, residual);
+        if dec.kind == InterMbKind::P16x16 && !residual && st.motion()[0][0].mv == skip_mv {
+            // Nothing left to say: the macroblock is P_Skip.
+            dec.kind = InterMbKind::PSkip;
+        }
     } else {
         best_pix.restore(ctx, rec, mb_x, mb_y);
     }
@@ -1439,6 +1628,8 @@ pub(crate) fn b_mb<S: Sample>(
     let mut best_st = direct_st;
     let mut skip_won = true;
     let mut pred_pix = MbPix::new();
+    let mut best_pred = MbPix::new();
+    let mut best_t8 = (false, false);
     for cand in shapes.iter().flatten() {
         if cand.est > best_est * cfg.rd_ratio {
             continue;
@@ -1447,9 +1638,7 @@ pub(crate) fn b_mb<S: Sample>(
         let d0 = cand.decision();
         let allow8 = ctx.t8x8 && d0.no_sub_mb_part_less_than_8x8();
         let tries: &[bool] = if allow8 { &[false, true] } else { &[false] };
-        if allow8 {
-            pred_pix.save(ctx, rec, mb_x, mb_y);
-        }
+        pred_pix.save(ctx, rec, mb_x, mb_y);
         for (k, &t8) in tries.iter().enumerate() {
             if k > 0 {
                 pred_pix.restore(ctx, rec, mb_x, mb_y);
@@ -1495,6 +1684,8 @@ pub(crate) fn b_mb<S: Sample>(
                 best_j = j;
                 best = MbChoice::Inter(dec);
                 best_pix.save(ctx, rec, mb_x, mb_y);
+                best_pred.clone_from(&pred_pix);
+                best_t8 = (allow8, t8);
                 best_st = *st;
                 skip_won = false;
             }
@@ -1511,18 +1702,60 @@ pub(crate) fn b_mb<S: Sample>(
             src,
             nb,
             qp_pred,
+            None,
             &mut |d: &MbDecision| rate(BMb::Intra(d)),
         );
         let j =
             j + (ssd_mb(ctx, rec, src, mb_x, mb_y) - ssd_luma(ctx, rec, src, mb_x, mb_y)) as f64;
         if j < best_j {
             st.reset_mb();
+            let mut idec = idec;
+            if let Some(t) = an.trellis().filter(|_| !ctx.c444) {
+                let tctx = IntraCtx {
+                    trellis: Some(t),
+                    ..*ctx
+                };
+                requant_intra(&tctx, rec, mb_x, mb_y, src, nb, &mut idec, &modes, qp_pred);
+            }
             return MbChoice::Intra(idec, modes);
         }
     }
     *st = best_st;
     if skip_won {
         predict_cand(rec, st, &direct);
+        return best;
+    }
+    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444), &mut best) {
+        best_pred.restore(ctx, rec, mb_x, mb_y);
+        let tctx = IntraCtx {
+            trellis: Some(t),
+            ..*ctx
+        };
+        let r = code_inter_mb_residual(
+            &tctx,
+            rec,
+            mb_x,
+            mb_y,
+            src.y,
+            src.ys,
+            src.c,
+            src.cs,
+            best_t8.0,
+            Some(best_t8.1),
+        );
+        let residual = r.cbp_luma != 0 || r.cbp_chroma != 0;
+        dec.transform_8x8 = r.transform_8x8;
+        dec.cbp_luma = r.cbp_luma;
+        dec.cbp_chroma = r.cbp_chroma;
+        dec.luma = r.luma;
+        dec.nz_luma = r.nz_luma;
+        dec.chroma_dc = r.chroma_dc;
+        dec.chroma_ac = r.chroma_ac;
+        dec.nz_chroma = r.nz_chroma;
+        dec.qp_delta = delta(ctx.qp, qp_pred, residual);
+        if dec.kind == BMbKind::BDirect16 && !residual {
+            dec.kind = BMbKind::BSkip;
+        }
     } else {
         best_pix.restore(ctx, rec, mb_x, mb_y);
     }
