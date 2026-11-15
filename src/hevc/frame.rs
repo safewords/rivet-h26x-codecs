@@ -238,6 +238,9 @@ pub struct Frame<S: Sample = u16> {
     pub motion: Vec<MotionInfo>,
     /// POC.
     pub poc: i32,
+    /// One colour plane of a `separate_colour_plane_flag` picture, decoded
+    /// as monochrome (the decoder joins the three planes on output).
+    pub colour_plane: bool,
 }
 
 impl<S: Sample> Frame<S> {
@@ -262,6 +265,7 @@ impl<S: Sample> Frame<S> {
             w4: 0,
             motion: Vec::new(),
             poc: 0,
+            colour_plane: false,
         }
     }
 
@@ -298,6 +302,7 @@ impl<S: Sample> Frame<S> {
             w4,
             motion: vec![MotionInfo::default(); w4 * h4],
             poc: 0,
+            colour_plane: false,
         }
     }
 

@@ -269,7 +269,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             return Ok(());
         }
         let mut params = [SaoParams::default(); 3];
-        let ncomp = if self.sps.chroma_format_idc != 0 {
+        let ncomp = if self.sps.chroma_array_type() != 0 {
             3
         } else {
             1

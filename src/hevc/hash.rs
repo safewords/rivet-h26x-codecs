@@ -20,6 +20,18 @@ pub enum PictureHash {
     Checksum([u32; 3]),
 }
 
+impl PictureHash {
+    /// The hash of component `c` alone, as component 0 — what a
+    /// monochrome picture holding that one colour plane is checked against.
+    pub fn component(&self, c: usize) -> PictureHash {
+        match self {
+            PictureHash::Md5(m) => PictureHash::Md5([m[c], [0; 16], [0; 16]]),
+            PictureHash::Crc(v) => PictureHash::Crc([v[c], 0, 0]),
+            PictureHash::Checksum(v) => PictureHash::Checksum([v[c], 0, 0]),
+        }
+    }
+}
+
 /// Whether hash verification is on (`H26X_VERIFY_HASH=1`).
 pub fn verify_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

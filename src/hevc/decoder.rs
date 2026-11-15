@@ -1143,6 +1143,24 @@ pub(crate) struct HevcDecoderImpl<S: Sample> {
     output_pool: crate::picture::OutputPool,
     /// Recycled per-picture side data.
     info_pool: PicInfoPool,
+    /// The colour plane this decoder reconstructs when the active SPS has
+    /// `separate_colour_plane_flag` (8.1.3: each plane is decoded "as if
+    /// only a CVS with monochrome colour format with that particular value
+    /// of colour_plane_id would be present"). [`HevcDecoder`] runs one of
+    /// these per plane and joins their output; plane 0 is also the decoder
+    /// of every stream without separate planes.
+    plane: u32,
+    /// The slice segments being fed belong to another colour plane (set by
+    /// each independent segment, inherited by the dependent ones after it).
+    other_plane: bool,
+    /// That other plane's independent header, for parsing its dependent
+    /// segments (whose headers carry no `colour_plane_id` of their own).
+    other_independent: Option<Arc<SliceHeader>>,
+    /// A picture has begun (`first_slice_segment_in_pic_flag`) whose slices
+    /// of this decoder's colour plane have not: with separate planes only
+    /// the first segment of the whole picture carries the flag, so this
+    /// plane's first segment starts its picture without it.
+    awaiting_plane: bool,
     /// Test-only: created on a thread with `hang_hook::ARMED` set.
     #[cfg(test)]
     hang_hooks: bool,
@@ -1204,9 +1222,22 @@ impl<S: Sample> HevcDecoderImpl<S> {
                 .unwrap_or(threads.clamp(2, 16)),
             output_pool: crate::picture::OutputPool::default(),
             info_pool: PicInfoPool::default(),
+            plane: 0,
+            other_plane: false,
+            other_independent: None,
+            awaiting_plane: false,
             #[cfg(test)]
             hang_hooks: hang_hook::ARMED.with(|a| a.get()),
         }
+    }
+
+    /// A decoder of colour plane `plane` (0..=2) of separate-colour-plane
+    /// pictures; it ignores every slice of another plane, and plane 1 and 2
+    /// decoders ignore every slice of a picture without separate planes.
+    pub fn for_plane(threads: usize, plane: u32) -> Self {
+        let mut d = Self::with_threads(threads);
+        d.plane = plane;
+        d
     }
 
     /// Non-fatal problems seen so far.
@@ -1261,10 +1292,27 @@ impl<S: Sample> HevcDecoderImpl<S> {
                     && let Some(cur) = &self.cur
                 {
                     let rbsp = unescape_rbsp(nal);
-                    if let Some(h) =
-                        super::hash::parse_sei(&rbsp[2..], cur.shared.sps.chroma_format_idc)
-                    {
-                        *cur.shared.frame.hash.lock().unwrap() = Some(h);
+                    let sps = &cur.shared.sps;
+                    if let Some(mut h) = super::hash::parse_sei(&rbsp[2..], sps.chroma_format_idc) {
+                        // Separate planes: the message hashes all three
+                        // (D.3.20 counts components by chroma_format_idc);
+                        // this decoder's monochrome picture is component
+                        // `plane`, which the hash covers at BitDepthC for
+                        // Cb and Cr. When that takes another sample width
+                        // than the plane's own BitDepthY it cannot be
+                        // compared, and is not.
+                        let keep = if sps.separate_colour_plane {
+                            let wide = |d: u32| d > 8;
+                            let same_width = self.plane == 0
+                                || wide(sps.bit_depth_chroma) == wide(sps.bit_depth_luma);
+                            h = h.component(self.plane as usize);
+                            same_width
+                        } else {
+                            true
+                        };
+                        if keep {
+                            *cur.shared.frame.hash.lock().unwrap() = Some(h);
+                        }
                     }
                 }
             }
@@ -1282,26 +1330,21 @@ impl<S: Sample> HevcDecoderImpl<S> {
         Ok(())
     }
 
-    /// The next picture in output order, if any (waits for it to finish).
-    pub fn next_picture(&mut self) -> Option<Picture> {
-        let (pic, ok) = self.dpb.output.pop_front()?.into_picture(&self.output_pool);
+    /// The next picture in output order, waiting for it to finish when
+    /// `wait` (else only if it already has), and whether it is one colour
+    /// plane of a separate-colour-plane picture.
+    pub fn next_output(&mut self, wait: bool) -> Option<(Picture, bool)> {
+        let front = self.dpb.output.front()?;
+        if !wait && !front.frame.progress.is_complete() {
+            return None;
+        }
+        let out = self.dpb.output.pop_front()?;
+        let plane = out.frame.wait_and_get().colour_plane;
+        let (pic, ok) = out.into_picture(&self.output_pool);
         if !ok {
             self.warnings.fetch_add(1, Ordering::Relaxed);
         }
-        Some(pic)
-    }
-
-    /// The next picture in output order if it is already finished.
-    pub fn try_next_picture(&mut self) -> Option<Picture> {
-        if self
-            .dpb
-            .output
-            .front()
-            .is_some_and(|p| p.frame.progress.is_complete())
-        {
-            return self.next_picture();
-        }
-        None
+        Some((pic, plane))
     }
 
     fn slice_nal(&mut self, nal: &[u8], nh: HevcNalHeader) -> Result<()> {
@@ -1310,7 +1353,9 @@ impl<S: Sample> HevcDecoderImpl<S> {
         if first_flag {
             self.finish_picture();
             self.skipping = false;
-        } else if self.cur.is_none() && !self.skipping {
+            self.awaiting_plane = true;
+            self.other_plane = false;
+        } else if self.cur.is_none() && !self.skipping && !self.awaiting_plane {
             self.warnings.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
@@ -1319,7 +1364,11 @@ impl<S: Sample> HevcDecoderImpl<S> {
         }
         let sps_map = &self.sps;
         let pps_map = &self.pps;
-        let independent = self.cur.as_ref().and_then(|c| c.independent.as_deref());
+        let independent = if self.other_plane {
+            self.other_independent.as_deref()
+        } else {
+            self.cur.as_ref().and_then(|c| c.independent.as_deref())
+        };
         let (hdr, mut pps, sps) = SliceHeader::parse(
             &rbsp,
             nh,
@@ -1327,10 +1376,34 @@ impl<S: Sample> HevcDecoderImpl<S> {
             &|id| sps_map.get(&id).cloned(),
             independent,
         )?;
-        if first_flag {
-            if sps.separate_colour_plane {
-                return Err(Error::unsupported("separate_colour_plane_flag"));
+        // Separate colour planes (8.1.3): only this decoder's plane is
+        // decoded, as a monochrome picture; the first of its segments starts
+        // the picture whether or not it is the picture's first segment.
+        let starts = if sps.separate_colour_plane {
+            if !hdr.dependent {
+                self.other_plane = hdr.colour_plane_id != self.plane;
+                if self.other_plane {
+                    self.other_independent = Some(Arc::new(hdr.clone()));
+                }
             }
+            if self.other_plane {
+                return Ok(());
+            }
+            self.awaiting_plane && hdr.segment_address == 0 && !hdr.dependent
+        } else {
+            if self.plane != 0 {
+                return Ok(());
+            }
+            first_flag
+        };
+        if !starts && self.cur.is_none() {
+            if !self.skipping {
+                self.warnings.fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
+        if starts {
+            self.awaiting_plane = false;
             pps.resolve_tiles(&sps)?;
             self.start_picture(&hdr, sps, pps, nh)?;
             if self.skipping {
@@ -1355,6 +1428,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
                     pic.sps.bit_depth_chroma,
                 );
                 f.poc = pic.poc;
+                f.colour_plane = pic.sps.separate_colour_plane;
                 *frame = f;
             }
             cur.buffers_ready = true;
@@ -1734,7 +1808,9 @@ impl<S: Sample> Drop for HevcDecoderImpl<S> {
 // The public decoder: picks the sample type from the SPS
 // ----------------------------------------------------------------------
 
-/// A native HEVC (H.265) decoder — Main / Main 10 / Main 12, 4:2:0.
+/// A native HEVC (H.265) decoder — every single-layer profile (Main through
+/// the format range and screen content coding extensions), and the base
+/// layer of a multi-layer stream.
 ///
 /// Threaded at picture level (frame threading with row-progress dependency
 /// tracking) and within pictures (WPP rows, tiles and slice segments as
@@ -1746,9 +1822,22 @@ impl<S: Sample> Drop for HevcDecoderImpl<S> {
 /// 8-bit streams decode into 8-bit planes, higher bit depths into 16-bit
 /// planes: the implementation is chosen when the first SPS arrives (and
 /// re-chosen, after draining, should a later SPS change the bit depth).
+///
+/// Pictures coded as three separate colour planes are decoded as the
+/// standard describes them (8.1.3): three monochrome decodes, one per
+/// `colour_plane_id`, each by its own implementation, joined into one 4:4:4
+/// picture on output.
 pub struct HevcDecoder {
     threads: usize,
     inner: Option<Inner>,
+    /// The decoders of colour planes 1 and 2, once an SPS with
+    /// `separate_colour_plane_flag` has been seen (`inner` decodes plane 0).
+    planes: Option<Box<[Inner; 2]>>,
+    /// A plane-0 picture waiting for its other two planes to finish.
+    held: Option<Picture>,
+    /// The latest VPS / SPS / PPS NAL units per id, replayed into the plane
+    /// decoders when they are created.
+    param_sets: HashMap<(u8, u32), Vec<u8>>,
     /// NAL units seen before the sample type was known (VPS/SEI/...),
     /// replayed into the implementation once it exists.
     pending: Vec<Vec<u8>>,
@@ -1771,10 +1860,33 @@ macro_rules! with_inner {
     };
 }
 
+impl Inner {
+    fn new(u8: bool, threads: usize, plane: u32) -> Inner {
+        if u8 {
+            Inner::U8(HevcDecoderImpl::for_plane(threads, plane))
+        } else {
+            Inner::U16(HevcDecoderImpl::for_plane(threads, plane))
+        }
+    }
+}
+
 impl Default for HevcDecoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The id of a parameter set NAL unit (VPS: 4 bits; SPS: after the
+/// profile_tier_level; PPS: the first ue(v)), for keeping the latest of each.
+fn param_set_key(nal: &[u8], unit_type: u8) -> Option<(u8, u32)> {
+    let rbsp = unescape_rbsp(nal);
+    let body = rbsp.get(2..)?;
+    let id = match unit_type {
+        nal_type::VPS => u32::from(body.first()? >> 4),
+        nal_type::SPS => Sps::parse(body).ok()?.id,
+        _ => crate::bitreader::BitReader::new(body).ue(),
+    };
+    Some((unit_type, id))
 }
 
 impl HevcDecoder {
@@ -1793,6 +1905,9 @@ impl HevcDecoder {
         HevcDecoder {
             threads,
             inner: None,
+            planes: None,
+            held: None,
+            param_sets: HashMap::new(),
             pending: Vec::new(),
             leftover: std::collections::VecDeque::new(),
             warnings_before: 0,
@@ -1801,7 +1916,14 @@ impl HevcDecoder {
 
     /// Non-fatal problems seen so far.
     pub fn warnings(&self) -> u64 {
+        let planes: u64 = self
+            .planes
+            .iter()
+            .flat_map(|p| p.iter())
+            .map(|i| with_inner!(i, d => d.warnings()))
+            .sum();
         self.warnings_before
+            + planes
             + self
                 .inner
                 .as_ref()
@@ -1821,9 +1943,11 @@ impl HevcDecoder {
         let Some(hdr) = HevcNalHeader::parse(nal) else {
             return Err(Error::bitstream("bad NAL header"));
         };
+        let mut separate = false;
         if hdr.unit_type == nal_type::SPS && hdr.layer_id == 0 {
             let rbsp = unescape_rbsp(nal);
             let sps = Sps::parse(&rbsp[2..])?;
+            separate = sps.separate_colour_plane;
             let want_u8 = sps.bit_depth_luma == 8 && sps.bit_depth_chroma == 8;
             let matches = match &self.inner {
                 None => false,
@@ -1833,22 +1957,56 @@ impl HevcDecoder {
             if !matches {
                 // Drain what the previous implementation still owes, then
                 // switch. (Only the very first SPS normally gets here.)
-                if let Some(mut old) = self.inner.take() {
-                    let _ = with_inner!(&mut old, d => d.flush());
-                    while let Some(p) = with_inner!(&mut old, d => d.next_picture()) {
+                if self.inner.is_some() {
+                    self.flush()?;
+                    while let Some(p) = self.next_joined(true) {
                         self.leftover.push_back(p);
                     }
-                    self.warnings_before += with_inner!(&old, d => d.warnings());
+                    let total = self.warnings();
+                    self.inner = None;
+                    self.planes = None;
+                    self.warnings_before = total;
                 }
-                let mut inner = if want_u8 {
-                    Inner::U8(HevcDecoderImpl::with_threads(self.threads))
-                } else {
-                    Inner::U16(HevcDecoderImpl::with_threads(self.threads))
-                };
+                let mut inner = Inner::new(want_u8, self.threads, 0);
                 for p in std::mem::take(&mut self.pending) {
                     let _ = with_inner!(&mut inner, d => d.push_nal(&p));
                 }
                 self.inner = Some(inner);
+            }
+        }
+        if hdr.layer_id == 0
+            && matches!(hdr.unit_type, nal_type::VPS | nal_type::SPS | nal_type::PPS)
+            && let Some(k) = param_set_key(nal, hdr.unit_type)
+        {
+            self.param_sets.insert(k, nal.to_vec());
+        }
+        if separate && self.planes.is_none() {
+            let is_u8 = matches!(self.inner, Some(Inner::U8(_)));
+            let mut planes = Box::new([
+                Inner::new(is_u8, self.threads, 1),
+                Inner::new(is_u8, self.threads, 2),
+            ]);
+            // Everything a plane decoder needs from before it existed is
+            // the parameter sets, this SPS among them. VPSs first, then
+            // SPSs, then PPSs (a PPS is parsed against nothing, but keep
+            // the order the stream had to have).
+            let mut sets: Vec<_> = self.param_sets.iter().collect();
+            sets.sort_by_key(|(k, _)| **k);
+            for p in planes.iter_mut() {
+                for (_, n) in &sets {
+                    let _ = with_inner!(p, d => d.push_nal(n));
+                }
+            }
+            self.planes = Some(planes);
+            // This SPS went to the plane decoders with the replay.
+            return match &mut self.inner {
+                Some(inner) => with_inner!(inner, d => d.push_nal(nal)),
+                None => Ok(()),
+            };
+        }
+        if let Some(planes) = &mut self.planes {
+            for p in planes.iter_mut() {
+                with_inner!(p, d => d.push_nal(nal))?;
             }
         }
         match &mut self.inner {
@@ -1867,6 +2025,11 @@ impl HevcDecoder {
 
     /// End of stream: finish the current picture and drain the DPB.
     pub fn flush(&mut self) -> Result<()> {
+        if let Some(planes) = &mut self.planes {
+            for p in planes.iter_mut() {
+                with_inner!(p, d => d.flush())?;
+            }
+        }
         match &mut self.inner {
             Some(inner) => with_inner!(inner, d => d.flush()),
             None => Ok(()),
@@ -1878,10 +2041,7 @@ impl HevcDecoder {
         if let Some(p) = self.leftover.pop_front() {
             return Some(p);
         }
-        match &mut self.inner {
-            Some(inner) => with_inner!(inner, d => d.next_picture()),
-            None => None,
-        }
+        self.next_joined(true)
     }
 
     /// The next picture in output order if it is already finished.
@@ -1889,10 +2049,84 @@ impl HevcDecoder {
         if let Some(p) = self.leftover.pop_front() {
             return Some(p);
         }
-        match &mut self.inner {
-            Some(inner) => with_inner!(inner, d => d.try_next_picture()),
-            None => None,
+        self.next_joined(false)
+    }
+
+    /// The next picture of the implementation(s): a picture of plane 0, and
+    /// when it is one colour plane of a separate-plane picture, the matching
+    /// pictures of planes 1 and 2 joined to it.
+    fn next_joined(&mut self, wait: bool) -> Option<Picture> {
+        let (p0, separate) = match self.held.take() {
+            Some(p) => (p, true),
+            None => with_inner!(self.inner.as_mut()?, d => d.next_output(wait))?,
+        };
+        if !separate {
+            return Some(p0);
         }
+        let Some(planes) = &mut self.planes else {
+            return Some(p0);
+        };
+        // Planes 1 and 2 output in lockstep with plane 0 (the same pictures
+        // through the same DPB process); without waiting, both must be
+        // ready, or plane 0 is held until they are.
+        if !wait {
+            let ready = planes.iter().all(|p| {
+                with_inner!(p, d => d.dpb.output.front().is_some_and(|o| o.frame.progress.is_complete()))
+            });
+            if !ready {
+                self.held = Some(p0);
+                return None;
+            }
+        }
+        let p1 = with_inner!(&mut planes[0], d => d.next_output(true)).map(|(p, _)| p);
+        let p2 = with_inner!(&mut planes[1], d => d.next_output(true)).map(|(p, _)| p);
+        Some(join_planes(p0, p1, p2))
+    }
+}
+
+/// Three monochrome pictures (colour planes 0, 1 and 2 of one picture) as
+/// one 4:4:4 picture. A plane that never arrived (its slices were missing)
+/// comes out mid-grey.
+fn join_planes(mut p0: Picture, p1: Option<Picture>, p2: Option<Picture>) -> Picture {
+    let bps = p0.bytes_per_sample();
+    let len = p0.width as usize * p0.height as usize * bps;
+    let mut data = std::mem::take(&mut p0.data);
+    data.truncate(len);
+    let grey = |data: &mut Vec<u8>| {
+        let mid = 1u32 << (p0.bit_depth - 1);
+        for _ in 0..len / bps {
+            if bps == 1 {
+                data.push(mid as u8);
+            } else {
+                data.extend_from_slice(&(mid as u16).to_le_bytes());
+            }
+        }
+    };
+    for p in [p1, p2] {
+        match p {
+            Some(p) if p.data.len() >= len => data.extend_from_slice(&p.data[..len]),
+            _ => grey(&mut data),
+        }
+    }
+    let plane = |i: usize| crate::picture::Plane {
+        offset: i * len,
+        width: p0.width,
+        height: p0.height,
+    };
+    Picture {
+        width: p0.width,
+        height: p0.height,
+        bit_depth: p0.bit_depth,
+        // Every plane is coded at BitDepthY; the SPS's chroma depth still
+        // decides the sample size the implementation stores (and so this
+        // picture's, see `Picture::bytes_per_sample`).
+        bit_depth_chroma: p0.bit_depth_chroma,
+        chroma: crate::picture::ChromaFormat::Yuv444,
+        data,
+        planes: vec![plane(0), plane(1), plane(2)],
+        poc: p0.poc,
+        decode_index: p0.decode_index,
+        pool: p0.pool.clone(),
     }
 }
 

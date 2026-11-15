@@ -398,7 +398,7 @@ impl SliceHeader {
         let mut sao_chroma = false;
         if sps.sao_enabled {
             sao_luma = r.flag();
-            if sps.chroma_format_idc != 0 {
+            if sps.chroma_array_type() != 0 {
                 sao_chroma = r.flag();
             }
         }
@@ -649,7 +649,7 @@ fn parse_pred_weight_table(
         return Err(Error::bitstream("luma_log2_weight_denom out of range"));
     }
     let mut chroma_log2_denom = luma_log2_denom;
-    if sps.chroma_format_idc != 0 {
+    if sps.chroma_array_type() != 0 {
         let d = luma_log2_denom as i32 + r.se();
         if !(0..=7).contains(&d) {
             return Err(Error::bitstream("ChromaLog2WeightDenom out of range"));
@@ -677,7 +677,7 @@ fn parse_pred_weight_table(
         for f in luma_flags.iter_mut() {
             *f = r.flag();
         }
-        if sps.chroma_format_idc != 0 {
+        if sps.chroma_array_type() != 0 {
             for f in chroma_flags.iter_mut() {
                 *f = r.flag();
             }
