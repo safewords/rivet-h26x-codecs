@@ -1706,7 +1706,7 @@ impl<S: Sample> Core<S> {
             // one's reference, so none of them is free to trim.
             free_to_trim: false,
             sign_hiding: self.pps_opts.sign_hiding,
-            rdoq: (tune.rdoq && !bypass).then_some(&rdoq_cx),
+            rdoq: (tune.rdoq && !bypass && (c.reference || tune.rdoq_nonref)).then_some(&rdoq_cx),
             fast_intra: tune.fast_intra,
         };
         // The reconstruction takes its sample depth from the parsed SPS —
@@ -1725,6 +1725,7 @@ impl<S: Sample> Core<S> {
         pic.tu_split = tune.inter_tu_split;
         pic.tu_split_max = tune.inter_tu_split_max;
         pic.slice_b = c.kind == Kind::B;
+        pic.rdoq_chroma = tune.rdoq_inter_chroma;
         if !c.reference && tune.nonref_fast {
             // A picture nothing references: its decisions shape only itself.
             pic.rskip = Some(f32::MAX);

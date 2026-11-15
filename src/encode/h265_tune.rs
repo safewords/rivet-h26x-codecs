@@ -73,6 +73,12 @@ pub(crate) struct Tune {
     pub sign_hiding: bool,
     /// Rate-distortion optimised quantisation (`h265_rdoq::quantise`).
     pub rdoq: bool,
+    /// RDOQ for the chroma of inter units too
+    /// (`h265_me::InterPicture::rdoq_chroma`); intra units quantise
+    /// chroma by it wherever `rdoq` is on.
+    pub rdoq_inter_chroma: bool,
+    /// RDOQ in pictures nothing references as well.
+    pub rdoq_nonref: bool,
     /// `h265_me::InterPicture::drop_trial`.
     pub drop_trial: bool,
     /// `h265_me::InterPicture::nxn_trial`.
@@ -120,6 +126,8 @@ impl Tune {
         intra_split_depth: 1,
         sign_hiding: false,
         rdoq: false,
+        rdoq_inter_chroma: true,
+        rdoq_nonref: true,
         drop_trial: true,
         nxn_trial: 2.0,
         quarter_cross: false,
@@ -152,7 +160,8 @@ impl Tune {
             // medium`): sign hiding -4.19% -> -6.06% BD-rate; RDOQ alone
             // -7.47% (ducks +10.7 -> -3.0, park_joy +6.0 -> +1.0, the CIF
             // clips 0.3-1.0 worse) and both -8.25%, at 1.3x the CPU for
-            // RDOQ by interleaved one-thread runs: the slow tier's tool.
+            // RDOQ by interleaved one-thread runs. See `rdoq` below for
+            // where it stands now.
             sign_hiding: true,
             // Measured 2026-11-15 (x265 parity, `--preset medium`):
             // pricing at live contexts -3.35% -> -4.17% BD-rate, and
@@ -172,6 +181,19 @@ impl Tune {
             // and 32x32 too; slow +2.53% at 1.10x against +2.48% at 1.27x;
             // veryfast -9.11% at 1.22x against -9.98% at 1.41x).
             inter_tu_split_max: 3,
+            // Every tier quantises by RDOQ (round 3, 2026-11-15, x265
+            // parity): the luma of inter units, and intra units whole.
+            // RDOQ on the chroma of inter units lost at every tier (medium
+            // -8.78% BD-rate with it, -10.38% without; slow +2.52% /
+            // +0.79%), and a chroma Lagrangian scaled by the chroma
+            // quantiser's step did not recover it (-8.44% / +2.70%). At
+            // medium and veryfast the pictures nothing references skip
+            // it: -10.28% against -10.38% at medium for a twentieth less
+            // CPU; veryfast -9.11% -> -11.76% (ducks +0.50% -> -11.03%)
+            // at 1.15x the CPU.
+            rdoq: true,
+            rdoq_inter_chroma: false,
+            rdoq_nonref: false,
             ..Tune::NEUTRAL
         };
         match p {
@@ -180,7 +202,7 @@ impl Tune {
             // the inter search: measured 2026-11-15, +3.93% -> +4.03%
             // BD-rate at 0.78x the CPU.
             Preset::Slow => Tune {
-                rdoq: true,
+                rdoq_nonref: true,
                 search_rings: 1,
                 intra_split_depth: 0,
                 intra_satd_gate: Some(1.5),

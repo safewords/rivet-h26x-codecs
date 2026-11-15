@@ -696,6 +696,10 @@ pub struct InterPicture<S: Sample> {
     tree_bits: Option<f64>,
     /// The slice is B (the initial contexts a rate falls back to).
     pub slice_b: bool,
+    /// Whether the chroma of an inter unit is quantised by RDOQ where the
+    /// context asks for it (`MeCtx::rdoq`); otherwise only its luma is,
+    /// the chroma by the plain quantiser. Intra units are not affected.
+    pub rdoq_chroma: bool,
     /// `slice_temporal_mvp_enabled_flag`: the SPS enables temporal MVP and
     /// every inter slice this encoder writes then sets it, naming list 1's
     /// first picture for a B slice and list 0's for a P one.
@@ -899,6 +903,7 @@ impl<S: Sample> InterPicture<S> {
             pool: Vec::new(),
             saves: Vec::new(),
             tree_bits: None,
+            rdoq_chroma: true,
             slice_b: false,
         }
     }
@@ -2346,6 +2351,7 @@ impl<S: Sample> InterPicture<S> {
             out.rqt_root_cbf = any || out.cbf_chroma.iter().any(|&c| c);
             return any;
         }
+        let cctx = &self.chroma_ctx(ctx);
         if self.cat != 0 {
             let bd_off = 6 * (ctx.bit_depth as i32 - 8);
             let qp_c = chroma_qp(self.cat, ctx.qp.clamp(-bd_off, 57)) + bd_off;
@@ -2361,7 +2367,7 @@ impl<S: Sample> InterPicture<S> {
                 for i in 0..4 {
                     let (px, py) = (x0 / 2 + (i & 1) * hc, y0 / 2 + (i >> 1) * hc);
                     let nz = code_residual_inter(
-                        ctx,
+                        cctx,
                         plane,
                         px,
                         py,
@@ -2415,6 +2421,7 @@ impl<S: Sample> InterPicture<S> {
             &mut out.luma,
         );
         let mut nz_c = 0u32;
+        let cctx = &self.chroma_ctx(ctx);
         if self.cat != 0 {
             // QpC: Table 8-10 for 4:2:0, `Min(qPi, 51)` otherwise — the
             // decoder's own `hevc::ctu::chroma_qp`, told which format it is
@@ -2443,7 +2450,7 @@ impl<S: Sample> InterPicture<S> {
                     let soff = py * c_stride + px;
                     let levels = &mut out.chroma[comp][t * nc2..(t + 1) * nc2];
                     let nz = code_residual_inter(
-                        ctx,
+                        cctx,
                         plane,
                         px,
                         py,
@@ -2658,6 +2665,15 @@ impl<S: Sample> InterPicture<S> {
                     wp,
                 );
             }
+        }
+    }
+
+    /// The context an inter unit's chroma is coded under: `ctx`, without
+    /// RDOQ unless [`Self::rdoq_chroma`].
+    fn chroma_ctx<'a>(&self, ctx: &MeCtx<'a, S>) -> MeCtx<'a, S> {
+        IntraCtx {
+            rdoq: ctx.rdoq.filter(|_| self.rdoq_chroma),
+            ..*ctx
         }
     }
 
@@ -4396,12 +4412,12 @@ fn code_residual_inter_n<S: Sample, const N: usize>(
 mod tests {
     use super::*;
     use crate::dsp::Cpu;
-    use crate::hevc::mvpred::merge_candidate;
     use crate::dsp::distortion::DistortionDsp;
     use crate::dsp::hevc::HevcDsp;
     use crate::dsp::hevc_enc::HevcEncDsp;
     use crate::encode::Config;
     use crate::encode::h265_syntax::{Geometry as SynGeometry, write_pps, write_sps};
+    use crate::hevc::mvpred::merge_candidate;
     use crate::picture::ChromaFormat;
 
     fn lcg(s: &mut u64) -> u32 {
