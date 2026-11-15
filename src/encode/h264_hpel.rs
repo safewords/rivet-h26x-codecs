@@ -559,25 +559,25 @@ impl<S: Sample> Search<'_, '_, S> {
             (-1, 1),
             (1, 1),
         ];
-        // The points already scored in this refinement: a second ring
-        // around a neighbour shares three to five of the first's, and each
-        // of those lost to a cost no lower than the best now, so it would
-        // lose again — skipping them changes nothing but the time.
-        let mut seen = [best; 40];
-        let mut ns = 1usize;
+        // A second ring around a neighbour of the first's centre shares
+        // three to five of its points (those within one step of the old
+        // centre), and each of those lost to a cost no lower than the best
+        // now, so it would lose again: they are skipped, which changes
+        // nothing but the time. (The quarter-sample ring shares none with
+        // the half-sample ones: each of its points has an odd component.)
         for (step, iters) in [(2i16, cfg.hpel_iters), (1, cfg.qpel_iters)] {
             // Quarter samples: the diamond, when asked.
             let pts = if step == 1 && cfg.qpel_diamond { 4 } else { 8 };
+            let mut prev: Option<Mv> = None;
             for _ in 0..iters {
                 let c = best;
                 for &(dx, dy) in &RING[..pts] {
                     let m = Mv::new(c.x + dx * step, c.y + dy * step);
-                    if !self.inside_q(m) || seen[..ns].contains(&m) {
+                    if !self.inside_q(m)
+                        || prev
+                            .is_some_and(|p| (m.x - p.x).abs() <= step && (m.y - p.y).abs() <= step)
+                    {
                         continue;
-                    }
-                    if ns < seen.len() {
-                        seen[ns] = m;
-                        ns += 1;
                     }
                     let rc = self.cost.of(m, self.pred);
                     if rc >= bcost {
@@ -593,6 +593,7 @@ impl<S: Sample> Search<'_, '_, S> {
                 if best == c {
                     break;
                 }
+                prev = Some(c);
             }
         }
         (best, bsatd, bcost)
