@@ -56,6 +56,10 @@ pub(crate) struct AnalysisCfg {
     /// Try `P_Skip` / `B_Skip` before any search, and take it when the
     /// skip prediction leaves no residual.
     pub(crate) early_skip: bool,
+    /// ... and when its luma squared error is under this many squared
+    /// quantiser steps per sample: a prediction that quantises to nothing
+    /// can still be one a searched vector beats by far.
+    pub(crate) skip_ssd: f32,
     /// Intra_4x4 is analysed.
     pub(crate) i4x4: bool,
     /// How far the best intra estimate may trail the best inter one and
@@ -91,6 +95,15 @@ impl AnalysisCfg {
             if f.len() > 7 {
                 self.rd_max = f[7] as usize;
             }
+            if f.len() > 8 {
+                self.rd = f[8] != 0.0;
+            }
+            if f.len() > 9 {
+                self.trellis = f[9] != 0.0;
+            }
+            if f.len() > 10 {
+                self.early_skip = f[10] != 0.0;
+            }
         }
         self
     }
@@ -115,6 +128,7 @@ impl AnalysisCfg {
         },
         sub8x8: false,
         early_skip: true,
+        skip_ssd: 0.02,
         i4x4: true,
         intra_ratio: 1.2,
         rd_ratio: 1.1,
@@ -124,8 +138,10 @@ impl AnalysisCfg {
         rd: true,
     };
 
-    /// The fastest tier: a diamond search, one refinement round each,
-    /// decisions on the estimates, no trellis.
+    /// The fastest tier: a diamond search, one refinement round each, one
+    /// inter shape priced against skip and intra. (Deciding on the
+    /// estimates alone, coding only the winner, measured +35 % BD-rate
+    /// against x264 veryfast; pricing one shape, -1.8 %.)
     pub(crate) const VERYFAST: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -145,13 +161,14 @@ impl AnalysisCfg {
         },
         sub8x8: false,
         early_skip: true,
+        skip_ssd: 0.06,
         i4x4: true,
         intra_ratio: 1.0,
         rd_ratio: 1.0,
         rd_max: 1,
         bidir_refine: false,
-        trellis: false,
-        rd: false,
+        trellis: true,
+        rd: true,
     };
 
     /// The most thorough tier: the multi-hexagon search, more refinement,
@@ -175,6 +192,7 @@ impl AnalysisCfg {
         },
         sub8x8: false,
         early_skip: true,
+        skip_ssd: 0.01,
         i4x4: true,
         intra_ratio: 1.5,
         rd_ratio: 1.25,
@@ -194,15 +212,28 @@ impl AnalysisCfg {
     }
 }
 
-/// The squared-error multiplier at `qp`: `0.85 * 2^((qp - 12) / 3)`.
+static LAMS: std::sync::LazyLock<(f32, f32)> = std::sync::LazyLock::new(|| {
+    std::env::var("H26X_LAMS")
+        .ok()
+        .map(|v| {
+            let f: Vec<f32> = v.split(',').map(|x| x.parse().unwrap()).collect();
+            (f[0], f[1])
+        })
+        .unwrap_or((0.8, 1.0))
+});
+
+/// The squared-error multiplier at `qp`: `0.68 * 2^((qp - 12) / 3)` — the
+/// customary `0.85` scaled by 0.8, which measured better against 1.0,
+/// 0.65 and 1.25 on the parity corpus (+6.41 % against +7.19 / +6.80 /
+/// +8.45 % BD-rate).
 pub(crate) fn lambda_ssd(qp: i32) -> f32 {
-    0.85 * ((qp - 12) as f32 / 3.0).exp2()
+    0.85 * ((qp - 12) as f32 / 3.0).exp2() * LAMS.0
 }
 
 /// The multiplier for SATD-scale costs: the square root of
 /// [`lambda_ssd`], since SATD grows as the error, not its square.
 pub(crate) fn lambda_satd(qp: i32) -> f32 {
-    lambda_ssd(qp).sqrt()
+    (0.85 * ((qp - 12) as f32 / 3.0).exp2()).sqrt() * LAMS.1
 }
 
 /// What one picture's analysis keeps: the settings, each list's search
@@ -418,8 +449,23 @@ fn delta(qp: i32, qp_pred: i32, residual: bool) -> i8 {
 /// the residual is quantised to see whether anything survives.
 fn early_skip_sad(qp: i32) -> u32 {
     let qstep = 0.625 * (qp as f32 / 6.0).exp2();
-    (256.0 * qstep * 0.5) as u32
+    (256.0 * qstep * *ESF) as u32
 }
+
+/// The early-skip ceiling on the skip prediction's luma squared error:
+/// a residual that quantises to nothing can still be one the
+/// rate-distortion comparison would rather code.
+fn early_skip_ssd(qp: i32, factor: f32) -> f32 {
+    let qstep = 0.625 * (qp as f32 / 6.0).exp2();
+    256.0 * qstep * qstep * factor
+}
+
+static ESF: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+    std::env::var("H26X_ESF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.5)
+});
 
 // ---------------------------------------------------------------------------
 // Intra
@@ -1057,7 +1103,11 @@ pub(crate) fn p_mb<S: Sample>(
                 false,
                 Some(false),
             );
-            if r.cbp_luma == 0 && r.cbp_chroma == 0 {
+            if r.cbp_luma == 0
+                && r.cbp_chroma == 0
+                && (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32)
+                    < early_skip_ssd(ctx.qp, cfg.skip_ssd)
+            {
                 st.commit_part(0, 0, 16, 16, [Some(skip_mv), None]);
                 return MbChoice::Inter(skip_dec);
             }
@@ -1644,7 +1694,11 @@ pub(crate) fn b_mb<S: Sample>(
                 false,
                 Some(false),
             );
-            if r.cbp_luma == 0 && r.cbp_chroma == 0 {
+            if r.cbp_luma == 0
+                && r.cbp_chroma == 0
+                && (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32)
+                    < early_skip_ssd(ctx.qp, cfg.skip_ssd)
+            {
                 return MbChoice::Inter(skip_dec);
             }
             predict_cand(rec, st, &direct);
