@@ -79,6 +79,9 @@ pub(crate) struct Tune {
     pub rdoq_inter_chroma: bool,
     /// RDOQ in pictures nothing references as well.
     pub rdoq_nonref: bool,
+    /// SAO (under `Config::sao`) in pictures nothing references as well;
+    /// otherwise their slices carry the SAO flags clear.
+    pub sao_nonref: bool,
     /// `h265_me::InterPicture::drop_trial`.
     pub drop_trial: bool,
     /// `h265_me::InterPicture::nxn_trial`.
@@ -128,6 +131,7 @@ impl Tune {
         rdoq: false,
         rdoq_inter_chroma: true,
         rdoq_nonref: true,
+        sao_nonref: true,
         drop_trial: true,
         nxn_trial: 2.0,
         quarter_cross: false,
@@ -194,6 +198,11 @@ impl Tune {
             rdoq: true,
             rdoq_inter_chroma: false,
             rdoq_nonref: false,
+            // No SAO in the pictures nothing references (round 3,
+            // 2026-11-15, x265 parity): veryfast -11.76% -> -12.06%
+            // BD-rate at 0.92x the CPU, medium -10.28% -> -10.55% at
+            // 0.94x, slow +0.79% -> +0.58% at 0.95x.
+            sao_nonref: false,
             ..Tune::NEUTRAL
         };
         match p {

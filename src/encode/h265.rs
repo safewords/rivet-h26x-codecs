@@ -1725,6 +1725,9 @@ impl<S: Sample> Core<S> {
         pic.tu_split = tune.inter_tu_split;
         pic.tu_split_max = tune.inter_tu_split_max;
         pic.slice_b = c.kind == Kind::B;
+        // SAO in a picture nothing references improves only that picture,
+        // and under the tiers not by enough to pay for its decision.
+        let sao_on = self.cfg.sao && (c.reference || tune.sao_nonref);
         pic.rdoq_chroma = tune.rdoq_inter_chroma;
         if !c.reference && tune.nonref_fast {
             // A picture nothing references: its decisions shape only itself.
@@ -1868,7 +1871,10 @@ impl<S: Sample> Core<S> {
                     .map(|poc| poc - cur)
                     .collect(),
                 // As in `code_picture`, and from the same switch.
-                sao: sao_flags(self.cfg.sao, cat),
+                sao: sao_flags(self.cfg.sao, cat).map(|f| syn::SaoFlags {
+                    luma: sao_on,
+                    chroma: f.chroma.map(|_| sao_on),
+                }),
                 // The table a P slice must carry under `weighted_pred_flag`
                 // and a B slice under `weighted_bipred_flag`, defaults and
                 // all.
@@ -2071,7 +2077,7 @@ impl<S: Sample> Core<S> {
         // Then SAO, over the deblocked samples. `InterPicture` already
         // holds the decoder-grade state both filters read, so unlike the
         // intra path there is nothing to hand across.
-        let plan = self.cfg.sao.then(|| {
+        let plan = sao_on.then(|| {
             let InterPicture { info, recon, .. } = &mut pic;
             sao_picture(&mctx, recon, info, &sps, &pps, &py, cw, &pcb, &pcr, ccw)
         });
