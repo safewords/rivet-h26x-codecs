@@ -23,9 +23,8 @@
 //! on the same numbers as before. A unit under explicit weighting scores
 //! through the interpolating path as it always did.
 //!
-//! The planes cover the reference's padded area less a margin of four
-//! samples on every side, where the filter would reach outside it; the
-//! search keeps its candidates inside that margin.
+//! The planes cover the picture and [`REACH`] samples of its padding on
+//! every side; a candidate reaching further is interpolated when scored.
 
 use crate::dsp::hevc::HevcDsp;
 use crate::hevc::frame::Plane16;
@@ -45,9 +44,11 @@ pub(crate) struct HalfPlanes<S: Sample> {
     pub planes: Vec<Vec<S>>,
     /// The reference plane's stride.
     pub stride: usize,
-    /// The reference plane's padding: valid samples lie within
-    /// `pad - MARGIN` of the picture.
+    /// The reference plane's padding.
     pub pad: usize,
+    /// How far outside the picture the phases were built: a block
+    /// reaching further is interpolated as it is scored.
+    pub ext: usize,
     /// Picture width and height.
     pub width: usize,
     /// See `width`.
@@ -61,6 +62,13 @@ pub(crate) struct HalfPlanes<S: Sample> {
 
 /// How far inside the padded area the planes are valid.
 pub(crate) const MARGIN: usize = 4;
+
+/// How far outside the picture the phases are built. Vectors reaching
+/// further are rare, and are scored by interpolating as they always could
+/// be: the planes are a cache of exact values, so where they stop changes
+/// no decision. Built over the whole padded area they cost a CIF picture
+/// more than twice its own area.
+const REACH: usize = 16;
 
 impl<S: Sample> HalfPlanes<S> {
     /// Build the fractional phases of `p`, whose border must already be
@@ -89,7 +97,12 @@ impl<S: Sample> HalfPlanes<S> {
             .collect();
         let mut tmp = vec![0i16; T * (T + 7)];
         let mut out14 = vec![0i16; T * T];
-        let (lo, hi_x, hi_y) = (MARGIN, stride - MARGIN, rows - MARGIN);
+        let ext = REACH.min(p.pad - MARGIN);
+        let (lo, hi_x, hi_y) = (
+            p.pad - ext,
+            p.pad + p.width + ext,
+            (p.pad + p.height + ext).min(rows - MARGIN),
+        );
         let mut y0 = lo;
         while y0 < hi_y {
             let th = T.min(hi_y - y0);
@@ -149,6 +162,7 @@ impl<S: Sample> HalfPlanes<S> {
             planes,
             stride,
             pad: p.pad,
+            ext,
             width: p.width,
             height: p.height,
             source: p.data.as_ptr() as usize,
@@ -175,7 +189,7 @@ impl<S: Sample> HalfPlanes<S> {
         }
         let xi = x as i32 + (mvx >> 2);
         let yi = y as i32 + (mvy >> 2);
-        let lim = (self.pad - MARGIN) as i32;
+        let lim = self.ext as i32;
         if xi < -lim
             || yi < -lim
             || xi + w as i32 > self.width as i32 + lim
