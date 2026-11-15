@@ -355,6 +355,26 @@ pub(crate) fn avail_8x8(bx: usize, by: usize, mb: MbAvail) -> IntraAvail {
 /// differ about, a second copy would only be a second thing to keep in
 /// step. `intra` still picks the dead zone, which does differ.
 #[allow(clippy::too_many_arguments)]
+/// The residual `src - pred` of an `N` by `N` block into `out` (raster),
+/// a row at a time so each row is one bounds check and a vector subtract.
+#[inline(always)]
+pub(crate) fn diff_block<S: Sample, const N: usize>(
+    src: &[S],
+    ss: usize,
+    pred: &[S],
+    ps: usize,
+    out: &mut [i16],
+) {
+    for y in 0..N {
+        let s: &[S; N] = src[y * ss..y * ss + N].try_into().expect("N samples");
+        let p: &[S; N] = pred[y * ps..y * ps + N].try_into().expect("N samples");
+        let o: &mut [i16; N] = (&mut out[y * N..y * N + N]).try_into().expect("N levels");
+        for x in 0..N {
+            o[x] = (s[x].to_i32() - p[x].to_i32()) as i16;
+        }
+    }
+}
+
 pub(crate) fn code_block_8x8<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut Recon<S>,
@@ -366,13 +386,7 @@ pub(crate) fn code_block_8x8<S: Sample>(
     intra: bool,
 ) -> ([i16; 64], [u8; 4]) {
     let mut residual = [0i16; 64];
-    for y in 0..8 {
-        for x in 0..8 {
-            residual[y * 8 + x] = (src[y * src_stride + x].to_i32()
-                - rec.data[off + y * rec.stride + x].to_i32())
-                as i16;
-        }
-    }
+    diff_block::<S, 8>(src, src_stride, &rec.data[off..], rec.stride, &mut residual);
     let mut coeffs = [0i32; 64];
     (ctx.enc.fdct8)(&residual, &mut coeffs);
     // `qbits8`, not `qbits4` + something: 8.5.13.1 dequantises an 8x8 by
@@ -501,13 +515,7 @@ pub(crate) fn code_block_4x4<S: Sample>(
     keep_dc: bool,
 ) -> ([i16; 16], u32, i32) {
     let mut residual = [0i16; 16];
-    for y in 0..4 {
-        for x in 0..4 {
-            residual[y * 4 + x] = (src[y * src_stride + x].to_i32()
-                - rec.data[off + y * rec.stride + x].to_i32())
-                as i16;
-        }
-    }
+    diff_block::<S, 4>(src, src_stride, &rec.data[off..], rec.stride, &mut residual);
     let mut coeffs = [0i32; 16];
     (ctx.enc.fdct4)(&residual, &mut coeffs);
     let dc = coeffs[0];

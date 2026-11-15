@@ -911,13 +911,13 @@ fn code_inter_4x4<S: Sample>(
     keep_dc: bool,
 ) -> ([i16; 16], u32, i32) {
     let mut residual = [0i16; 16];
-    for y in 0..4 {
-        for x in 0..4 {
-            residual[y * 4 + x] = (src[y * src_stride + x].to_i32()
-                - rec.data[off + y * rec.stride + x].to_i32())
-                as i16;
-        }
-    }
+    crate::encode::h264_intra::diff_block::<S, 4>(
+        src,
+        src_stride,
+        &rec.data[off..],
+        rec.stride,
+        &mut residual,
+    );
     let mut coeffs = [0i32; 16];
     (ctx.enc.fdct4)(&residual, &mut coeffs);
     let dc = coeffs[0];
