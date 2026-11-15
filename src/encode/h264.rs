@@ -920,7 +920,7 @@ impl<S: Sample> Core<S> {
                 .with_aq(cfg.aq_strength)
                 .with_analysis(
                     (std::env::var_os("H26X_OLD_DECISIONS").is_none())
-                        .then_some(super::h264_analyse::AnalysisCfg::MEDIUM.tuned()),
+                        .then_some(super::h264_analyse::AnalysisCfg::of(cfg.preset).tuned()),
                     cfg.entropy == Entropy::Cabac,
                 );
         // The buffer to declare, snapped to what the syntax can carry —

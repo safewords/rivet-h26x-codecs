@@ -180,6 +180,26 @@ pub(crate) fn avg_into<S: Sample>(
     w: usize,
     h: usize,
 ) {
+    if S::BYTES == 1 {
+        // SAFETY: a one-byte `Sample` is `u8` (the trait has two
+        // implementors, `u8` and `u16`), so the slices are byte slices of
+        // the same lengths.
+        let (out, a, b) = unsafe {
+            (
+                std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len()),
+                std::slice::from_raw_parts(a.as_ptr() as *const u8, a.len()),
+                std::slice::from_raw_parts(b.as_ptr() as *const u8, b.len()),
+            )
+        };
+        for y in 0..h {
+            let (ra, rb) = (&a[y * as_..y * as_ + w], &b[y * bs..y * bs + w]);
+            let ro = &mut out[y * os..y * os + w];
+            for ((o, &p), &q) in ro.iter_mut().zip(ra).zip(rb) {
+                *o = ((p as u16 + q as u16 + 1) >> 1) as u8;
+            }
+        }
+        return;
+    }
     for y in 0..h {
         let (ra, rb) = (&a[y * as_..y * as_ + w], &b[y * bs..y * bs + w]);
         let ro = &mut out[y * os..y * os + w];
@@ -278,6 +298,11 @@ pub(crate) struct MeCfg {
     /// Uneven multi-hexagon: a cross and rings of hexagons around the
     /// start before the descent, for motion the predictors miss.
     pub(crate) umh: bool,
+    /// Refine quarter samples on the four-point diamond rather than the
+    /// eight-point square.
+    pub(crate) qpel_diamond: bool,
+    /// Small-diamond descent instead of the hexagon (cheapest).
+    pub(crate) dia: bool,
 }
 
 /// One block's search: everything fixed while candidates are scored.
@@ -324,9 +349,8 @@ impl<S: Sample> Search<'_, '_, S> {
 
     /// SATD of the prediction at `mv` (no rate).
     #[inline]
-    pub(crate) fn satd(&self, mv: Mv) -> u32 {
-        let mut buf = [S::default(); 256];
-        let (p, ps) = self.r.pred(self.x, self.y, mv, self.w, self.h, &mut buf);
+    pub(crate) fn satd(&self, mv: Mv, buf: &mut [S; 256]) -> u32 {
+        let (p, ps) = self.r.pred(self.x, self.y, mv, self.w, self.h, buf);
         (self.dist.satd)(self.src, self.src_stride, p, ps, self.w, self.h)
     }
 
@@ -417,15 +441,46 @@ impl<S: Sample> Search<'_, '_, S> {
                 r += 4;
             }
         }
-        // Hexagon descent.
-        for _ in 0..cfg.range {
+        if cfg.dia {
+            // Small diamond to a local minimum.
+            for _ in 0..cfg.range {
+                let c = best;
+                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    try_at(c.0 + dx, c.1 + dy, &mut best, &mut bcost);
+                }
+                if best == c {
+                    break;
+                }
+            }
+            return self.refine(Mv::new((best.0 * 4) as i16, (best.1 * 4) as i16), cfg);
+        }
+        // Hexagon descent. After the first ring, a move to one of the six
+        // vertices leaves three of the new ring's points already scored
+        // (they were the old ring's), so only the other three are tried.
+        const HEX: [(i32, i32); 6] = [(-2, 0), (-1, -2), (1, -2), (2, 0), (1, 2), (-1, 2)];
+        let c = best;
+        let mut dir = usize::MAX;
+        for (k, &(dx, dy)) in HEX.iter().enumerate() {
+            let before = best;
+            try_at(c.0 + dx, c.1 + dy, &mut best, &mut bcost);
+            if best != before {
+                dir = k;
+            }
+        }
+        let mut it = 1;
+        while dir != usize::MAX && it < cfg.range {
             let c = best;
-            for (dx, dy) in [(-2, 0), (-1, -2), (1, -2), (2, 0), (1, 2), (-1, 2)] {
-                try_at(c.0 + dx, c.1 + dy, &mut best, &mut bcost);
+            let mut moved = usize::MAX;
+            for k in [dir + 5, dir, dir + 1] {
+                let k = k % 6;
+                let before = best;
+                try_at(c.0 + HEX[k].0, c.1 + HEX[k].1, &mut best, &mut bcost);
+                if best != before {
+                    moved = k;
+                }
             }
-            if best == c {
-                break;
-            }
+            dir = moved;
+            it += 1;
         }
         // Square refinement.
         let c = best;
@@ -448,22 +503,26 @@ impl<S: Sample> Search<'_, '_, S> {
     /// Sub-sample refinement from `mv`: square rings at half, then quarter
     /// samples, scored by SATD plus rate. Returns `(mv, satd, cost)`.
     pub(crate) fn refine(&self, mv: Mv, cfg: &MeCfg) -> (Mv, u32, u32) {
+        let mut buf = [S::default(); 256];
         let mut best = mv;
-        let mut bsatd = self.satd(best);
+        let mut bsatd = self.satd(best, &mut buf);
         let mut bcost = bsatd + self.cost.of(best, self.pred);
+        const RING: [(i16, i16); 8] = [
+            (0, -1),
+            (-1, 0),
+            (1, 0),
+            (0, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
+        ];
         for (step, iters) in [(2i16, cfg.hpel_iters), (1, cfg.qpel_iters)] {
+            // Quarter samples: the diamond, when asked.
+            let pts = if step == 1 && cfg.qpel_diamond { 4 } else { 8 };
             for _ in 0..iters {
                 let c = best;
-                for (dx, dy) in [
-                    (0, -1),
-                    (-1, 0),
-                    (1, 0),
-                    (0, 1),
-                    (-1, -1),
-                    (1, -1),
-                    (-1, 1),
-                    (1, 1),
-                ] {
+                for &(dx, dy) in &RING[..pts] {
                     let m = Mv::new(c.x + dx * step, c.y + dy * step);
                     if !self.inside_q(m) {
                         continue;
@@ -472,7 +531,7 @@ impl<S: Sample> Search<'_, '_, S> {
                     if rc >= bcost {
                         continue;
                     }
-                    let s = self.satd(m);
+                    let s = self.satd(m, &mut buf);
                     if s + rc < bcost {
                         bcost = s + rc;
                         bsatd = s;
