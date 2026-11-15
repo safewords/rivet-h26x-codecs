@@ -99,7 +99,7 @@ Progressive H.264 frame pictures are decided by a rate-distortion analysis
 (`src/encode/h264_analyse.rs`) in three tiers, `--preset veryfast | medium |
 slow` in `h26xenc` (`Config::preset`; the CLI preset also turns on three B
 pictures, the 8x8 transform, sub-macroblock partitions except in veryfast,
-the B pyramid and the lookahead):
+the B pyramid and the lookahead; slow keeps five references):
 
 - **Motion**: the three half-sample planes of each reference are built once
   (`h264_hpel.rs`), so every quarter-sample candidate is a plane read or one
@@ -108,50 +108,67 @@ the B pyramid and the lookahead):
   coded neighbours' and the lookahead's half-resolution vectors; a hexagon
   (veryfast: small diamond; slow: uneven multi-hexagon) descent on SAD plus
   lambda times the vector's rate, then half- and quarter-sample refinement
-  on SATD plus rate. P pictures search up to 3 (slow 4) references.
+  on SATD plus rate. P pictures search up to 3 (slow 5) references, and a
+  P partition below 16x16 picks its own among those whose 16x16 cost came
+  within 1.25x (slow 1.5x) of the best (mixed references). A B pair is
+  refined jointly — each list's vector a quarter sample around with the
+  other held, scored as the average they make (16x16: one round in
+  veryfast, two otherwise; slow refines its partitions' pairs too), and
+  list 1's search also starts from list 0's vector mirrored.
 - **Decision**: shapes, B directions and intra modes are estimated at SATD
   plus rate; skip, the best one to three inter shapes at both transform
   sizes and the best intra type are then coded and compared on
   `SSD + lambda * R`, with `R` priced by the picture's own CABAC writer from
   its live context states (`CabacEncoder::estimating`) — no table of what
-  syntax "usually" costs. Early skip when the skip prediction quantises to
-  nothing and its error is small.
+  syntax "usually" costs (`CabacEstimator`, the same writers compiled for
+  pricing). Early skip when the skip prediction quantises to nothing and
+  its error is small.
 - **Quantisation**: the chosen macroblock is re-quantised by a trellis over
   each block's level choices, priced from the live contexts
-  (`h264_trellis.rs`).
+  (`h264_trellis.rs`). Slow quantises every candidate the comparison codes
+  by the trellis, so its decisions see the levels they will write;
+  veryfast skips the trellis in B pictures nothing references.
 - **Structure**: a B pyramid (the middle B a reference; a P picture's list 0
   reordered to its anchor), and a lookahead (`h264_lookahead.rs`) that
   propagates half-resolution intra/inter cost estimates back through each
   picture's vectors and codes reused reference macroblocks finer
-  (`--tree N`).
+  (`--tree N`), over frame quantiser offsets [I, P, B, Bref] = [-2, 0, 2, 1].
 
 Measured by a parity script outside the repository: 30 frames of five clips, rivet at
 QP 22/27/32/37 against x264 0.165 `--preset P --tune psnr` at CRF 18/23/28/33,
 one thread, both decoded by ffmpeg and compared raw; BD-rate on PSNR-Y and
-PSNR-avg (negative: rivet needs fewer bits). Time is the ratio of CPU cycles
-of interleaved runs on one loaded Apple M-series machine (the CPU-second
-ratios of the parity run, taken four encodes at a time, agree within 0.1x):
+PSNR-avg (negative: rivet needs fewer bits). Time is the ratio of CPU seconds
+of interleaved runs (rivet and x264 alternating, one encode at a time) on
+one loaded Apple M-series machine, summed over the four rate points:
 
 | `--preset` | clip | BD-rate Y | BD-rate avg | time vs x264 |
 |---|---|---:|---:|---:|
-| veryfast | foreman CIF | +6.49 % | +6.28 % | 3.28x |
-| | mobile CIF | -4.43 % | -6.00 % | 4.09x |
-| | akiyo CIF | -1.09 % | +0.47 % | 3.55x |
-| | ducks_take_off 720p | -9.97 % | -12.67 % | 3.85x |
-| | park_joy 720p | -3.18 % | -3.49 % | 4.12x |
-| | **mean** | **-2.44 %** | **-3.08 %** | **3.95x** |
-| medium | foreman CIF | +7.73 % | +7.70 % | 2.12x |
-| | mobile CIF | +8.72 % | +7.41 % | 2.39x |
-| | akiyo CIF | +0.62 % | +1.71 % | 2.34x |
-| | ducks_take_off 720p | +4.69 % | -0.11 % | 2.29x |
-| | park_joy 720p | +5.08 % | +4.55 % | 2.40x |
-| | **mean** | **+5.37 %** | **+4.25 %** | **2.33x** |
-| slow | foreman CIF | +10.83 % | +10.63 % | 2.09x |
-| | mobile CIF | +11.01 % | +9.48 % | 1.88x |
-| | akiyo CIF | +4.01 % | +5.19 % | 2.83x |
-| | ducks_take_off 720p | +7.25 % | +1.29 % | 1.64x |
-| | park_joy 720p | +5.79 % | +5.02 % | 1.70x |
-| | **mean** | **+7.78 %** | **+6.32 %** | **1.70x** |
+| veryfast | foreman CIF | +3.36 % | +3.10 % | 2.91x |
+| | mobile CIF | -6.68 % | -8.23 % | 3.29x |
+| | akiyo CIF | -6.17 % | -5.89 % | 3.18x |
+| | ducks_take_off 720p | -10.77 % | -13.13 % | 3.22x |
+| | park_joy 720p | -2.53 % | -2.94 % | 3.36x |
+| | **mean** | **-4.56 %** | **-5.42 %** | **3.27x** |
+| medium | foreman CIF | +3.34 % | +3.27 % | 2.07x |
+| | mobile CIF | +3.87 % | +3.06 % | 2.20x |
+| | akiyo CIF | -3.96 % | -3.88 % | 2.25x |
+| | ducks_take_off 720p | +2.54 % | -1.57 % | 2.14x |
+| | park_joy 720p | +3.89 % | +3.80 % | 2.20x |
+| | **mean** | **+1.94 %** | **+0.94 %** | **2.16x** |
+| slow | foreman CIF | +3.05 % | +2.97 % | 2.65x |
+| | mobile CIF | +3.50 % | +2.64 % | 2.46x |
+| | akiyo CIF | -2.08 % | -1.87 % | 3.34x |
+| | ducks_take_off 720p | +3.08 % | -1.81 % | 2.24x |
+| | park_joy 720p | +1.13 % | +1.01 % | 2.17x |
+| | **mean** | **+1.74 %** | **+0.59 %** | **2.24x** |
+
+The tree before this round (d66a816), timed the same way in the same
+session: 3.92x (veryfast), 2.33x (medium), 1.70x (slow), at -2.44 / +5.37 /
++7.78 % BD-rate Y. Of the time, the changes that leave every stream
+byte-identical (the CABAC writer and estimator, the trellis's tables, the
+search's averaging; see "Encoder speed") take 0.82x / 0.84x / 0.86x of the
+old time on their own; the compression changes then spend some of it back,
+slow most (its trellis in every candidate is +27 %).
 
 The starting point (2026-11-15, the placeholder decisions, `--bframes 3
 --refs 4 --t8x8 --subparts`) was +57.5 % / +55.7 % at 3.69x against medium.
@@ -166,9 +183,39 @@ What each step bought against x264 medium (BD-rate Y, mean of five):
 | lookahead vectors as search candidates | +7.9 % |
 | lambda 0.8x, early skip held to an error ceiling | +6.4 % |
 | three references for P pictures | +5.4 % |
+| frame offsets [I, P, B, Bref] = [-2, 0, 2, 1] (were [0, 0, 3, 1]) | +4.0 % |
+| mixed references in P partitions | +3.3 % |
+| B pairs refined jointly (16x16, two rounds) | +2.0 % |
+| list 0's vector mirrored as a list-1 start | +1.9 % |
+
+The other tiers over the same steps: slow +7.78 → trellis in every
+candidate +6.31 → offsets +4.97 → mixed references +4.08 → joint pair
+refinement (16x16 and partitions) +2.44 → five references +1.80 → mirrored
+start +1.74 %; veryfast -2.44 → offsets -4.03 → one round of pair
+refinement -5.39 → no trellis in non-reference B pictures -4.50 (for 6 %
+less time) → mirrored start -4.56 %.
 
 Tried and dropped, with what they measured (same corpus, BD-rate Y against
 medium unless named):
+
+- (2026-11-15, second round) The trellis in every candidate in medium:
+  -1.1 % for +25 % time. Partition pairs refined jointly in medium: -0.3 %
+  for +9 %. RD refinement of a P 16x16 winner's vector (its eight
+  quarter-sample neighbours coded and priced, slow): -0.15 % for +11 %.
+  Medium without early skip: -0.4 % for +12 %. Six references in slow:
+  -0.7 % for +10 % (five: -0.6 % for +5 %). A B frame offset of 1: a further
+  -0.3 % for +3 %. Tree strength 1.0 / 1.25 / 1.75 / 2.0 under the new
+  offsets: +0.4 to +1.4 % against 1.5. `lambda_ssd` 0.6x / 0.76x,
+  `lambda_satd` from 0.65 / 1.1: -0.07 to +0.4 %.
+- Veryfast trades: candidates at the 8x8 transform only, +3.2 % for -1 %
+  time; no trellis, +6.6 % for -20 %; Intra_4x4 off in inter pictures,
+  +1.6 % for -4 %; intra estimate ratio 0.8, +1.8 % for -4 %; no trellis on
+  inter chroma, +0.07 % Y (+0.7 % avg) for -3 %; deciding on the estimates
+  with the trellis on the winner, +28 % for -29 %.
+- Speed attempts that saved nothing: a beam of two to four trellis paths;
+  an integer all-zero prefilter before the trellis. Implicit B weighting
+  changes no stream under the pyramid — every B picture sits midway
+  between its two anchors, where the implicit weights are 32/32.
 
 - Deciding veryfast on the SATD estimates alone and coding only the winner:
   +35.1 % against x264 veryfast at 2.0x; pricing one shape, +3.9 % at 2.9x;
@@ -193,23 +240,23 @@ medium unless named):
   [-2, 0, 4] / [0, 0, 4]: +24.8 / +24.6 / +23.6 / +24.5 % (placeholder era;
   the pyramid's [-3, 0, 2, 1] kept for streams without the lookahead).
 
-Where the medium gap is, decomposed against x264 configured down to rivet's
-tool set (measured just before rivet's P pictures took several references):
-against constant-QP x264 (no macroblock tree) rivet without its lookahead
-was +4.7 %, of which x264's references and weighted prediction were ~2.2 %
-(`--ref 1 --weightp 0` left +2.5 %) — rivet's P references then recovered
-1.0 of it, leaving B-picture references and per-partition reference choice;
-x264's macroblock tree is worth ~3 % to x264 (CRF against `--qp`) and
-rivet's propagation ~2 % to rivet; the remaining ~2.5 % is
-per-macroblock decisions. Slow lacks what
-x264's slow adds (sub-8x8 partitions in the analysis, RD refinement of
-sub-sample vectors and intra modes, trellis during decisions, more B
-references), so it trails further than medium. The time gap is
-implementation efficiency, not search breadth: x264 does more searching
-per macroblock in its assembly than rivet does in Rust with SIMD for the
-distortion and transform kernels only — the CABAC pricing of candidates
-(a quarter of the time), the candidates' residual coding (a fifth), the
-search's own control flow and the trellis are scalar.
+Where the gap stands. x264's own features, measured black-box on this
+corpus (BD-rate when x264 drops them): `--trellis 0` +4.6 %, `--ref 1`
++2.3 %, `--no-weightb` +1.2 %, `--subme 6` +1.2 %, `--no-mixed-refs`
++1.0 %; against slow, `--trellis 1` +2.1 %, `--subme 7` +1.5 %, `--ref 3`
++0.7 %; `--direct spatial`, `--b-adapt 0`, `--no-chroma-me` nothing.
+Rivet now has the trellis (slow: in every candidate), mixed and multiple P
+references. What it lacks: more than one reference per B list (and with it
+the implicit weighting x264's weightb applies between unequal distances),
+which is most of the remaining medium gap (~1 %); slow's RD refinement of
+vectors and intra modes (x264's subme 8), tried in its simplest form above
+without return. The time gap is implementation efficiency: a slow
+park_joy profile is a quarter trellis (now in every candidate), a third
+search (SAD, SATD and the quarter-sample averages), a quarter candidate
+residual coding and its pricing; veryfast's is a sixth trellis, a sixth
+pricing, a fifth candidate coding and an eighth the bitstream writer
+itself — scalar control flow around SIMD kernels, where x264 is assembly
+throughout and decides veryfast without coding candidates at all.
 
 ### H.265 compression against x265
 
@@ -562,7 +609,15 @@ AVX2, NEON (bit-exact, checked by hand on ARM hardware) and wasm `simd128`
 `tools/verify_enc_ladder.sh` holds every `H26X_MAX_SIMD` rung of an encode
 to the scalar reference's bytes. The CABAC encoder's
 per-bin cost is a table now rather than a `log2` per bin, and RDOQ skips a
-block whose last coefficient is three or more. The record, with the
+block whose last coefficient is three or more. Since 2026-11-15 the H.264
+slice data is written by `CabacWriter` (bytes out with a carry into one held
+byte, the same bits as the standard's `PutBit`, held to it by the module's
+round trip), candidates are priced by `CabacEstimator` (a bin is one fused
+(state, bin) table lookup; the writers are generic over `BinEnc` so each
+compiles for it), the trellis's tables are sized to the block, and the
+search's quarter-sample averages run in fixed-width rows: together 0.82x /
+0.84x / 0.86x of the time at veryfast / medium / slow, every stream
+byte-identical. The record, with the
 profiles that chose these and the controls behind every number, is
 `docs/encode_speed.md`.
 
@@ -585,7 +640,7 @@ compares (280 identical, 0 moved) — so this is speed and nothing else.
 encode-side tables scalar for a measurement; `H26X_MAX_SIMD` caps the
 ladder as it does for the decoders. Neither encoder is threaded yet:
 `--threads` is accepted and unused. Against x264 at matched tiers see
-"H.264 compression against x264" above: 1.7x to 3.9x x264's single-thread
+"H.264 compression against x264" above: 2.2x to 3.3x x264's single-thread
 time, the gap in rivet's scalar candidate pricing, residual coding and
 search control flow rather than in how much it searches.
 
