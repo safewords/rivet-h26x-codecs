@@ -51,8 +51,6 @@ pub(crate) struct AnalysisCfg {
     pub(crate) me: MeCfg,
     /// The search for partitions smaller than 16x16 (range and rounds).
     pub(crate) me_sub: MeCfg,
-    /// P sub-macroblock shapes below 8x8 (8x4, 4x8, 4x4).
-    pub(crate) sub8x8: bool,
     /// Try `P_Skip` / `B_Skip` before any search, and take it when the
     /// skip prediction leaves no residual.
     pub(crate) early_skip: bool,
@@ -70,9 +68,6 @@ pub(crate) struct AnalysisCfg {
     pub(crate) rd_ratio: f32,
     /// At most this many inter shapes are coded for the comparison.
     pub(crate) rd_max: usize,
-    /// Refine a bi-predicted 16x16 by re-searching each list against the
-    /// other's prediction.
-    pub(crate) bidir_refine: bool,
     /// Re-quantise the chosen macroblock by the trellis (CABAC streams).
     pub(crate) trellis: bool,
     /// Decide by coding candidates and pricing them (`SSD + lambda * R`);
@@ -83,36 +78,6 @@ pub(crate) struct AnalysisCfg {
 }
 
 impl AnalysisCfg {
-    /// TEMPORARY tuning hook.
-    pub(crate) fn tuned(mut self) -> Self {
-        if let Ok(v) = std::env::var("H26X_AN") {
-            let f: Vec<f32> = v.split(',').map(|x| x.parse().unwrap()).collect();
-            self.me.hpel_iters = f[0] as u8;
-            self.me.qpel_iters = f[1] as u8;
-            self.me_sub.hpel_iters = f[2] as u8;
-            self.me_sub.qpel_iters = f[3] as u8;
-            self.rd_ratio = f[4];
-            self.intra_ratio = f[5];
-            self.me.range = f[6] as i32;
-            if f.len() > 7 {
-                self.rd_max = f[7] as usize;
-            }
-            if f.len() > 8 {
-                self.rd = f[8] != 0.0;
-            }
-            if f.len() > 9 {
-                self.trellis = f[9] != 0.0;
-            }
-            if f.len() > 10 {
-                self.early_skip = f[10] != 0.0;
-            }
-            if f.len() > 11 {
-                self.refs = f[11] as usize;
-            }
-        }
-        self
-    }
-
     /// The tier closest to x264's `medium`.
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
@@ -131,14 +96,12 @@ impl AnalysisCfg {
             qpel_diamond: false,
             dia: false,
         },
-        sub8x8: false,
         early_skip: true,
         skip_ssd: 0.02,
         i4x4: true,
         intra_ratio: 1.2,
         rd_ratio: 1.1,
         rd_max: 2,
-        bidir_refine: false,
         trellis: true,
         rd: true,
         refs: 3,
@@ -165,14 +128,12 @@ impl AnalysisCfg {
             qpel_diamond: true,
             dia: true,
         },
-        sub8x8: false,
         early_skip: true,
         skip_ssd: 0.06,
         i4x4: true,
         intra_ratio: 1.0,
         rd_ratio: 1.0,
         rd_max: 1,
-        bidir_refine: false,
         trellis: true,
         rd: true,
         refs: 1,
@@ -197,14 +158,12 @@ impl AnalysisCfg {
             qpel_diamond: false,
             dia: false,
         },
-        sub8x8: false,
         early_skip: true,
         skip_ssd: 0.01,
         i4x4: true,
         intra_ratio: 1.5,
         rd_ratio: 1.25,
         rd_max: 3,
-        bidir_refine: false,
         trellis: true,
         rd: true,
         refs: 4,
@@ -220,28 +179,20 @@ impl AnalysisCfg {
     }
 }
 
-static LAMS: std::sync::LazyLock<(f32, f32)> = std::sync::LazyLock::new(|| {
-    std::env::var("H26X_LAMS")
-        .ok()
-        .map(|v| {
-            let f: Vec<f32> = v.split(',').map(|x| x.parse().unwrap()).collect();
-            (f[0], f[1])
-        })
-        .unwrap_or((0.8, 1.0))
-});
-
 /// The squared-error multiplier at `qp`: `0.68 * 2^((qp - 12) / 3)` — the
 /// customary `0.85` scaled by 0.8, which measured better against 1.0,
 /// 0.65 and 1.25 on the parity corpus (+6.41 % against +7.19 / +6.80 /
 /// +8.45 % BD-rate).
 pub(crate) fn lambda_ssd(qp: i32) -> f32 {
-    0.85 * ((qp - 12) as f32 / 3.0).exp2() * LAMS.0
+    0.68 * ((qp - 12) as f32 / 3.0).exp2()
 }
 
-/// The multiplier for SATD-scale costs: the square root of
-/// [`lambda_ssd`], since SATD grows as the error, not its square.
+/// The multiplier for SATD-scale costs: the square root of the customary
+/// `0.85 * 2^((qp - 12) / 3)`, since SATD grows as the error, not its
+/// square. (Scaling it with [`lambda_ssd`]'s 0.8, or by 0.8 or 1.25 on
+/// its own, measured no better.)
 pub(crate) fn lambda_satd(qp: i32) -> f32 {
-    (0.85 * ((qp - 12) as f32 / 3.0).exp2()).sqrt() * LAMS.1
+    (0.85 * ((qp - 12) as f32 / 3.0).exp2()).sqrt()
 }
 
 /// What one picture's analysis keeps: the settings, each list's search
@@ -330,6 +281,10 @@ pub(crate) struct Nb<'n> {
 /// The analysis's verdict: an inter macroblock (its reconstruction in
 /// `rec`, its motion in the state) or an intra one (with the 4x4 modes
 /// the walk keeps for its neighbours).
+// The intra variant carries the decision the inter ones carry too (of
+// similar size, but generic here); boxing buys nothing for a value that
+// lives for one macroblock.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MbChoice<D> {
     Inter(D),
     Intra(MbDecision, [u8; 16]),
@@ -460,7 +415,7 @@ fn delta(qp: i32, qp_pred: i32, residual: bool) -> i8 {
 /// the residual is quantised to see whether anything survives.
 fn early_skip_sad(qp: i32) -> u32 {
     let qstep = 0.625 * (qp as f32 / 6.0).exp2();
-    (256.0 * qstep * *ESF) as u32
+    (256.0 * qstep * 0.5) as u32
 }
 
 /// The early-skip ceiling on the skip prediction's luma squared error:
@@ -470,13 +425,6 @@ fn early_skip_ssd(qp: i32, factor: f32) -> f32 {
     let qstep = 0.625 * (qp as f32 / 6.0).exp2();
     256.0 * qstep * qstep * factor
 }
-
-static ESF: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
-    std::env::var("H26X_ESF")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.5)
-});
 
 // ---------------------------------------------------------------------------
 // Intra
@@ -875,13 +823,13 @@ pub(crate) fn intra_mb<S: Sample>(
     let mut any = false;
     let budget = e16 * cfg.intra_ratio.max(1.0) * 1.15;
     let mut floor = e16;
-    if ctx.t8x8 {
-        if let Some(mut c) = i8x8(ctx, &mut rec[0], px, py, sy, src.ys, nb, lam1, budget) {
-            floor = floor.min(c.est);
-            with_chroma(&mut c.dec);
-            consider(c.dec, c.modes, c.est, rec, rate);
-            any = true;
-        }
+    if ctx.t8x8
+        && let Some(mut c) = i8x8(ctx, &mut rec[0], px, py, sy, src.ys, nb, lam1, budget)
+    {
+        floor = floor.min(c.est);
+        with_chroma(&mut c.dec);
+        consider(c.dec, c.modes, c.est, rec, rate);
+        any = true;
     }
     if cfg.i4x4 {
         let b = budget.min(floor * 1.15);
@@ -1601,8 +1549,8 @@ impl BCand {
                 }
             }
         }
-        for py in y / 8..(y + h + 7) / 8 {
-            for px in x / 8..(x + w + 7) / 8 {
+        for py in y / 8..(y + h).div_ceil(8) {
+            for px in x / 8..(x + w).div_ceil(8) {
                 self.dir[py * 2 + px] = dir;
             }
         }

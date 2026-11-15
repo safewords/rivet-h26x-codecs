@@ -919,8 +919,8 @@ impl<S: Sample> Core<S> {
             super::h264_pic::IntraTools::new(cfg.transform_8x8, cfg.subparts, cfg.bit_depth)
                 .with_aq(cfg.aq_strength)
                 .with_analysis(
-                    (std::env::var_os("H26X_OLD_DECISIONS").is_none())
-                        .then_some(super::h264_analyse::AnalysisCfg::of(cfg.preset).tuned()),
+                    (!cfg.legacy_decisions)
+                        .then_some(super::h264_analyse::AnalysisCfg::of(cfg.preset)),
                     cfg.entropy == Entropy::Cabac,
                 );
         // The buffer to declare, snapped to what the syntax can carry —
@@ -1029,10 +1029,8 @@ impl<S: Sample> Core<S> {
         let la = (fields.is_none() && cfg.tree_lookahead > 0).then(|| {
             super::h264_lookahead::Lookahead::new(
                 cfg.tree_lookahead as usize,
-                std::env::var("H26X_TREE")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1.5),
+                // Measured against 1.0 and 2.0 with the trellis on.
+                1.5,
                 geom.mbs_wide as usize,
                 geom.mbs_high as usize,
             )
@@ -1128,15 +1126,15 @@ impl<S: Sample> Core<S> {
             if c.kind == Kind::Idr {
                 self.la_refs.clear();
             }
-            if c.reference {
-                if let Some(la) = self.la.as_mut() {
-                    let later: Vec<Coded> = ready[i + 1..]
-                        .iter()
-                        .chain(future.iter())
-                        .copied()
-                        .collect();
-                    self.tools.mb_offsets = la.offsets(c, &self.la_refs, &later);
-                }
+            if c.reference
+                && let Some(la) = self.la.as_mut()
+            {
+                let later: Vec<Coded> = ready[i + 1..]
+                    .iter()
+                    .chain(future.iter())
+                    .copied()
+                    .collect();
+                self.tools.mb_offsets = la.offsets(c, &self.la_refs, &later);
             }
             // The lookahead's vectors against the references this picture
             // will predict from, as search candidates.
@@ -3105,12 +3103,6 @@ impl<S: Sample> Core<S> {
     /// by macroblock, and its frame offset goes. Measured on the parity
     /// corpus (x264 medium, 30 frames, 5 clips) against neighbours of each.
     fn qp_offsets(&self) -> [i32; 4] {
-        if let Ok(v) = std::env::var("H26X_QPOFF") {
-            let o: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
-            if o.len() == 4 {
-                return [o[0], o[1], o[2], o[3]];
-            }
-        }
         if self.la.is_some() {
             [0, 0, 3, 1]
         } else {

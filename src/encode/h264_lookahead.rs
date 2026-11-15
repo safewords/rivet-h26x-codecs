@@ -455,11 +455,11 @@ impl<S: Sample> Lookahead<S> {
                 amount[i] = own * (1.0 - c / intra[i] as f32);
             }
             for (l, r) in [(0usize, Some(l0)), (1, l1)] {
-                if let Some(r) = r {
-                    if let Some(mut acc) = prop.remove(&r) {
-                        self.spread(est, &amount, l, &mut acc);
-                        prop.insert(r, acc);
-                    }
+                if let Some(r) = r
+                    && let Some(mut acc) = prop.remove(&r)
+                {
+                    self.spread(est, &amount, l, &mut acc);
+                    prop.insert(r, acc);
                 }
             }
         }

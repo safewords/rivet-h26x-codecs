@@ -145,11 +145,8 @@ impl<S: Sample> IntraTools<S> {
         qp: u8,
         field: bool,
     ) -> Option<[u8; 1024]> {
-        (self.cabac
-            && !field
-            && self.analysis.is_some_and(|a| a.trellis)
-            && std::env::var_os("H26X_NO_TRELLIS").is_none())
-        .then(|| crate::h264::cabac_mb::CabacState::new(kind, 0, qp as i32).ctx)
+        (self.cabac && !field && self.analysis.is_some_and(|a| a.trellis))
+            .then(|| crate::h264::cabac_mb::CabacState::new(kind, 0, qp as i32).ctx)
     }
 
     /// The same tools with adaptive quantisation at `strength` (0 off).

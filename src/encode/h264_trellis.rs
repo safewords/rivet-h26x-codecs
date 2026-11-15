@@ -68,13 +68,6 @@ impl Block {
     }
 }
 
-static TLAM: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
-    std::env::var("H26X_TLAM")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1.0)
-});
-
 /// `Qstep` at `qp` (8.5's step table, doubling every six).
 fn qstep(qp: i32) -> f32 {
     const B: [f32; 6] = [0.625, 0.6875, 0.8125, 0.875, 1.0, 1.125];
@@ -167,7 +160,7 @@ impl Trellis {
         // lambda in this block's level units: squared error scales with its
         // own step (chroma's differs from luma's).
         let own = qstep(qp - self.bd_off);
-        let lam = self.lambda / (own * own) * *TLAM;
+        let lam = self.lambda / (own * own);
 
         // Every bin the block can code, priced once and scaled by lambda:
         // the level bins by context increment, then sig / last per position.
