@@ -726,6 +726,12 @@ pub struct SharedFrame<S: Sample = u8> {
     pub progress: [Progress; 2],
     /// Unique id.
     pub id: u64,
+    /// The conformance window of the SPS the picture was decoded with
+    /// (left, right, top, bottom luma samples), applied when it is output —
+    /// which may be after a later picture has activated another SPS. `None`
+    /// for frames no SPS made (grey stand-ins, the encoder's): the DPB's
+    /// current window then.
+    pub crop: Option<(u32, u32, u32, u32)>,
     pool: Option<FramePool<S>>,
 }
 
@@ -747,6 +753,7 @@ impl<S: Sample> SharedFrame<S> {
             inner: std::cell::UnsafeCell::new(frame),
             progress: [mk(), mk()],
             id,
+            crop: None,
             pool: None,
         }
     }
@@ -757,6 +764,7 @@ impl<S: Sample> SharedFrame<S> {
             inner: std::cell::UnsafeCell::new(frame),
             progress: [Progress::new(), Progress::new()],
             id,
+            crop: None,
             pool: Some(pool),
         }
     }

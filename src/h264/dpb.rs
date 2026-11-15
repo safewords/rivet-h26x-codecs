@@ -314,7 +314,7 @@ impl<S: Sample> Dpb<S> {
                 frame: p.frame.clone(),
                 poc: p.poc,
                 decode_index: p.decode_index,
-                crop: self.crop,
+                crop: p.frame.crop.unwrap_or(self.crop),
             });
         }
         self.remove_unneeded();
@@ -598,7 +598,7 @@ impl<S: Sample> Dpb<S> {
                                 frame: pic.frame.clone(),
                                 poc: pic.poc,
                                 decode_index: pic.decode_index,
-                                crop: self.crop,
+                                crop: pic.frame.crop.unwrap_or(self.crop),
                             });
                         }
                         return Ok(());

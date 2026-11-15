@@ -1599,7 +1599,13 @@ impl<S: Sample> H264DecoderImpl<S> {
                     f.field_poc = [top, bottom];
                 }
                 (
-                    Arc::new(SharedFrame::with_pool(f, id, self.frames.clone())),
+                    Arc::new({
+                        let mut sf = SharedFrame::with_pool(f, id, self.frames.clone());
+                        // Output crops with this SPS's window, whichever SPS
+                        // is active by then.
+                        sf.crop = Some(sps.crop);
+                        sf
+                    }),
                     self.decode_index,
                 )
             }
@@ -1964,5 +1970,59 @@ mod tests {
         sei.push(0x80);
         d.parse_sei(&sei);
         assert_eq!(d.x264_build, Some(148));
+    }
+
+    /// Every picture is cropped on output with the conformance window of
+    /// the SPS it was decoded with. An HLS rendition switch to a new SPS
+    /// whose coded size is the same but whose crop differs (320x186 then
+    /// 320x180, both 12 macroblock rows) once cropped the pictures still
+    /// waiting for output with the new window.
+    #[test]
+    fn buffered_pictures_keep_their_own_crop_across_an_sps_switch() {
+        use crate::encode::Config;
+        use crate::encode::h264::H264Encoder;
+        let encode = |w: u32, h: u32, frames: usize| -> Vec<u8> {
+            let mut e = H264Encoder::new(Config {
+                width: w,
+                height: h,
+                gop: 16,
+                ..Config::default()
+            })
+            .unwrap();
+            let n = e.frame_bytes();
+            let mut out = Vec::new();
+            for i in 0..frames {
+                let pic: Vec<u8> = (0..n).map(|k| ((k * 7 + i * 13) % 251) as u8).collect();
+                for a in e.push(&pic).unwrap() {
+                    out.extend_from_slice(&a.data);
+                }
+            }
+            for a in e.flush().unwrap() {
+                out.extend_from_slice(&a.data);
+            }
+            out
+        };
+        let (first, second) = (encode(48, 30, 3), encode(48, 26, 3));
+        let mut stream = first.clone();
+        stream.extend_from_slice(&second);
+        let mut d = H264Decoder::with_threads(1);
+        d.push_annexb(&first).unwrap();
+        // The first rendition's pictures must still be waiting when the
+        // second's SPS arrives, or this tests nothing.
+        let waiting = std::iter::from_fn(|| d.try_next_picture()).count();
+        assert!(
+            waiting < 3,
+            "{waiting} of 3 pictures already out before the switch"
+        );
+        let mut d = H264Decoder::with_threads(1);
+        d.push_annexb(&stream).unwrap();
+        d.flush().unwrap();
+        let sizes: Vec<(u32, u32)> = std::iter::from_fn(|| d.next_picture())
+            .map(|p| (p.width, p.height))
+            .collect();
+        assert_eq!(
+            sizes,
+            [(48, 30), (48, 30), (48, 30), (48, 26), (48, 26), (48, 26)]
+        );
     }
 }
