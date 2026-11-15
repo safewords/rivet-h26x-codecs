@@ -459,21 +459,20 @@ impl<S: Sample> Search<'_, '_, S> {
                 }
                 r += 2;
             }
+            // The rings' four points on the axes, (+-r, 0) and (0, +-r),
+            // are the cross's own (every ring radius is a multiple of four,
+            // the cross's of two), already scored against this centre.
             let mut r = 4;
             while r <= cfg.range {
                 for (dx, dy) in [
-                    (-2, 0),
                     (-2, 1),
                     (-2, -1),
-                    (2, 0),
                     (2, 1),
                     (2, -1),
                     (-1, 2),
                     (1, 2),
-                    (0, 2),
                     (-1, -2),
                     (1, -2),
-                    (0, -2),
                     (-2, 2),
                     (2, 2),
                     (-2, -2),
@@ -560,6 +559,12 @@ impl<S: Sample> Search<'_, '_, S> {
             (-1, 1),
             (1, 1),
         ];
+        // The points already scored in this refinement: a second ring
+        // around a neighbour shares three to five of the first's, and each
+        // of those lost to a cost no lower than the best now, so it would
+        // lose again — skipping them changes nothing but the time.
+        let mut seen = [best; 40];
+        let mut ns = 1usize;
         for (step, iters) in [(2i16, cfg.hpel_iters), (1, cfg.qpel_iters)] {
             // Quarter samples: the diamond, when asked.
             let pts = if step == 1 && cfg.qpel_diamond { 4 } else { 8 };
@@ -567,8 +572,12 @@ impl<S: Sample> Search<'_, '_, S> {
                 let c = best;
                 for &(dx, dy) in &RING[..pts] {
                     let m = Mv::new(c.x + dx * step, c.y + dy * step);
-                    if !self.inside_q(m) {
+                    if !self.inside_q(m) || seen[..ns].contains(&m) {
                         continue;
+                    }
+                    if ns < seen.len() {
+                        seen[ns] = m;
+                        ns += 1;
                     }
                     let rc = self.cost.of(m, self.pred);
                     if rc >= bcost {
