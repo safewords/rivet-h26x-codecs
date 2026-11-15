@@ -1190,7 +1190,7 @@ impl<S: Sample> Core<S> {
         // The transform-split search is on: a CU may carry four quarter-size
         // TUs where that wins the decision module's cost comparison, and the
         // writer below spells both shapes.
-        pic.split_depth = 1;
+        pic.split_depth = tune.i_split_depth;
 
         // Parameter sets, then the one slice.
         let mut out = Vec::new();

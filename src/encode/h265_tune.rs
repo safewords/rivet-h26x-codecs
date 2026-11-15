@@ -82,6 +82,9 @@ pub(crate) struct Tune {
     /// SAO (under `Config::sao`) in pictures nothing references as well;
     /// otherwise their slices carry the SAO flags clear.
     pub sao_nonref: bool,
+    /// How deep an intra picture's units may split their transform.
+    pub i_split_depth: u32,
+
     /// `h265_me::InterPicture::drop_trial`.
     pub drop_trial: bool,
     /// `h265_me::InterPicture::nxn_trial`.
@@ -132,6 +135,7 @@ impl Tune {
         rdoq_inter_chroma: true,
         rdoq_nonref: true,
         sao_nonref: true,
+        i_split_depth: 1,
         drop_trial: true,
         nxn_trial: 2.0,
         quarter_cross: false,
@@ -230,7 +234,10 @@ impl Tune {
             // medium's settings -9.17% BD-rate at 1.47x the CPU; with every
             // skip ending the recursion, intra by the flat-block proxy and
             // one reference -5.09% at 1.27x.
+            // Intra pictures without a transform split (round 3): -12.06%
+            // -> -11.88% BD-rate at 0.97x the CPU.
             Preset::Veryfast => Tune {
+                i_split_depth: 0,
                 rskip: Some(f32::MAX),
                 rd_intra: None,
                 intra_split_depth: 0,
