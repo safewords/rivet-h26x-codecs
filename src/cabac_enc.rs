@@ -686,21 +686,25 @@ impl<'a> BinCore<CabacWriter<'a>> for WCore {
         let p = (state >> 1) as usize;
         let mps = (state & 1) as u32;
         let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
-        self.range -= lps;
-        if bin != mps {
-            self.low += self.range;
-            self.range = lps;
-        }
+        // Whether a bin is the LPS is the data's business, so the update
+        // and the renormalisation are selects and an unconditional shift
+        // (by zero when the range is still in its upper half: a nine-bit
+        // range has 23 leading zeros) rather than branches.
+        let rmps = self.range - lps;
+        let is_lps = bin != mps;
+        self.low += if is_lps { rmps } else { 0 };
+        let range = if is_lps { lps } else { rmps };
         *ctx = EST_NEXT[((state as usize) << 1 | bin as usize) & 255];
-        self.renorm(out);
+        let s = range.leading_zeros() - 23;
+        self.range = range << s;
+        self.low <<= s;
+        self.queued += s;
+        self.settle(out);
     }
 
     #[inline(always)]
     fn bypass(&mut self, out: &mut CabacWriter<'a>, bin: u32) {
-        self.low <<= 1;
-        if bin != 0 {
-            self.low += self.range;
-        }
+        self.low = (self.low << 1) + (self.range & 0u32.wrapping_sub((bin != 0) as u32));
         self.queued += 1;
         self.settle(out);
     }
