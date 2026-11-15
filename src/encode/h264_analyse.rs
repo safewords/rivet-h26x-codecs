@@ -78,6 +78,10 @@ pub(crate) struct AnalysisCfg {
     pub(crate) rd: bool,
     /// Active list-0 references of a P picture, at most.
     pub(crate) refs: usize,
+    /// A P partition below 16x16 searches every reference whose 16x16
+    /// cost came within this factor of the best one's (1.0: the best
+    /// 16x16 reference only).
+    pub(crate) mixed_refs: f32,
 }
 
 impl AnalysisCfg {
@@ -109,6 +113,7 @@ impl AnalysisCfg {
         trellis_rd: false,
         rd: true,
         refs: 3,
+        mixed_refs: 1.25,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, one
@@ -142,6 +147,7 @@ impl AnalysisCfg {
         trellis_rd: false,
         rd: true,
         refs: 1,
+        mixed_refs: 1.0,
     };
 
     /// The most thorough tier: the multi-hexagon search, more refinement,
@@ -173,6 +179,7 @@ impl AnalysisCfg {
         trellis_rd: true,
         rd: true,
         refs: 4,
+        mixed_refs: 1.5,
     };
 
     /// The tier for a preset.
@@ -1157,6 +1164,9 @@ pub(crate) fn p_mb<S: Sample>(
         }
     };
     let (mut mv16, mut c16, mut pmv16, mut r16) = (Mv::ZERO, u32::MAX, pmv, 0usize);
+    // Each reference's own 16x16 vector and cost, for the partitions.
+    let mut mv16r = [Mv::ZERO; 16];
+    let mut c16r = [u32::MAX; 16];
     for r in 0..nref {
         let p = if r == 0 {
             pmv
@@ -1169,13 +1179,13 @@ pub(crate) fn p_mb<S: Sample>(
         let k = if r > 0 { (nc + 1).min(cands.len()) } else { nc };
         let (m, _, c) = run_r(r, 0, 0, 16, 16, p, &cands[..k], &cfg.me);
         let c = c + (lam1 * ref_bits(r)) as u32;
+        if r < mv16r.len() {
+            (mv16r[r], c16r[r]) = (m, c);
+        }
         if c < c16 {
             (mv16, c16, pmv16, r16) = (m, c, p, r);
         }
     }
-    let run = |x: usize, y: usize, w: usize, h: usize, pred: Mv, cands: &[Mv], mc: &MeCfg| {
-        run_r(r16, x, y, w, h, pred, cands, mc)
-    };
     let rr = r16 as i8;
     let mut c16v = PCand {
         kind: InterMbKind::P16x16,
@@ -1188,6 +1198,42 @@ pub(crate) fn p_mb<S: Sample>(
     c16v.fill((0, 0, 16, 16), mv16, sub(mv16, pmv16));
     let mut shapes: [Option<PCand>; 4] = [Some(c16v), None, None, None];
     if ctx.subparts {
+        // Each partition chooses its own reference among those whose 16x16
+        // search came within a margin of the best one's (a reference far
+        // behind at 16x16 rarely wins a part), at its own predictor and
+        // charged its index.
+        let mut near = [0usize; 16];
+        let mut nn = 0;
+        for r in 0..nref.min(mv16r.len()) {
+            if r == r16 || (c16r[r] as f32) < c16 as f32 * cfg.mixed_refs {
+                near[nn] = r;
+                nn += 1;
+            }
+        }
+        let near = &near[..nn];
+        let part_search = |st: &MbMotionState,
+                           (x, y, w, h): (usize, usize, usize, usize),
+                           extra: &[Mv]|
+         -> (Mv, Mv, u32, i8) {
+            let mut best = (Mv::ZERO, Mv::ZERO, u32::MAX, 0i8);
+            for &r in near {
+                let p = st.predict(0, r as i8, x, y, w, h);
+                let mut cands = [Mv::ZERO; 6];
+                let mut nc = 0;
+                for &c in [mv16r[r], p, Mv::ZERO].iter().chain(extra) {
+                    if nc < cands.len() {
+                        cands[nc] = c;
+                        nc += 1;
+                    }
+                }
+                let (mv, _, c) = run_r(r, x, y, w, h, p, &cands[..nc], &cfg.me_sub);
+                let c = c + (lam1 * ref_bits(r)) as u32;
+                if c < best.2 {
+                    best = (mv, p, c, r as i8);
+                }
+            }
+            best
+        };
         // 8x8 first; the two-partition shapes only when it beat 16x16.
         st.reset_mb();
         let mut t = PCand {
@@ -1197,11 +1243,11 @@ pub(crate) fn p_mb<S: Sample>(
         };
         for part in 0..4 {
             let (x, y) = ((part & 1) * 8, (part >> 1) * 8);
-            let p = st.predict(0, rr, x, y, 8, 8);
-            let (mv, _, c) = run(x, y, 8, 8, p, &[mv16, p, Mv::ZERO], &cfg.me_sub);
+            let (mv, p, c, r) = part_search(st, (x, y, 8, 8), &[]);
             t.est += c as f32;
             t.fill((x, y, 8, 8), mv, sub(mv, p));
-            st.commit_part_ref(x, y, 8, 8, mv, rr);
+            t.refs[part] = r;
+            st.commit_part_ref(x, y, 8, 8, mv, r);
         }
         let c8 = t.est;
         shapes[3] = Some(t);
@@ -1214,13 +1260,17 @@ pub(crate) fn p_mb<S: Sample>(
                     ..c16v
                 };
                 for &(x, y, w, h) in kind.parts() {
-                    let p = st.predict(0, rr, x, y, w, h);
                     let m8a = t.mvs[(y / 4) * 4 + x / 4];
                     let m8b = t.mvs[((y + h) / 4 - 1) * 4 + (x + w) / 4 - 1];
-                    let (mv, _, cc) = run(x, y, w, h, p, &[m8a, m8b, mv16, p], &cfg.me_sub);
+                    let (mv, p, cc, r) = part_search(st, (x, y, w, h), &[m8a, m8b]);
                     c.est += cc as f32;
                     c.fill((x, y, w, h), mv, sub(mv, p));
-                    st.commit_part_ref(x, y, w, h, mv, rr);
+                    for py8 in y / 8..(y + h) / 8 {
+                        for px8 in x / 8..(x + w) / 8 {
+                            c.refs[py8 * 2 + px8] = r;
+                        }
+                    }
+                    st.commit_part_ref(x, y, w, h, mv, r);
                 }
                 shapes[i] = Some(c);
             }
