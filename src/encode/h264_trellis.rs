@@ -396,6 +396,75 @@ impl Trellis {
 mod tests {
     use super::*;
 
+    /// Timing of the trellis on blocks shaped like a coded picture's
+    /// (`cargo test --release -- --ignored trellis_bench --nocapture`),
+    /// with a checksum of what it chose.
+    #[test]
+    #[ignore]
+    fn trellis_bench() {
+        use crate::dsp::h264_enc::{Quant, qbits4, qbits8};
+        use crate::h264::sps::ScalingLists;
+        let lists = ScalingLists {
+            list4x4: [[16; 16]; 6],
+            list8x8: [[16; 64]; 6],
+        };
+        let q = Quant::new(&lists);
+        let mut ctx = [0u8; 1024];
+        crate::h264::cabac_mb::init_contexts(&mut ctx, crate::h264::SliceType::P, 0, 27);
+        let t = Trellis {
+            ctx,
+            lambda: crate::encode::h264_analyse::lambda_ssd(27),
+            bd_off: 0,
+        };
+        let mut seed = 1u64;
+        let mut rnd = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        // Laplacian-ish coefficients decaying with frequency.
+        let mut blocks8 = Vec::new();
+        let mut blocks4 = Vec::new();
+        for _ in 0..4000 {
+            let mut b = [0i32; 64];
+            for (i, v) in b.iter_mut().enumerate() {
+                let (x, y) = (i % 8, i / 8);
+                let scale = 2000.0 / (1.0 + (x + y) as f32 * 1.5);
+                let u = (rnd() as f32 + 1.0) / 4294967296.0 * 2.0;
+                let m = -(u.min(0.999)).ln() * scale * 0.3;
+                *v = if rnd() & 1 == 0 {
+                    m as i32
+                } else {
+                    -(m as i32)
+                };
+            }
+            blocks8.push(b);
+            let mut c = [0i32; 16];
+            for (i, v) in c.iter_mut().enumerate() {
+                *v = b[(i / 4) * 8 + i % 4] / 4;
+            }
+            blocks4.push(c);
+        }
+        let mut sum = 0u64;
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            for (b8, b4) in blocks8.iter().zip(&blocks4) {
+                let mut l8 = [0i16; 64];
+                sum += t.quant(Block::Luma8, b8, &mut l8, &q.mf8[1][27 % 6], qbits8(27), 27) as u64;
+                sum += l8.iter().map(|&v| v.unsigned_abs() as u64).sum::<u64>();
+                let mut l4 = [0i16; 16];
+                sum += t.quant(Block::Luma4, b4, &mut l4, &q.mf4[3][27 % 6], qbits4(27), 27) as u64;
+                sum += l4.iter().map(|&v| v.unsigned_abs() as u64).sum::<u64>();
+            }
+        }
+        let el = start.elapsed();
+        eprintln!(
+            "trellis bench: {:.1} ns per 8x8+4x4 pair, checksum {sum}",
+            el.as_nanos() as f64 / 200000.0
+        );
+    }
+
     #[test]
     fn next_table_is_next() {
         for abs in 1..20 {
