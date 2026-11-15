@@ -498,7 +498,6 @@ fn i4x4<S: Sample>(
     let mut dec = MbDecision::default();
     let mut chosen = [2u8; 16];
     let mut est = 6.0 * lam; // mb_type and the transform flag, roughly
-    let mut pred = [S::default(); 16];
     for scan in 0..16 {
         let bx = crate::h264::tables::BLK4X4_X[scan] as usize;
         let by = crate::h264::tables::BLK4X4_Y[scan] as usize;
@@ -526,8 +525,7 @@ fn i4x4<S: Sample>(
             if predict_4x4(rec, boff, rec.stride, mode, av, ctx.bit_depth).is_err() {
                 continue;
             }
-            gather(rec, boff, 4, 4, &mut pred);
-            let c = (ctx.dist.satd)(&src[soff..], ss, &pred, 4, 4, 4) as f32
+            let c = (ctx.dist.satd)(&src[soff..], ss, &rec.data[boff..], rec.stride, 4, 4) as f32
                 + lam * mode_bits(mode, predicted);
             if c < best.0 {
                 best = (c, mode);
@@ -578,7 +576,6 @@ fn i8x8<S: Sample>(
     let mut dec = MbDecision::default();
     let mut chosen = [2u8; 16];
     let mut est = 6.0 * lam;
-    let mut pred = [S::default(); 64];
     for blk8 in 0..4 {
         let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
         let raster = by * 4 + bx;
@@ -605,8 +602,7 @@ fn i8x8<S: Sample>(
             if predict_8x8(rec, boff, rec.stride, mode, av, ctx.bit_depth).is_err() {
                 continue;
             }
-            gather(rec, boff, 8, 8, &mut pred);
-            let c = (ctx.dist.satd)(&src[soff..], ss, &pred, 8, 8, 8) as f32
+            let c = (ctx.dist.satd)(&src[soff..], ss, &rec.data[boff..], rec.stride, 8, 8) as f32
                 + lam * mode_bits(mode, predicted);
             if c < best.0 {
                 best = (c, mode);
