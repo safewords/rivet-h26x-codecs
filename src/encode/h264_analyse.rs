@@ -219,6 +219,14 @@ pub(crate) fn lambda_ssd(qp: i32) -> f32 {
     0.68 * ((qp - 12) as f32 / 3.0).exp2()
 }
 
+/// The scale on [`lambda_ssd`] a B macroblock's coded candidates are
+/// compared at: B pictures sit two quantiser steps above P, and spending a
+/// little more on them than that step's multiplier says measured better
+/// (BD-rate Y -0.23 % medium, -0.16 % slow, -0.12 % veryfast at 0.85;
+/// 0.75 and 0.65 no better at medium). Intra candidates in a B picture keep
+/// their own multiplier inside [`intra_mb`].
+const B_LAMBDA_SCALE: f64 = 0.85;
+
 /// The multiplier for SATD-scale costs: the square root of the customary
 /// `0.85 * 2^((qp - 12) / 3)`, since SATD grows as the error, not its
 /// square. (Scaling it with [`lambda_ssd`]'s 0.8, or by 0.8 or 1.25 on
@@ -1708,7 +1716,7 @@ pub(crate) fn b_mb<S: Sample>(
     let cfg = an.cfg;
     let (px, py) = (mb_x * 16, mb_y * 16);
     let lam1 = lambda_satd(ctx.qp);
-    let lam2 = lambda_ssd(ctx.qp) as f64;
+    let lam2 = lambda_ssd(ctx.qp) as f64 * B_LAMBDA_SCALE;
     let sy = &src.y[py * src.ys + px..];
     st.reset_mb();
     let (dref, dmv) = spatial_direct(st, col, addr, false, col.map.cur_parity);
