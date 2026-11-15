@@ -145,6 +145,39 @@ fn offer(best: &mut V, from: &mut U, cand: V, code: U) {
     }
 }
 
+/// A block's level prices per lane (see `quant_n`).
+struct LevelCosts {
+    one: V,
+    big0: V,
+    big1: V,
+    esc: V,
+    lam: f32,
+}
+
+/// Every lane's cost after coding a level of `lv` at a position whose
+/// exact level is `xi`: `cost + dd + sig + level bins`, in that order.
+#[inline(always)]
+fn level(c: &LevelCosts, cost: V, xi: f32, sig: V, lv: u32) -> V {
+    let dd = (xi - lv as f32) * (xi - lv as f32);
+    let lc = if lv == 1 {
+        c.one
+    } else if lv < 15 {
+        let k = (lv - 2) as f32;
+        std::array::from_fn(|j| c.big0[j] + k * c.big1[j])
+    } else {
+        escape_cost(c, lv)
+    };
+    add(add(add(cost, [dd; L]), sig), lc)
+}
+
+/// A level past the capped prefix: the fixed part and the escape bins.
+#[cold]
+#[inline(never)]
+fn escape_cost(c: &LevelCosts, lv: u32) -> V {
+    let e = c.lam * escape_bins(lv) as f32;
+    std::array::from_fn(|j| c.esc[j] + e)
+}
+
 /// `from` code: the source lane and the level chosen.
 const fn code(lane: u32, lv: u32) -> u32 {
     (lane << 24) | lv
@@ -267,6 +300,13 @@ impl Trellis {
             big1[j] = lb[r][1];
             esc[j] = big0[j] - lb[r][0] + 13.0 * big1[j];
         }
+        let costs = LevelCosts {
+            one,
+            big0,
+            big1,
+            esc,
+            lam,
+        };
         let max_idx = count - 1;
 
         let mut cost = [INF; L];
@@ -332,19 +372,7 @@ impl Trellis {
             // so of equal costs the same path survives.
             let mut sig = [os + l0; L];
             sig[0] = os + l1;
-            let lvl = |lv: u32| -> V {
-                let dd = (xi - lv as f32) * (xi - lv as f32);
-                let lc = if lv == 1 {
-                    one
-                } else if lv < 15 {
-                    let k = (lv - 2) as f32;
-                    std::array::from_fn(|j| big0[j] + k * big1[j])
-                } else {
-                    let e = lam * escape_bins(lv) as f32;
-                    std::array::from_fn(|j| esc[j] + e)
-                };
-                add(add(add(cost, [dd; L]), sig), lc)
-            };
+            let lvl = |lv: u32| -> V { level(&costs, cost, xi, sig, lv) };
             let lt = lvl(t);
             let (nc, nf) = if t >= 3 {
                 // Two larger levels, no zero: lanes 0..=3 all move to 4,
