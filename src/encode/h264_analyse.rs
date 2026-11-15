@@ -1854,9 +1854,17 @@ pub(crate) fn b_mb<S: Sample>(
     let mut m16 = [Mv::ZERO; 2];
     let mut c16 = [0u32; 2];
     for l in 0..2 {
-        let mut cands = [Mv::ZERO; 8];
+        let mut cands = [Mv::ZERO; 9];
         let mut nc = 0;
-        for &c in [pmv[l], dmv[0][l], Mv::ZERO]
+        // List 1 also starts from list 0's vector mirrored: an object in
+        // steady motion sits at opposite displacements in the two
+        // anchors of a B picture between them.
+        let mirror = if l == 1 {
+            Mv::new(-m16[0].x, -m16[0].y)
+        } else {
+            pmv[0]
+        };
+        for &c in [pmv[l], dmv[0][l], Mv::ZERO, mirror]
             .iter()
             .chain(nb.cands[l][..nb.ncands[l]].iter())
         {

@@ -184,7 +184,9 @@ fn avg_rows_u8<const W: usize>(
         return;
     }
     assert!(
-        a.len() >= (h - 1) * as_ + W && b.len() >= (h - 1) * bs + W && out.len() >= (h - 1) * os + W
+        a.len() >= (h - 1) * as_ + W
+            && b.len() >= (h - 1) * bs + W
+            && out.len() >= (h - 1) * os + W
     );
     for y in 0..h {
         // SAFETY: the assertion above covers row `y`'s `W` samples of all
