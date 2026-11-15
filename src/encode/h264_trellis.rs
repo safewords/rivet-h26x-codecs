@@ -130,18 +130,37 @@ impl Trellis {
         qbits: u32,
         qp: i32,
     ) -> u32 {
+        // Sized to the block: the per-position tables are the trellis's
+        // own working set, and a 4x4 block's are a quarter of an 8x8's.
+        if kind == Block::Luma8 {
+            self.quant_n::<64>(kind, coeffs, levels, mf, qbits, qp)
+        } else {
+            self.quant_n::<16>(kind, coeffs, levels, mf, qbits, qp)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn quant_n<const N: usize>(
+        &self,
+        kind: Block,
+        coeffs: &[i32],
+        levels: &mut [i16],
+        mf: &[i32],
+        qbits: u32,
+        qp: i32,
+    ) -> u32 {
         let (scan, start, count): (&[u8], usize, usize) = match kind {
             Block::Luma8 => (&ZIGZAG8X8[..], 0, 64),
             Block::Luma4 => (&ZIGZAG4X4[..], 0, 16),
             _ => (&ZIGZAG4X4[..], 1, 15),
         };
-        for l in levels.iter_mut().take(if count == 64 { 64 } else { 16 }) {
+        for l in levels.iter_mut().take(N) {
             *l = 0;
         }
         // Exact levels and their rounded magnitudes, in scan order.
         let scale = 1.0 / (1u64 << qbits) as f32;
-        let mut x = [0f32; 64];
-        let mut top = [0u32; 64];
+        let mut x = [0f32; N];
+        let mut top = [0u32; N];
         let mut last = usize::MAX;
         for i in 0..count {
             let r = scan[start + i] as usize;
@@ -208,13 +227,38 @@ impl Trellis {
         let mut live: u16 = 1 << NONE;
         // Per position and resulting node: the node it came from and the
         // level chosen, packed.
-        let mut from = [[0u32; NODES]; 64];
+        let mut from = [[0u32; NODES]; N];
         for i in (0..=last).rev() {
             let mut nc = [f32::INFINITY; NODES];
             let mut nf = [0u32; NODES];
             let mut nlive: u16 = 0;
             let t = top[i];
             let coded_sig = i < max_idx;
+            let xi = x[i];
+            let d0 = xi * xi;
+            if t == 0 {
+                let zs0 = if coded_sig {
+                    let sc = if count == 64 {
+                        sig_base + SIG_COEFF_8X8_CTX[0][i] as usize
+                    } else {
+                        sig_base + i
+                    };
+                    lam * self.bits(sc, 0)
+                } else {
+                    0.0
+                };
+                // Only zero is on offer: every path stays on its node.
+                let mut m = live;
+                let mut nf = [0u32; NODES];
+                while m != 0 {
+                    let node = m.trailing_zeros() as usize;
+                    m &= m - 1;
+                    cost[node] = cost[node] + d0 + if node == NONE { 0.0 } else { zs0 };
+                    nf[node] = (node as u32) << 24;
+                }
+                from[i] = nf;
+                continue;
+            }
             let (zs, os, l0, l1) = if coded_sig {
                 let sc = if count == 64 {
                     sig_base + SIG_COEFF_8X8_CTX[0][i] as usize
@@ -235,8 +279,6 @@ impl Trellis {
             } else {
                 (0.0, 0.0, 0.0, 0.0)
             };
-            let xi = x[i];
-            let d0 = xi * xi;
             let mut m = live;
             while m != 0 {
                 let node = m.trailing_zeros() as usize;
