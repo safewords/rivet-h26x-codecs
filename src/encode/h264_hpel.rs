@@ -168,6 +168,27 @@ impl<'a, S: Sample> MeRef<'a, S> {
 }
 
 /// `(a + b + 1) >> 1` over a `w` by `h` block.
+/// [`avg_into`]'s 8-bit rows at a width known when compiled.
+#[inline(always)]
+fn avg_rows_u8<const W: usize>(
+    out: &mut [u8],
+    os: usize,
+    a: &[u8],
+    as_: usize,
+    b: &[u8],
+    bs: usize,
+    h: usize,
+) {
+    for y in 0..h {
+        let ra: &[u8; W] = a[y * as_..y * as_ + W].try_into().expect("row");
+        let rb: &[u8; W] = b[y * bs..y * bs + W].try_into().expect("row");
+        let ro: &mut [u8; W] = (&mut out[y * os..y * os + W]).try_into().expect("row");
+        for x in 0..W {
+            ro[x] = ((ra[x] as u16 + rb[x] as u16 + 1) >> 1) as u8;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub(crate) fn avg_into<S: Sample>(
@@ -191,11 +212,20 @@ pub(crate) fn avg_into<S: Sample>(
                 std::slice::from_raw_parts(b.as_ptr() as *const u8, b.len()),
             )
         };
-        for y in 0..h {
-            let (ra, rb) = (&a[y * as_..y * as_ + w], &b[y * bs..y * bs + w]);
-            let ro = &mut out[y * os..y * os + w];
-            for ((o, &p), &q) in ro.iter_mut().zip(ra).zip(rb) {
-                *o = ((p as u16 + q as u16 + 1) >> 1) as u8;
+        // Fixed widths, so each row is one vector rounding-average (the
+        // compiler's `urhadd` / `pavgb`) rather than a byte loop.
+        match w {
+            16 => avg_rows_u8::<16>(out, os, a, as_, b, bs, h),
+            8 => avg_rows_u8::<8>(out, os, a, as_, b, bs, h),
+            4 => avg_rows_u8::<4>(out, os, a, as_, b, bs, h),
+            _ => {
+                for y in 0..h {
+                    let (ra, rb) = (&a[y * as_..y * as_ + w], &b[y * bs..y * bs + w]);
+                    let ro = &mut out[y * os..y * os + w];
+                    for ((o, &p), &q) in ro.iter_mut().zip(ra).zip(rb) {
+                        *o = ((p as u16 + q as u16 + 1) >> 1) as u8;
+                    }
+                }
             }
         }
         return;
