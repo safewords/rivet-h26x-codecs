@@ -691,6 +691,9 @@ pub struct InterPicture<S: Sample> {
     pool: Vec<Box<InterCuDecision>>,
     /// Trial saves finished with, for [`Self::take_save`].
     saves: Vec<TrialSave<S>>,
+    /// The transform tree's price, as the last [`Self::code_residual_cu`]
+    /// left the unit, when its split trial priced it.
+    tree_bits: Option<f64>,
     /// The slice is B (the initial contexts a rate falls back to).
     pub slice_b: bool,
     /// `slice_temporal_mvp_enabled_flag`: the SPS enables temporal MVP and
@@ -895,6 +898,7 @@ impl<S: Sample> InterPicture<S> {
             tu_alt: Box::default(),
             pool: Vec::new(),
             saves: Vec::new(),
+            tree_bits: None,
             slice_b: false,
         }
     }
@@ -2146,6 +2150,7 @@ impl<S: Sample> InterPicture<S> {
         out: &mut InterCuDecision,
     ) -> bool {
         out.split_tu = false;
+        self.tree_bits = None;
         let trial = self.tu_split
             && !ctx.bypass
             && (3..=self.tu_split_max.min(5)).contains(&log2_cu)
@@ -2197,8 +2202,8 @@ impl<S: Sample> InterPicture<S> {
         };
         let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
         let is_b = self.slice_b;
-        let j_whole = cu_err(&self.recon) as f64
-            + lam * f64::from(crate::encode::h265::inter_tree_bits(out, self.cat, is_b));
+        let tree_whole = crate::encode::h265::inter_tree_bits(out, self.cat, is_b);
+        let j_whole = cu_err(&self.recon) as f64 + lam * f64::from(tree_whole as f32);
         let mut keep = std::mem::take(&mut self.tu_keep);
         Self::save_region(&self.recon, rcat, x0, y0, n, &mut keep);
         Self::restore_region(&mut self.recon, rcat, x0, y0, n, &save);
@@ -2216,9 +2221,13 @@ impl<S: Sample> InterPicture<S> {
         let any_split = self.code_residual_split(
             ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut alt,
         );
+        let tree_split = if any_split {
+            crate::encode::h265::inter_tree_bits(&alt, self.cat, is_b)
+        } else {
+            0.0
+        };
         let j_split = if any_split {
-            cu_err(&self.recon) as f64
-                + lam * f64::from(crate::encode::h265::inter_tree_bits(&alt, self.cat, is_b))
+            cu_err(&self.recon) as f64 + lam * f64::from(tree_split as f32)
         } else {
             f64::INFINITY
         };
@@ -2238,9 +2247,13 @@ impl<S: Sample> InterPicture<S> {
             out.cbf_luma_tu = alt.cbf_luma_tu;
             out.cbf_chroma_tu = alt.cbf_chroma_tu;
             out.rqt_root_cbf = true;
+            if alt.qp_y == out.qp_y {
+                self.tree_bits = Some(tree_split);
+            }
             true
         } else {
             Self::restore_region(&mut self.recon, rcat, x0, y0, n, &keep);
+            self.tree_bits = Some(tree_whole);
             any
         };
         self.tu_save = save;
@@ -3039,6 +3052,7 @@ impl<S: Sample> InterPicture<S> {
         src: &Srcs<'_, S>,
     ) -> (PCuDecision, u64, f32) {
         let mut d = self.fresh(log2, ctx);
+        self.tree_bits = None;
         let (nref, is_b) = match refs {
             TreeRefs::P(l0) => {
                 self.code_cu_into(
@@ -3094,8 +3108,14 @@ impl<S: Sample> InterPicture<S> {
         };
         let n = 1usize << log2;
         let ssd = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
-        let bits =
-            crate::encode::h265::p_cu_bits(&coded, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth);
+        let bits = match (&coded, self.tree_bits.take()) {
+            (PCuDecision::Inter(d), Some(tree)) => crate::encode::h265::p_cu_bits_with_tree(
+                d, ctx.qp, ctx.bypass, is_b, nref, depth, tree,
+            ),
+            _ => crate::encode::h265::p_cu_bits(
+                &coded, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
+            ),
+        };
         // A 2Nx2N unit and a partitioned shape were chosen between in SATD
         // plus bits (`code_cu`); when the loser came close, code it too and
         // keep the cheaper in SSD plus lambda times the CU's bits, the
@@ -4239,12 +4259,44 @@ fn code_residual_inter<S: Sample>(
     src_stride: usize,
     levels: &mut [i16],
 ) -> u32 {
+    // The scratch sized to the block: zeroing a 32x32 one for every 4x4
+    // block was a measurable share of an encode.
+    match log2 {
+        2 => code_residual_inter_n::<S, 16>(
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+        ),
+        3 => code_residual_inter_n::<S, 64>(
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+        ),
+        4 => code_residual_inter_n::<S, 256>(
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+        ),
+        _ => code_residual_inter_n::<S, 1024>(
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn code_residual_inter_n<S: Sample, const N: usize>(
+    ctx: &MeCtx<'_, S>,
+    plane: &mut Plane16<S>,
+    x: usize,
+    y: usize,
+    log2: u32,
+    c_idx: usize,
+    qp: i32,
+    src: &[S],
+    src_stride: usize,
+    levels: &mut [i16],
+) -> u32 {
     let n = 1usize << log2;
+    debug_assert_eq!(n * n, N);
     let off = plane.offset(x as isize, y as isize);
     let stride = plane.stride;
     let max = (1i32 << ctx.bit_depth) - 1;
 
-    let mut work = [0i16; 1024];
+    let mut work = [0i16; N];
     for yy in 0..n {
         for xx in 0..n {
             work[yy * n + xx] = (src[yy * src_stride + xx].to_i32()

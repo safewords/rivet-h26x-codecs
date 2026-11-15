@@ -3539,6 +3539,27 @@ fn write_cu_inter(
     depth: u32,
     is_b: bool,
 ) {
+    if write_cu_inter_head(
+        e, cx, d, left_skip, above_skip, pps_bypass, qp_delta, nref, depth, is_b,
+    ) {
+        write_inter_tree(e, cx, d, cat, qp_delta);
+    }
+}
+
+/// [`write_cu_inter`] up to its transform tree: whether one follows.
+#[allow(clippy::too_many_arguments)]
+fn write_cu_inter_head(
+    e: &mut CabacEncoder,
+    cx: &mut Contexts,
+    d: &InterCuDecision,
+    left_skip: Option<bool>,
+    above_skip: Option<bool>,
+    pps_bypass: bool,
+    qp_delta: Option<i32>,
+    nref: u32,
+    depth: u32,
+    is_b: bool,
+) -> bool {
     let log2 = d.log2_cu;
     debug_assert!(
         pps_bypass || !d.bypass,
@@ -3570,7 +3591,7 @@ fn write_cu_inter(
     );
     if let InterCuKind::Skip { merge_idx } = d.kind {
         write_merge_idx(e, cx, MAX_MERGE_CAND as u32, u32::from(merge_idx));
-        return;
+        return false;
     }
 
     write_pred_mode_flag(e, cx, false);
@@ -3587,7 +3608,7 @@ fn write_cu_inter(
         }
         write_rqt_root_cbf(e, cx, d.rqt_root_cbf);
         if !d.rqt_root_cbf {
-            return;
+            return false;
         }
     } else {
         write_part_mode_inter(e, cx, crate::hevc::ctu::PartMode::P2Nx2N);
@@ -3617,7 +3638,7 @@ fn write_cu_inter(
             write_mvp_flag(e, cx, mvp_flag != 0);
             write_rqt_root_cbf(e, cx, d.rqt_root_cbf);
             if !d.rqt_root_cbf {
-                return;
+                return false;
             }
         }
         InterCuKind::BAmvp { idc, mvd, mvp_flag } => {
@@ -3645,24 +3666,47 @@ fn write_cu_inter(
             }
             write_rqt_root_cbf(e, cx, d.rqt_root_cbf);
             if !d.rqt_root_cbf {
-                return;
+                return false;
             }
         }
         InterCuKind::Parts => {}
         InterCuKind::Skip { .. } | InterCuKind::UseIntra => unreachable!("handled above"),
     }
 
-    write_inter_tree(e, cx, d, cat, qp_delta);
+    true
 }
 
 /// The bits of an inter CU's transform tree alone (`rqt_root_cbf` 1): what
 /// the split trial (`InterPicture::code_residual_cu`) compares, priced as
 /// every other rate is.
-pub(crate) fn inter_tree_bits(d: &InterCuDecision, cat: u32, is_b: bool) -> f32 {
+pub(crate) fn inter_tree_bits(d: &InterCuDecision, cat: u32, is_b: bool) -> f64 {
     let mut cx = initial_contexts(if is_b { 2 } else { 1 }, d.qp_y);
     let mut e = CabacEncoder::estimating();
     write_inter_tree(&mut e, &mut cx, d, cat, None);
-    e.fractional_bits() as f32
+    e.fractional_bits()
+}
+
+/// [`p_cu_bits`] for an inter unit whose transform tree, if it has one,
+/// [`inter_tree_bits`] has already priced at `tree`: its other syntax
+/// touches none of the tree's contexts, so the two add. (Every price is a
+/// sum of table entries short enough that an `f64` holds it exactly in
+/// any order: the total is the one `p_cu_bits` counts.)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn p_cu_bits_with_tree(
+    d: &InterCuDecision,
+    qp: i32,
+    pps_bypass: bool,
+    is_b: bool,
+    nref: u32,
+    depth: u32,
+    tree: f64,
+) -> f32 {
+    let mut cx = initial_contexts(if is_b { 2 } else { 1 }, qp);
+    let mut e = CabacEncoder::estimating();
+    let has_tree = write_cu_inter_head(
+        &mut e, &mut cx, d, None, None, pps_bypass, None, nref, depth, is_b,
+    );
+    (e.fractional_bits() + if has_tree { tree } else { 0.0 }) as f32
 }
 
 /// An inter CU's `transform_tree`, under a coded (or inferred) `rqt_root_cbf`
