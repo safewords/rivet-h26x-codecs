@@ -33,7 +33,7 @@
 //! agree, and both spell the same constant.
 
 use crate::bitwriter::BitWriter;
-use crate::cabac_enc::CabacEncoder;
+use crate::cabac_enc::{BinEnc, CabacEncoder};
 use crate::encode::h264_cavlc_mb::sub_mb_type_p;
 use crate::encode::h264_intra::{MbDecision, MbKind};
 use crate::encode::h264_me::{BDecision, BMbKind, InterDecision, InterMbKind};
@@ -85,7 +85,7 @@ fn cfi_of(chroma: ChromaFormat) -> u32 {
 /// field-coded significance contexts.
 #[allow(clippy::too_many_arguments)]
 fn write_intra_body(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     d: &MbDecision,
     left: Option<&Coded>,
@@ -137,7 +137,7 @@ fn write_intra_body(
 /// any block coded.
 #[allow(clippy::too_many_arguments)]
 fn write_p16_body(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     d: &InterDecision,
     left: Option<&Coded>,
@@ -291,7 +291,7 @@ fn write_p16_body(
 /// `B_Direct_8x8` sub-macroblock carry no motion syntax.
 #[allow(clippy::too_many_arguments)]
 fn write_b_body(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     d: &BDecision,
     inc: usize,
@@ -401,7 +401,7 @@ fn write_b_body(
 /// the record its neighbours' contexts read.
 #[allow(clippy::too_many_arguments)]
 fn intra_mb_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     dec: &MbDecision,
     left: Option<&Coded>,
@@ -423,7 +423,7 @@ fn intra_mb_cabac(
 /// One macroblock of a P slice, `mb_skip_flag` included.
 #[allow(clippy::too_many_arguments)]
 fn p_mb_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     mb: &PMb<'_>,
     left: Option<&Coded>,
@@ -503,7 +503,7 @@ fn p_mb_cabac(
 /// One macroblock of a B slice, `mb_skip_flag` included.
 #[allow(clippy::too_many_arguments)]
 fn b_mb_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     mb: &BMb<'_>,
     left: Option<&Coded>,
@@ -607,7 +607,7 @@ pub fn write_intra_picture_cabac<S: Sample>(
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
             let above = (mb_y > 0).then(|| &coded[idx - mbw]);
             if trial {
-                let mut ce = CabacEncoder::estimating();
+                let mut ce = crate::cabac_enc::CabacEstimator::new();
                 let mut st2 = st.clone();
                 let _ = intra_mb_cabac(&mut ce, &mut st2, dec, left, above, cfi, t8x8, g);
                 return ce.fractional_bits();
@@ -665,7 +665,7 @@ pub fn write_p_picture_cabac<S: Sample>(
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
             let above = (mb_y > 0).then(|| &coded[idx - mbw]);
             if trial {
-                let mut ce = CabacEncoder::estimating();
+                let mut ce = crate::cabac_enc::CabacEstimator::new();
                 let mut st2 = st.clone();
                 let _ = p_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g, num_ref);
                 return ce.fractional_bits();
@@ -725,7 +725,7 @@ pub fn write_b_picture_cabac<S: Sample>(
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
             let above = (mb_y > 0).then(|| &coded[idx - mbw]);
             if trial {
-                let mut ce = CabacEncoder::estimating();
+                let mut ce = crate::cabac_enc::CabacEstimator::new();
                 let mut st2 = st.clone();
                 let _ = b_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g);
                 return ce.fractional_bits();
@@ -902,7 +902,7 @@ fn mbaff_skip_record(mb: &PairMb, cfi: u32) -> Coded {
 /// written. Returns its record.
 #[allow(clippy::too_many_arguments)]
 fn write_mbaff_mb(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     nb: &MbNeighbours,
     info: &crate::h264::mb::PicInfo,
@@ -994,7 +994,7 @@ fn write_mbaff_mb(
 /// of skips has no flag at all (the walk only produces one whose flag is
 /// the inferred one).
 fn write_pair_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     base: &[Option<Coded>],
     pair: &CodedPair,

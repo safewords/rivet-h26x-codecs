@@ -696,6 +696,87 @@ impl<'a> CabacEncoder<'a> {
     }
 }
 
+/// The bin-level interface the macroblock writers code through, so one
+/// writer serves both an encoder that writes ([`CabacEncoder`]) and one
+/// that only prices ([`CabacEstimator`]) — each compiled for its own, the
+/// pricing one with nothing in a bin but two table loads.
+pub(crate) trait BinEnc {
+    /// A context-coded bin.
+    fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32);
+    /// A bypass bin.
+    fn encode_bypass(&mut self, bin: u32);
+    /// `n` bypass bins of `v`, most significant first.
+    fn encode_bypass_bits(&mut self, n: u32, v: u32) {
+        debug_assert!(n <= 32);
+        for i in (0..n).rev() {
+            self.encode_bypass((v >> i) & 1);
+        }
+    }
+    /// A terminate bin.
+    fn encode_terminate(&mut self, bin: u32);
+}
+
+impl BinEnc for CabacEncoder<'_> {
+    #[inline]
+    fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
+        CabacEncoder::encode_decision(self, ctx, bin)
+    }
+    #[inline]
+    fn encode_bypass(&mut self, bin: u32) {
+        CabacEncoder::encode_bypass(self, bin)
+    }
+    #[inline]
+    fn encode_bypass_bits(&mut self, n: u32, v: u32) {
+        CabacEncoder::encode_bypass_bits(self, n, v)
+    }
+    #[inline]
+    fn encode_terminate(&mut self, bin: u32) {
+        CabacEncoder::encode_terminate(self, bin)
+    }
+}
+
+/// [`CabacEncoder::estimating`] as a type of its own: the same prices and
+/// the same context transitions, with no output to dispatch on.
+#[derive(Default)]
+pub(crate) struct CabacEstimator {
+    frac: f64,
+}
+
+impl CabacEstimator {
+    /// A fresh estimate.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The bins' estimated cost so far, in bits.
+    pub(crate) fn fractional_bits(&self) -> f64 {
+        self.frac
+    }
+}
+
+impl BinEnc for CabacEstimator {
+    #[inline(always)]
+    fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
+        let i = ((*ctx as usize) << 1 | bin as usize) & 255;
+        self.frac += EST_COST[i] as f64;
+        *ctx = EST_NEXT[i];
+    }
+    #[inline(always)]
+    fn encode_bypass(&mut self, _bin: u32) {
+        self.frac += 1.0;
+    }
+    #[inline(always)]
+    fn encode_bypass_bits(&mut self, n: u32, _v: u32) {
+        for _ in 0..n {
+            self.frac += 1.0;
+        }
+    }
+    #[inline(always)]
+    fn encode_terminate(&mut self, bin: u32) {
+        self.frac += if bin != 0 { 7.0 } else { 0.01 };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

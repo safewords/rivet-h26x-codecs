@@ -8,6 +8,8 @@
 //! adjacency is the defence worth having).
 
 use crate::cabac::{Cabac, Ctx, init_ctx_h264};
+use crate::cabac_enc::BinEnc;
+#[cfg(test)]
 use crate::cabac_enc::CabacEncoder;
 use crate::encode::h264_intra::{MbDecision, MbKind as IntraKind};
 use crate::encode::h264_me::{BDecision, BMbKind, InterDecision, InterMbKind};
@@ -173,7 +175,7 @@ pub fn decode_mb_skip(
 /// slice loop does when it takes the skip branch.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_mb_skip_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     left: Option<&WrittenMb>,
     above: Option<&WrittenMb>,
@@ -205,7 +207,7 @@ pub fn decode_mb_field(c: &mut Cabac, st: &mut CabacState, nb: &MbNeighbours) ->
 /// the reader reads (which pair-level facts do not depend on the flag the
 /// neighbours were derived under).
 pub(crate) fn write_mb_field_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     nb: &MbNeighbours,
     field: bool,
@@ -288,7 +290,7 @@ pub(crate) const MB_TYPE_I_PCM: u32 = 25;
 /// codeword: the caller writes the raw samples byte-aligned and opens a new
 /// engine after them, as `write_pcm_slice_data_cabac` (the one caller
 /// today, in `encode::h264_syntax`) does.
-pub(crate) fn write_mb_type_i_cabac(e: &mut CabacEncoder, st: &mut CabacState, inc: usize, t: u32) {
+pub(crate) fn write_mb_type_i_cabac(e: &mut impl BinEnc, st: &mut CabacState, inc: usize, t: u32) {
     write_intra_mb_type_cabac(e, st, CTX_MB_TYPE_I, true, inc, t);
 }
 
@@ -300,7 +302,7 @@ pub(crate) fn write_mb_type_i_cabac(e: &mut CabacEncoder, st: &mut CabacState, i
 /// suffix layout (fixed first bin at `base`, field bins at `base + 1..=3`,
 /// where the chroma pair and the prediction pair each share one context).
 fn write_intra_mb_type_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     base: usize,
     intra_slice: bool,
@@ -439,7 +441,7 @@ fn decode_mb_type(
 /// at all — Table 9-27 has no binarisation for it; it is a CAVLC-only
 /// spelling, and it is refused.
 #[allow(dead_code)] // the picture loop being built is the caller
-pub(crate) fn write_mb_type_p_cabac(e: &mut CabacEncoder, st: &mut CabacState, t: u32) {
+pub(crate) fn write_mb_type_p_cabac(e: &mut impl BinEnc, st: &mut CabacState, t: u32) {
     debug_assert!(t != 4, "P_8x8ref0 has no CABAC binarisation (Table 9-27)");
     if t >= 5 {
         e.encode_decision(&mut st.ctx[CTX_MB_TYPE_P_PREFIX], 1);
@@ -469,7 +471,7 @@ pub(crate) fn write_mb_type_p_cabac(e: &mut CabacEncoder, st: &mut CabacState, t
 /// A unary tree over three contexts whose first bin is inverted relative
 /// to the rest: a 1 there *ends* it at 8x8, where a 1 at the second bin
 /// continues.
-pub(crate) fn write_sub_mb_type_p_cabac(e: &mut CabacEncoder, st: &mut CabacState, t: u32) {
+pub(crate) fn write_sub_mb_type_p_cabac(e: &mut impl BinEnc, st: &mut CabacState, t: u32) {
     debug_assert!(t < 4, "P sub_mb_type {t} out of range");
     if t == 0 {
         e.encode_decision(&mut st.ctx[CTX_SUB_MB_TYPE_P], 1);
@@ -499,7 +501,7 @@ pub(crate) fn write_sub_mb_type_p_cabac(e: &mut CabacEncoder, st: &mut CabacStat
 /// 8 the type is `bits + 3`; 13 escapes to intra, 14 is type 11, 15 is
 /// `B_8x8`; and 8..=12 take one more bin, the type then being the five
 /// bins as a number, minus 4. So 12..=21 spell `t + 4` over five bins.
-pub(crate) fn write_mb_type_b_cabac(e: &mut CabacEncoder, st: &mut CabacState, inc: usize, t: u32) {
+pub(crate) fn write_mb_type_b_cabac(e: &mut impl BinEnc, st: &mut CabacState, inc: usize, t: u32) {
     if t == 0 {
         e.encode_decision(&mut st.ctx[CTX_MB_TYPE_B_PREFIX + inc], 0);
         return;
@@ -537,7 +539,7 @@ pub(crate) fn write_mb_type_b_cabac(e: &mut CabacEncoder, st: &mut CabacState, i
 /// `1 1 0 b b`; 7..=10 are `1 1 1 0 b b`; 11 and 12 are `1 1 1 1 b`. The
 /// contexts are 36..=39 with the reader's own placement: the first three
 /// bins take 36, 37 and 38 in turn, everything after them 39.
-pub(crate) fn write_sub_mb_type_b_cabac(e: &mut CabacEncoder, st: &mut CabacState, t: u32) {
+pub(crate) fn write_sub_mb_type_b_cabac(e: &mut impl BinEnc, st: &mut CabacState, t: u32) {
     debug_assert!(t <= 12, "B sub_mb_type {t} out of range");
     if t == 0 {
         e.encode_decision(&mut st.ctx[CTX_SUB_MB_TYPE_B], 0);
@@ -692,7 +694,7 @@ fn decode_ref_idx(
 /// macroblock have no writer yet.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_ref_idx_16x16_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     left: Option<&WrittenMb>,
     above: Option<&WrittenMb>,
@@ -810,7 +812,7 @@ fn decode_mvd(
 /// Partition shapes with an in-macroblock neighbour have no writer yet.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_mvd_16x16_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     left: Option<&WrittenMb>,
     above: Option<&WrittenMb>,
@@ -866,7 +868,7 @@ impl CurMbMvd {
 /// context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_mvd_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     cur: &CurMbMvd,
     left: Option<&WrittenMb>,
@@ -991,7 +993,7 @@ fn decode_mvd_component(
 /// (zero carries no sign bin).
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_mvd_component_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     sum: i32,
     comp: usize,
@@ -1124,7 +1126,7 @@ fn decode_intra_pred_mode(c: &mut Cabac, st: &mut CabacState, pred: u8) -> u8 {
 /// writer's `cbf_inc`.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_intra_pred_modes_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     d: &MbDecision,
     chroma_nb: Option<[bool; 2]>,
@@ -1616,7 +1618,7 @@ impl WrittenMb {
 /// bin, and that geometry belongs beside the reader's.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_cbp_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     left: Option<&WrittenMb>,
     above: Option<&WrittenMb>,
@@ -1733,7 +1735,7 @@ fn decode_qp_delta(c: &mut Cabac, st: &mut CabacState, bit_depth: u32) -> Result
 /// picture may use the width.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_mb_qp_delta_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     qp_delta: i32,
     bit_depth: u32,
@@ -1795,7 +1797,7 @@ fn decode_transform_8x8(
 /// macroblock it comes *after* `coded_block_pattern`, and only when some
 /// luma block is coded.
 pub(crate) fn write_transform_8x8_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     left: Option<&WrittenMb>,
     above: Option<&WrittenMb>,
@@ -2240,7 +2242,7 @@ fn residual_block_cabac(
 /// the defence worth having is that the two are on the same screen.
 #[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn write_residual_block_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     field: bool,
     cat: usize,
@@ -2588,7 +2590,7 @@ fn parse_residual_cabac(
 /// and passes false.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_intra_residual_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     field: bool,
     chroma_format_idc: u32,
@@ -2629,7 +2631,7 @@ pub(crate) fn write_intra_residual_cabac(
 /// Written after `mb_qp_delta`, which for inter is present iff `cbp != 0`.
 #[allow(dead_code)] // the picture loop being built is the caller
 pub(crate) fn write_inter_residual_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     field: bool,
     chroma_format_idc: u32,
@@ -2665,7 +2667,7 @@ pub(crate) fn write_inter_residual_cabac(
 /// through the identical path rather than a second spelling.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_inter_residual_fields_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     field: bool,
     chroma_format_idc: u32,
@@ -2755,7 +2757,7 @@ fn quad_total(nz: &[u8; 16], blk8: usize) -> usize {
 /// `parse_residual_luma_like_cabac` reads them.
 #[allow(clippy::too_many_arguments)]
 fn write_plane_residual_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     field: bool,
     cur: &CurMbResidual,
@@ -2882,7 +2884,7 @@ fn write_plane_residual_cabac(
 /// block.
 #[allow(clippy::too_many_arguments)]
 fn write_residual_walk_cabac(
-    e: &mut CabacEncoder,
+    e: &mut impl BinEnc,
     st: &mut CabacState,
     field: bool,
     chroma_format_idc: u32,
@@ -3973,7 +3975,7 @@ mod mb_round_trip {
     /// loop this module's writers will be wired into.
     #[allow(clippy::too_many_arguments)]
     fn write_mb(
-        e: &mut CabacEncoder,
+        e: &mut impl BinEnc,
         st: &mut CabacState,
         d: &MbDecision,
         left: Option<&Coded>,
@@ -3991,7 +3993,7 @@ mod mb_round_trip {
     /// I-slice composite and intra-in-P, exactly as the readers share it.
     #[allow(clippy::too_many_arguments)]
     fn write_intra_mb_body(
-        e: &mut CabacEncoder,
+        e: &mut impl BinEnc,
         st: &mut CabacState,
         d: &MbDecision,
         left: Option<&Coded>,
@@ -4040,7 +4042,7 @@ mod mb_round_trip {
     /// into.
     #[allow(clippy::too_many_arguments)]
     fn write_p16x16_mb(
-        e: &mut CabacEncoder,
+        e: &mut impl BinEnc,
         st: &mut CabacState,
         d: &InterDecision,
         left: Option<&Coded>,
