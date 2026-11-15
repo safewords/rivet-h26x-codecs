@@ -381,6 +381,8 @@ mod tests {
                 strong_smoothing: false,
                 bypass,
                 free_to_trim: false,
+                sign_hiding: false,
+                rdoq: None,
             }
         }
     }

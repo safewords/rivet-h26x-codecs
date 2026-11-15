@@ -27,9 +27,12 @@ pub fn apply_preset(cfg: &mut Config, p: Preset) {
             cfg.max_refs = 3;
             cfg.inter_parts = InterParts::None;
         }
+        // Symmetric partitions measured at slow (2026-11-15): +6.38% against
+        // +6.28% BD-rate without them, at 1.9x the CPU. Off until they
+        // earn it.
         Preset::Slow => {
             cfg.max_refs = 4;
-            cfg.inter_parts = InterParts::Symmetric;
+            cfg.inter_parts = InterParts::None;
         }
     }
 }
@@ -60,6 +63,10 @@ pub(crate) struct Tune {
     /// by interleaved one-thread runs): 0 against 1, -4.19% against -4.28%
     /// BD-rate at 0.92x the CPU.
     pub intra_split_depth: u32,
+    /// Sign data hiding (the PPS flag, `h265_rdoq::hide_signs`).
+    pub sign_hiding: bool,
+    /// Rate-distortion optimised quantisation (`h265_rdoq::quantise`).
+    pub rdoq: bool,
 }
 
 impl Tune {
@@ -71,11 +78,13 @@ impl Tune {
         rd_intra: Some(0.5),
         rskip: None,
         intra_split_depth: 1,
+        sign_hiding: false,
+        rdoq: false,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
     pub fn of(cfg: &Config) -> Tune {
-        let Some(_p) = cfg.preset else {
+        let Some(p) = cfg.preset else {
             return Tune::NEUTRAL;
         };
         // Offsets measured 2026-11-15 (x265 parity, 30 frames of the five
@@ -88,6 +97,13 @@ impl Tune {
             b_qp_offset: [2, 4, 5],
             rskip: Some(0.25),
             intra_split_depth: 0,
+            // Measured 2026-11-15 (x265 parity against medium, `--preset
+            // medium`): sign hiding -4.19% -> -6.06% BD-rate; RDOQ alone
+            // -7.47% (ducks +10.7 -> -3.0, park_joy +6.0 -> +1.0, the CIF
+            // clips 0.3-1.0 worse) and both -8.25%, at 1.3x the CPU for
+            // RDOQ by interleaved one-thread runs: the slow tier's tool.
+            sign_hiding: true,
+            rdoq: p == Preset::Slow,
             ..Tune::NEUTRAL
         }
     }

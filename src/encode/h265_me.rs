@@ -436,6 +436,9 @@ pub struct InterCuDecision {
     /// CU is exempt from the in-loop filters sample for sample, which is
     /// what keeps a lossless stream lossless once deblocking is on.
     pub bypass: bool,
+    /// Whether the levels were quantised for a PPS that hides signs: see
+    /// `CuDecision::sign_hiding`.
+    pub sign_hiding: bool,
     /// `QpY` of this CU as a decoder will hold it: the context quantiser
     /// when the CU carries residual, the *predicted* one when it does not
     /// — a skip or a root-cbf-0 CU codes no `cu_qp_delta`. Filled with
@@ -519,6 +522,7 @@ impl Default for InterCuDecision {
         InterCuDecision {
             log2_cu: 0,
             bypass: false,
+            sign_hiding: false,
             qp_y: 26,
             kind: InterCuKind::Skip { merge_idx: 0 },
             part: PartMode::P2Nx2N,
@@ -953,6 +957,7 @@ impl<S: Sample> InterPicture<S> {
         let out = InterCuDecision {
             log2_cu,
             bypass: ctx.bypass,
+            sign_hiding: ctx.sign_hiding,
             qp_y: ctx.qp,
             ..InterCuDecision::default()
         };
@@ -1322,6 +1327,7 @@ impl<S: Sample> InterPicture<S> {
         let out = InterCuDecision {
             log2_cu,
             bypass: ctx.bypass,
+            sign_hiding: ctx.sign_hiding,
             qp_y: ctx.qp,
             ..InterCuDecision::default()
         };
@@ -2064,6 +2070,7 @@ impl<S: Sample> InterPicture<S> {
             x0,
             y0,
             log2_cu,
+            0,
             qp_l,
             src,
             y_stride,
@@ -2103,6 +2110,7 @@ impl<S: Sample> InterPicture<S> {
                         px,
                         py,
                         log2c,
+                        comp + 1,
                         qp_c,
                         &srcp[soff..],
                         c_stride,
@@ -2543,6 +2551,7 @@ impl<S: Sample> InterPicture<S> {
         let out = InterCuDecision {
             log2_cu: log2,
             bypass: ctx.bypass,
+            sign_hiding: ctx.sign_hiding,
             qp_y: ctx.qp,
             ..InterCuDecision::default()
         };
@@ -2662,6 +2671,7 @@ impl<S: Sample> InterPicture<S> {
                 let out = InterCuDecision {
                     log2_cu: log2,
                     bypass: ctx.bypass,
+                    sign_hiding: ctx.sign_hiding,
                     qp_y: ctx.qp,
                     ..InterCuDecision::default()
                 };
@@ -3751,6 +3761,7 @@ fn code_residual_inter<S: Sample>(
     x: usize,
     y: usize,
     log2: u32,
+    c_idx: usize,
     qp: i32,
     src: &[S],
     src_stride: usize,
@@ -3786,14 +3797,50 @@ fn code_residual_inter<S: Sample>(
 
     (ctx.enc.fdct[(log2 - 2) as usize])(&mut work, log2, ctx.bit_depth);
     let qb = qbits(qp, log2, ctx.bit_depth);
-    let nz = (ctx.enc.quant)(
-        &work,
-        levels,
-        n,
-        quant_scale((qp % 6) as usize),
-        qb,
-        quant_offset(qb, false),
-    );
+    let nz = match ctx.rdoq {
+        Some(cx) => super::h265_rdoq::quantise(
+            &super::h265_rdoq::Block {
+                log2,
+                c_idx,
+                scan_idx: 0,
+                qp,
+                bit_depth: ctx.bit_depth,
+                lambda: ssd_lambda(ctx.qp, ctx.bit_depth),
+                cx,
+                sign_hiding: ctx.sign_hiding,
+            },
+            &work,
+            levels,
+        ),
+        None => {
+            let nz = (ctx.enc.quant)(
+                &work,
+                levels,
+                n,
+                quant_scale((qp % 6) as usize),
+                qb,
+                quant_offset(qb, false),
+            );
+            if ctx.sign_hiding && nz > 0 {
+                super::h265_rdoq::hide_signs(
+                    &super::h265_rdoq::Block {
+                        log2,
+                        c_idx,
+                        scan_idx: 0,
+                        qp,
+                        bit_depth: ctx.bit_depth,
+                        lambda: 0.0,
+                        cx: ctx.rdoq.unwrap_or(super::h265_intra::no_contexts()),
+                        sign_hiding: true,
+                    },
+                    &work,
+                    levels,
+                )
+            } else {
+                nz
+            }
+        }
+    };
 
     work[..n * n].copy_from_slice(&levels[..n * n]);
     scale_coefficients(
@@ -3854,6 +3901,8 @@ mod tests {
                 strong_smoothing: false,
                 bypass: false,
                 free_to_trim: false,
+                sign_hiding: false,
+                rdoq: None,
             }
         }
     }

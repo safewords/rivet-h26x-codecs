@@ -75,7 +75,8 @@ impl<S: Sample> HalfPlanes<S> {
         let shift1 = bit_depth.min(12) as i32 - 8;
         let shift3 = 14 - bit_depth as i32;
         let max = (1i32 << bit_depth) - 1;
-        let wanted = |fx: usize, fy: usize| quarter || (fx.is_multiple_of(2) && fy.is_multiple_of(2));
+        let wanted =
+            |fx: usize, fy: usize| quarter || (fx.is_multiple_of(2) && fy.is_multiple_of(2));
         let d = &p.data;
         let mut planes: Vec<Vec<S>> = (1..16)
             .map(|ph| {

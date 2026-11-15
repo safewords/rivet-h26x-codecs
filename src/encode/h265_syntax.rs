@@ -640,6 +640,10 @@ pub struct PpsOptions {
     pub weighted_pred: bool,
     /// `weighted_bipred_flag`: every B slice header carries one.
     pub weighted_bipred: bool,
+    /// `sign_data_hiding_enabled_flag`: a sub-block whose significant
+    /// coefficients span more than three scan positions codes no sign for
+    /// the first of them (`h265_rdoq::hide_signs`).
+    pub sign_hiding: bool,
 }
 
 /// [`write_pps`] with the optional switches spelled out.
@@ -650,7 +654,7 @@ pub fn write_pps_opts(qp: i32, bypass: bool, deblock: bool, opts: &PpsOptions) -
     w.flag(false); // dependent_slice_segments_enabled_flag
     w.flag(false); // output_flag_present_flag
     w.bits(3, 0); // num_extra_slice_header_bits
-    w.flag(false); // sign_data_hiding_enabled_flag
+    w.flag(opts.sign_hiding); // sign_data_hiding_enabled_flag
     w.flag(false); // cabac_init_present_flag
     w.ue(0); // num_ref_idx_l0_default_active_minus1
     w.ue(0); // num_ref_idx_l1_default_active_minus1

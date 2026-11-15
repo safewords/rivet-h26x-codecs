@@ -596,6 +596,8 @@ impl<S: Sample> Core<S> {
                 .then_some(u32::from(tree_depth(&cfg, &g) > 0 && cfg.gop != 0)),
             weighted_pred: cfg.weighted_pred,
             weighted_bipred: cfg.weighted_pred && cfg.bframes > 0,
+            sign_hiding: super::h265_tune::Tune::of(&cfg).sign_hiding
+                && !matches!(cfg.rate, RateControl::Lossless),
         };
         let (sw, sh) = cfg.chroma.subsampling();
         let luma = cfg.width as usize * cfg.height as usize;
@@ -1119,6 +1121,10 @@ impl<S: Sample> Core<S> {
         let enc = HevcEncDsp::new(cpu);
         let dist = DistortionDsp::<S>::new(cpu);
         let bit_depth = self.cfg.bit_depth;
+        // The contexts the quantiser prices its bins at: this slice's
+        // initial ones, as every rate in the decisions is priced.
+        let tune = super::h265_tune::Tune::of(&self.cfg);
+        let rdoq_cx = Contexts::new(0, qp as i32);
         let ictx = IntraCtx {
             dsp: &dsp,
             enc: &enc,
@@ -1133,6 +1139,8 @@ impl<S: Sample> Core<S> {
             // anchor every P picture reads, and trimming it costs them
             // more than it saves — see `rdoq_trim`.
             free_to_trim: self.cfg.gop == 0,
+            sign_hiding: self.pps_opts.sign_hiding,
+            rdoq: (tune.rdoq && !bypass).then_some(&rdoq_cx),
         };
         let mut pic = IntraPicture::<S>::new_with_chroma(cw, ch, g.log2_ctb, bit_depth, chroma);
         // The transform-split search is on: a CU may carry four quarter-size
@@ -1607,6 +1615,8 @@ impl<S: Sample> Core<S> {
         let enc = HevcEncDsp::new(cpu);
         let dist = DistortionDsp::<S>::new(cpu);
         let bit_depth = self.cfg.bit_depth;
+        let tune = super::h265_tune::Tune::of(&self.cfg);
+        let rdoq_cx = Contexts::new(if c.kind == Kind::B { 2 } else { 1 }, qp as i32);
         let mctx = IntraCtx {
             dsp: &dsp,
             enc: &enc,
@@ -1618,13 +1628,14 @@ impl<S: Sample> Core<S> {
             // Every inter picture this encoder codes is kept as the next
             // one's reference, so none of them is free to trim.
             free_to_trim: false,
+            sign_hiding: self.pps_opts.sign_hiding,
+            rdoq: (tune.rdoq && !bypass).then_some(&rdoq_cx),
         };
         // The reconstruction takes its sample depth from the parsed SPS —
         // the same field a decoder of this stream sizes its frames by.
         let mut pic = InterPicture::<S>::new(&sps, &pps, c.poc);
         pic.parts = self.cfg.inter_parts;
         pic.half = self.half.clone();
-        let tune = super::h265_tune::Tune::of(&self.cfg);
         pic.search_rings = tune.search_rings;
         pic.rd_intra = tune.rd_intra;
         pic.rskip = tune.rskip;
@@ -3356,12 +3367,12 @@ fn write_cu_inter(
     // intra rule (7.4.9.11), and `residual_scan_idx` returns 0 for every
     // non-intra block regardless of size or component.
     let params = |log2_size: u32, c_idx: usize| ResidualParams {
+        sign_hiding: d.sign_hiding,
         log2_size,
         c_idx,
         scan_idx: 0,
         bypass: d.bypass,
         transform_skip_allowed: false,
-        sign_hiding: false,
         intra: false,
         pred_mode_intra: 0,
         ts_context: false,
@@ -3593,12 +3604,12 @@ fn write_cu_intra_body(
 
     let n = 1usize << log2;
     let params = |log2_size: u32, c_idx: usize, mode: u8| ResidualParams {
+        sign_hiding: d.sign_hiding,
         log2_size,
         c_idx,
         scan_idx: residual_scan_idx(true, log2_size, c_idx, cat, u32::from(mode)),
         bypass: d.bypass,
         transform_skip_allowed: false,
-        sign_hiding: false,
         intra: true,
         pred_mode_intra: u32::from(mode),
         ts_context: false,
@@ -3812,12 +3823,12 @@ fn write_cu_intra_nxn_body(
         _ => write_intra_chroma_pred_mode(e, cx, u32::from(d.chroma_syntax)),
     }
     let params = |c_idx: usize, mode: u8| ResidualParams {
+        sign_hiding: d.sign_hiding,
         log2_size: 2,
         c_idx,
         scan_idx: residual_scan_idx(true, 2, c_idx, cat, u32::from(mode)),
         bypass: d.bypass,
         transform_skip_allowed: false,
-        sign_hiding: false,
         intra: true,
         pred_mode_intra: u32::from(mode),
         ts_context: false,
@@ -5181,6 +5192,8 @@ mod tests {
             strong_smoothing: false,
             bypass: true,
             free_to_trim: false,
+            sign_hiding: false,
+            rdoq: None,
         };
         let split = |f: &[u8]| -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let (y, c) = f.split_at(w * h);
@@ -5493,6 +5506,8 @@ mod tests {
             strong_smoothing: false,
             bypass: false,
             free_to_trim: false,
+            sign_hiding: false,
+            rdoq: None,
         };
         let split = |f: &[u8]| -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let (y, c) = f.split_at(w * h);
@@ -5575,6 +5590,8 @@ mod tests {
             strong_smoothing: false,
             bypass: false,
             free_to_trim: false,
+            sign_hiding: false,
+            rdoq: None,
         };
         let mut pic = IntraPicture::<u8>::new(64, 64, 5, 8);
         pic.split_depth = 1;
@@ -5713,6 +5730,8 @@ mod tests {
             strong_smoothing: false,
             bypass: false,
             free_to_trim: false,
+            sign_hiding: false,
+            rdoq: None,
         };
         let mut pic = InterPicture::<u8>::new(&sps, &pps, 1);
         let (py, pc) = flat.split_at(w * h);
@@ -5863,6 +5882,8 @@ mod tests {
             strong_smoothing: false,
             bypass: false,
             free_to_trim: false,
+            sign_hiding: false,
+            rdoq: None,
         };
         let mut pic = InterPicture::<u8>::new(&sps, &pps, 1);
         let (py, pc) = split.split_at(w * h);

@@ -119,6 +119,10 @@ pub struct CuDecision {
     /// log2 of the CU size this decision describes: 3, 4 or 5 — the CTB's,
     /// or smaller under the coding quadtree.
     pub log2_cu: u32,
+    /// Whether the levels were quantised for a PPS that hides signs, and
+    /// so whether the writer omits the hidden ones: what
+    /// [`IntraCtx::sign_hiding`] said when the unit was coded.
+    pub sign_hiding: bool,
     /// `part_mode`: true is `PART_NxN` (four 4x4 luma PBs/TUs, only ever
     /// produced at `log2_cu == 3`), false is `PART_2Nx2N` (one luma PB and
     /// one luma TU the size of the CU — or four quarter TUs, see
@@ -321,6 +325,7 @@ impl Default for CuDecision {
             split_tu: false,
             split_child: [false; 4],
             bypass: false,
+            sign_hiding: false,
             qp_y: 26,
             luma_modes: [1; 4],
             luma_syntax: [LumaModeSyntax::default(); 4],
@@ -384,6 +389,14 @@ pub struct IntraCtx<'a, S: Sample> {
     /// for the quality removed — measured at -1.8% BD-rate on all-intra
     /// streams and +1.7% on IP, from the same code.
     pub free_to_trim: bool,
+    /// Whether the PPS hides signs: every transform block's levels are
+    /// then given the parity the reader infers its hidden sign from
+    /// (`h265_rdoq::hide_signs`), and the decisions record it for the
+    /// writer.
+    pub sign_hiding: bool,
+    /// Rate-distortion optimised quantisation (`h265_rdoq::quantise`),
+    /// pricing bins at these contexts; `None` quantises with a dead zone.
+    pub rdoq: Option<&'a crate::hevc::ctx::Contexts>,
 }
 
 /// The fixed picture geometry the availability rules need, copied out of
@@ -1039,6 +1052,17 @@ pub(crate) fn cu_ssd<S: Sample>(
 /// transform-split decision and the rate-distortion quantiser, scaled for
 /// depth by [`ssd_lambda_scale`] — in `f64`, the width the quadtree's
 /// summed costs are kept in.
+/// The contexts a block is priced at when no picture supplied any: only
+/// [`super::h265_rdoq::hide_signs`] reads a `Block` then, and it prices
+/// nothing.
+static NO_CONTEXTS: std::sync::LazyLock<crate::hevc::ctx::Contexts> =
+    std::sync::LazyLock::new(|| crate::hevc::ctx::Contexts::new(0, 26));
+
+/// See [`NO_CONTEXTS`].
+pub(crate) fn no_contexts() -> &'static crate::hevc::ctx::Contexts {
+    &NO_CONTEXTS
+}
+
 pub(crate) fn ssd_lambda(qp: i32, bit_depth: u32) -> f64 {
     f64::from(0.85f32 * ((qp - 12) as f32 / 3.0).exp2() * ssd_lambda_scale(bit_depth))
 }
@@ -1114,6 +1138,7 @@ pub(crate) fn code_cu_2nx2n_intra<S: Sample>(
     let mut out = CuDecision {
         log2_cu,
         bypass: ctx.bypass,
+        sign_hiding: ctx.sign_hiding,
         qp_y: ctx.qp,
         ..CuDecision::default()
     };
@@ -1354,6 +1379,7 @@ pub(crate) fn code_cu_nxn_intra<S: Sample>(
         log2_cu: MIN_CB_LOG2,
         nxn: true,
         bypass: ctx.bypass,
+        sign_hiding: ctx.sign_hiding,
         qp_y: ctx.qp,
         ..CuDecision::default()
     };
@@ -1951,21 +1977,40 @@ fn code_residual<S: Sample>(
     } else {
         (ctx.enc.fdct[(log2 - 2) as usize])(&mut work, log2, ctx.bit_depth);
     }
-    let qb = qbits(qp, log2, ctx.bit_depth);
-    let nz = (ctx.enc.quant)(
-        &work,
-        levels,
-        n,
-        quant_scale((qp % 6) as usize),
-        qb,
-        quant_offset(qb, true),
-    );
+    let block = super::h265_rdoq::Block {
+        log2,
+        c_idx,
+        scan_idx: crate::hevc::residual::residual_scan_idx(true, log2, c_idx, cat, u32::from(mode)),
+        qp,
+        bit_depth: ctx.bit_depth,
+        lambda: ssd_lambda(ctx.qp, ctx.bit_depth),
+        cx: ctx.rdoq.unwrap_or(no_contexts()),
+        sign_hiding: ctx.sign_hiding,
+    };
+    let nz = if ctx.rdoq.is_some() {
+        super::h265_rdoq::quantise(&block, &work, levels)
+    } else {
+        let qb = qbits(qp, log2, ctx.bit_depth);
+        let nz = (ctx.enc.quant)(
+            &work,
+            levels,
+            n,
+            quant_scale((qp % 6) as usize),
+            qb,
+            quant_offset(qb, true),
+        );
 
-    // Rate-distortion quantisation: the plain quantiser's output is only
-    // the first candidate. See [`rdoq_trim`].
-    let nz = rdoq_trim(
-        ctx, plane, off, stride, log2, c_idx, qp, src, src_stride, levels, cat, mode, nz,
-    );
+        // Rate-distortion quantisation: the plain quantiser's output is only
+        // the first candidate. See [`rdoq_trim`].
+        let nz = rdoq_trim(
+            ctx, plane, off, stride, log2, c_idx, qp, src, src_stride, levels, cat, mode, nz,
+        );
+        if ctx.sign_hiding && nz > 0 {
+            super::h265_rdoq::hide_signs(&block, &work, levels)
+        } else {
+            nz
+        }
+    };
 
     // Reconstruct through the decoder's own dequantisation and inverse
     // transform, so the plane holds what a decoder will hold.
@@ -3027,6 +3072,8 @@ mod tests {
                 strong_smoothing: false,
                 bypass,
                 free_to_trim: false,
+                sign_hiding: false,
+                rdoq: None,
             }
         }
     }

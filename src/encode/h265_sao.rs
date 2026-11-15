@@ -927,6 +927,8 @@ mod tests {
                 strong_smoothing: false,
                 bypass: false,
                 free_to_trim: false,
+                sign_hiding: false,
+                rdoq: None,
             }
         }
     }
