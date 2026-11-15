@@ -1256,12 +1256,12 @@ impl<S: Sample> H264DecoderImpl<S> {
                 && f.mb_height == mbh
                 && f.chroma == chroma
                 && f.bit_depth == bit_depth
-                && f.bit_depth_chroma == bit_depth_chroma
+                && f.chroma_bit_depth() == bit_depth_chroma
                 && f.colour_planes.is_some() == separate
         });
         if !ok {
             let mut g = Frame::new(mbw, mbh, chroma, bit_depth, separate);
-            g.bit_depth_chroma = bit_depth_chroma;
+            g.bit_depth_chroma = Some(bit_depth_chroma);
             let mid = S::from_i32(1 << (bit_depth - 1));
             let mid_c = S::from_i32(1 << (bit_depth_chroma - 1));
             g.y.data.fill(mid);
@@ -1583,7 +1583,7 @@ impl<S: Sample> H264DecoderImpl<S> {
                     sps.separate_colour_plane,
                 );
                 f.poc = poc;
-                f.bit_depth_chroma = sps.chroma_bit_depth();
+                f.bit_depth_chroma = Some(sps.chroma_bit_depth());
                 f.field_borders = !sps.frame_mbs_only;
                 f.field_coded = field_pic;
                 f.mbaff = hdr.mbaff(sps);
@@ -1609,7 +1609,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             );
             f.field_coded = true;
             f.poc = poc;
-            f.bit_depth_chroma = sps.chroma_bit_depth();
+            f.bit_depth_chroma = Some(sps.chroma_bit_depth());
             Some(f)
         } else {
             None

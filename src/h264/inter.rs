@@ -194,7 +194,7 @@ pub fn predict_partition<S: Sample>(
     let c444 = cur.chroma == crate::picture::ChromaFormat::Yuv444;
     let (cw, ch) = (w / sw, h / sh);
     let max = (1i32 << cur.bit_depth) - 1;
-    let max_c = (1i32 << cur.bit_depth_chroma) - 1;
+    let max_c = (1i32 << cur.chroma_bit_depth()) - 1;
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
         let Some((rf, mv, rpar)) = r else { continue };
         let [pl, pcb, pcr] = &mut pred[list];

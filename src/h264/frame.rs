@@ -249,9 +249,11 @@ pub struct Frame<S: Sample = u8> {
     /// Luma bit depth.
     pub bit_depth: u32,
     /// Chroma bit depth (`bit_depth_chroma_minus8 + 8`; the High profiles
-    /// let it differ from luma's). A separate-colour-plane picture codes
-    /// every plane as luma, at `bit_depth`.
-    pub bit_depth_chroma: u32,
+    /// let it differ from luma's), or `None` for "the luma depth" — what
+    /// every frame built without it (the encoder's among them) means. A
+    /// separate-colour-plane picture codes every plane as luma, at
+    /// `bit_depth`. Read it through [`Frame::chroma_bit_depth`].
+    pub bit_depth_chroma: Option<u32>,
     /// Width in macroblocks.
     pub mb_width: usize,
     /// Height in macroblocks.
@@ -292,6 +294,12 @@ pub struct Frame<S: Sample = u8> {
 }
 
 impl<S: Sample> Frame<S> {
+    /// `BitDepthC`: [`Self::bit_depth_chroma`], else the luma depth.
+    #[inline]
+    pub fn chroma_bit_depth(&self) -> u32 {
+        self.bit_depth_chroma.unwrap_or(self.bit_depth)
+    }
+
     /// A zero-size placeholder (no buffers).
     pub fn empty() -> Self {
         let none = || PaddedPlane {
@@ -307,7 +315,7 @@ impl<S: Sample> Frame<S> {
             cr: none(),
             chroma: ChromaFormat::Yuv420,
             bit_depth: 8,
-            bit_depth_chroma: 8,
+            bit_depth_chroma: None,
             mb_width: 0,
             mb_height: 0,
             motion: [Vec::new(), Vec::new()],
@@ -451,7 +459,7 @@ impl<S: Sample> Frame<S> {
             cr: PaddedPlane::new(cw, ch, cpad),
             chroma,
             bit_depth,
-            bit_depth_chroma: bit_depth,
+            bit_depth_chroma: None,
             mb_width,
             mb_height,
             motion: [
@@ -695,7 +703,7 @@ impl<S: Sample> Frame<S> {
             bit_depth_chroma: if self.colour_planes.is_some() {
                 self.bit_depth
             } else {
-                self.bit_depth_chroma
+                self.chroma_bit_depth()
             },
             chroma,
             planes,

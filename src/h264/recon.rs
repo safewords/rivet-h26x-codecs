@@ -414,7 +414,7 @@ pub fn derive<S: Sample>(
     // reads the unshifted values.
     let bd_off = 6 * (ctx.bit_depth as i32 - 8);
     // QpBdOffsetC: the chroma QPs follow the chroma depth (8.5.8).
-    let bd_off_c = 6 * (cur.bit_depth_chroma as i32 - 8);
+    let bd_off_c = 6 * (cur.chroma_bit_depth() as i32 - 8);
     // QP_Y as the parser (or the skip path) left it in the layer.
     let qp = layer.qp;
     let deblock_qp = if layer.kind == MbKind::IPcm { 0 } else { qp };
@@ -601,7 +601,7 @@ pub fn reconstruct<S: Sample>(
     let bit_depth = cur.bit_depth;
     let max = (1i32 << bit_depth) - 1;
     // Cb / Cr of a 4:4:4 picture are coded like luma but at their own depth.
-    let plane_bd = [bit_depth, cur.bit_depth_chroma, cur.bit_depth_chroma];
+    let plane_bd = [bit_depth, cur.chroma_bit_depth(), cur.chroma_bit_depth()];
     let plane_max = plane_bd.map(|d| (1i32 << d) - 1);
     let max_c = plane_max[1];
     let dsp = &refs.dsp;
@@ -1116,6 +1116,7 @@ fn predict_chroma_planes<S: Sample>(
         .cb
         .offset((px / 16 * mbw_c) as isize, geom.yc_dst as isize);
     let cstride = cur.cb.stride * geom.step;
+    let bit_depth_c = cur.chroma_bit_depth();
     predict_chroma(
         &mut cur.cb,
         coff,
@@ -1123,7 +1124,7 @@ fn predict_chroma_planes<S: Sample>(
         layer.chroma_mode,
         av,
         left_rows,
-        cur.bit_depth_chroma,
+        bit_depth_c,
         mbh_c,
     )?;
     predict_chroma(
@@ -1133,7 +1134,7 @@ fn predict_chroma_planes<S: Sample>(
         layer.chroma_mode,
         av,
         left_rows,
-        cur.bit_depth_chroma,
+        bit_depth_c,
         mbh_c,
     )?;
     Ok(true)
@@ -1151,7 +1152,7 @@ fn add_chroma_residual<S: Sample>(
     intra: bool,
     bypass: bool,
 ) {
-    let max = (1i32 << cur.bit_depth_chroma) - 1;
+    let max = (1i32 << cur.chroma_bit_depth()) - 1;
     let c422 = cur.chroma == ChromaFormat::Yuv422;
     let (mbw_c, mbh_c) = if c422 { (8usize, 16usize) } else { (8, 8) };
     let px = geom.x;

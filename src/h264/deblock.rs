@@ -585,8 +585,8 @@ pub fn deblock_mb_rows<S: Sample>(
     let max = (1i32 << frame.bit_depth) - 1;
     // Chroma filters at BitDepthC (8.7.2.2 scales its thresholds and tC0
     // by 2^(BitDepthC - 8)).
-    let bd_shift_c = frame.bit_depth_chroma - 8;
-    let max_c = (1i32 << frame.bit_depth_chroma) - 1;
+    let bd_shift_c = frame.chroma_bit_depth() - 8;
+    let max_c = (1i32 << frame.chroma_bit_depth()) - 1;
     let split = bd_shift_c != bd_shift;
     // A field picture: every macroblock is a field macroblock — intra
     // horizontal edges get bS 3 (only vertical ones 4), and vertical vector
@@ -922,8 +922,8 @@ fn deblock_mbaff_pairs<S: Sample>(
     let pairs_h = info.mb_height / 2;
     let bd_shift = frame.bit_depth - 8;
     let max = (1i32 << frame.bit_depth) - 1;
-    let bd_shift_c = frame.bit_depth_chroma - 8;
-    let max_c = (1i32 << frame.bit_depth_chroma) - 1;
+    let bd_shift_c = frame.chroma_bit_depth() - 8;
+    let max_c = (1i32 << frame.chroma_bit_depth()) - 1;
     let chroma420 = frame.chroma == crate::picture::ChromaFormat::Yuv420;
     let chroma422 = frame.chroma == crate::picture::ChromaFormat::Yuv422;
     // 4:2:0 and 4:2:2 chroma; 4:4:4 MBAFF (luma-style chroma) is not
