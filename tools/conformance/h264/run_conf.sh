@@ -30,7 +30,7 @@ one() {
   cp "$bs" "$OUT/$name.264" 2>/dev/null
   "$DEC" "$OUT/$name.264" "$OUT/$name.yuv" > "$OUT/$name.mine" 2> "$OUT/$name.err"
   status=$?
-  n_mine=$(wc -l < "$OUT/$name.mine")
+  n_mine=$(wc -l < "$OUT/$name.mine" | tr -d " ")
   mine_md5=$(md5sum "$OUT/$name.yuv" | cut -c1-32)
   ref_md5s=$(for y in $(find "$d" -maxdepth 4 -type f -iname "*.yuv" 2>/dev/null); do md5sum "$y" | cut -c1-32; done)
   if grep -q "unsupported" "$OUT/$name.err"; then
@@ -40,7 +40,7 @@ one() {
   else
     ref="refs/$name.ref.md5"
     [ -s "$ref" ] || python "$REF_DECODE" framemd5 "$bs" "$n_mine" > "$ref" 2> "$OUT/$name.referr" || rm -f "$ref"
-    n_ref=$(cat "$ref" 2>/dev/null | wc -l)
+    n_ref=$(cat "$ref" 2>/dev/null | wc -l | tr -d " ")
     match=$(paste <(awk '{print $2}' "$ref" 2>/dev/null) <(awk -F, '{print $5}' "$OUT/$name.mine") | awk '{ if ($1==$2 && $1!="") ok++ } END{print ok+0}')
     if [ $status -eq 0 ] && [ "$n_ref" = "$n_mine" ] && [ "$match" = "$n_ref" ]; then
       echo "PASS        $name ($n_ref frames, JM)"

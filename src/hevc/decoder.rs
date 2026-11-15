@@ -1943,6 +1943,16 @@ impl HevcDecoder {
         let Some(hdr) = HevcNalHeader::parse(nal) else {
             return Err(Error::bitstream("bad NAL header"));
         };
+        // Multi-layer streams (MV-HEVC, SHVC: Annexes F to H): this is a
+        // single-layer decoder, which decodes the base layer and discards
+        // every NAL unit of a layer above it (F.8.1, the decoding of the
+        // base layer by a decoder conforming to Annex A ignores
+        // nuh_layer_id > 0). A stream whose base layer is external
+        // (vps_base_layer_internal_flag 0: a hybrid H.264 base) has no
+        // picture of its own to output.
+        if hdr.layer_id != 0 {
+            return Ok(());
+        }
         let mut separate = false;
         if hdr.unit_type == nal_type::SPS && hdr.layer_id == 0 {
             let rbsp = unescape_rbsp(nal);

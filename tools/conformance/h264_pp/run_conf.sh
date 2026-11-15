@@ -36,7 +36,7 @@ one() {
       *) echo "FAIL $name: $msg"; return ;;
     esac
   fi
-  nmine=$(wc -l < "$mine")
+  nmine=$(wc -l < "$mine" | tr -d " ")
   # Reference: jm/<name>.md5 ("i md5" per frame) where jm_ref.sh made one,
   # else the JM decode through ref_decode.py, cached in md5/.
   if [ -s "jm/$name.md5" ]; then
@@ -48,8 +48,8 @@ one() {
     rgb=; case "$name" in PPCV444I7_SejongUniv_A|PPH444I7_SejongUniv_A|PPH444P10_SejongUniv_A) rgb=--rgb ;; esac
     [ -s "$ref" ] || python "$REF_DECODE" framemd5 $rgb "$bs" "$nmine" > "$ref" 2> "$OUT/$name.referr" || rm -f "$ref"
   fi
-  nref=$(cat "$ref" 2>/dev/null | wc -l)
-  bad=$(paste <(awk '{print $2}' "$ref" 2>/dev/null) <(awk -F, '{print $5}' "$mine") | awk '$1!=$2' | wc -l)
+  nref=$(cat "$ref" 2>/dev/null | wc -l | tr -d " ")
+  bad=$(paste <(awk '{print $2}' "$ref" 2>/dev/null) <(awk -F, '{print $5}' "$mine") | awk '$1!=$2' | wc -l | tr -d " ")
   if [ "$nref" = "$nmine" ] && [ "$bad" = "0" ]; then
     echo "PASS $name ($nref frames)"
   else

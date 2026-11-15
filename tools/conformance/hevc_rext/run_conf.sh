@@ -30,7 +30,7 @@ one() {
   cp "$bs" "$OUT/$name.265" 2>/dev/null
   "$DEC" "$OUT/$name.265" "$OUT/$name.yuv" > "$OUT/$name.mine" 2> "$OUT/$name.err"
   status=$?
-  n_mine=$(wc -l < "$OUT/$name.mine")
+  n_mine=$(wc -l < "$OUT/$name.mine" | tr -d " ")
   # Suite MD5 (of the whole decoded YUV), if any: every 32-hex string in the
   # suite's md5 files (bitstream md5s among them are harmless).
   suite_md5s=$(cat $(find "$d" -maxdepth 4 -type f \( -name "*.md5" -o -name "*md5*.txt" \) 2>/dev/null) 2>/dev/null | grep -io '[0-9a-f]\{32\}' | tr 'A-F' 'a-f' | sort -u)
@@ -42,7 +42,7 @@ one() {
   else
     ref="refs/$name.ref.md5"
     [ -s "$ref" ] || python "$REF_DECODE" framemd5 "$bs" "$n_mine" > "$ref" 2> "$OUT/$name.referr" || rm -f "$ref"
-    n_ref=$(cat "$ref" 2>/dev/null | wc -l)
+    n_ref=$(cat "$ref" 2>/dev/null | wc -l | tr -d " ")
     match=$(paste <(awk '{print $2}' "$ref" 2>/dev/null) <(awk -F, '{print $5}' "$OUT/$name.mine") | awk '{ if ($1==$2 && $1!="") ok++ } END{print ok+0}')
     if [ $status -eq 0 ] && [ "$n_ref" = "$n_mine" ] && [ "$match" = "$n_ref" ]; then
       echo "PASS        $name ($n_ref frames, HM)"
