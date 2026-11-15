@@ -26,7 +26,7 @@ pub fn apply_preset(cfg: &mut Config, p: Preset) {
     cfg.tree_lookahead = 0;
     match p {
         Preset::Veryfast => {
-            cfg.max_refs = 2;
+            cfg.max_refs = 1;
             cfg.inter_parts = InterParts::None;
         }
         Preset::Medium => {
@@ -156,10 +156,14 @@ impl Tune {
                 nonref_fast: true,
                 ..base
             },
+            // Veryfast (measured 2026-11-15 against x265 veryfast): with
+            // medium's settings -9.17% BD-rate at 1.47x the CPU; with every
+            // skip ending the recursion, intra by the flat-block proxy and
+            // one reference -5.09% at 1.27x.
             Preset::Veryfast => Tune {
-                rskip: Some(0.5),
+                rskip: Some(f32::MAX),
+                rd_intra: None,
                 intra_split_depth: 0,
-                intra_satd_gate: Some(1.0),
                 fast_intra: true,
                 nxn_trial: 0.0,
                 nonref_fast: true,
