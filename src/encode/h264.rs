@@ -1158,7 +1158,9 @@ impl<S: Sample> Core<S> {
                     _ => None,
                 };
             }
+            self.tools.reference = c.reference;
             let mut access = self.code_picture(c, &src)?;
+            self.tools.reference = true;
             self.tools.mb_offsets = None;
             self.tools.la_mvs = None;
             if c.reference {

@@ -73,6 +73,11 @@ pub(crate) struct AnalysisCfg {
     /// Quantise every candidate the comparison codes by the trellis too,
     /// so the decision sees the levels it would write (CABAC streams).
     pub(crate) trellis_rd: bool,
+    /// The trellis runs in B pictures nothing references too. (Off in
+    /// veryfast: +0.9 % BD-rate for 6 % less time, the cheapest trade of
+    /// the ones measured — the trellis off everywhere is +6.6 % for 20 %,
+    /// Intra_4x4 off in inter pictures +1.6 % for 4 %.)
+    pub(crate) trellis_nonref: bool,
     /// Decide by coding candidates and pricing them (`SSD + lambda * R`);
     /// false decides on the estimates alone and codes only the winner.
     pub(crate) rd: bool,
@@ -116,6 +121,7 @@ impl AnalysisCfg {
         rd_max: 2,
         trellis: true,
         trellis_rd: false,
+        trellis_nonref: true,
         rd: true,
         refs: 3,
         mixed_refs: 1.25,
@@ -152,6 +158,7 @@ impl AnalysisCfg {
         rd_max: 1,
         trellis: true,
         trellis_rd: false,
+        trellis_nonref: false,
         rd: true,
         refs: 1,
         mixed_refs: 1.0,
@@ -186,6 +193,7 @@ impl AnalysisCfg {
         rd_max: 3,
         trellis: true,
         trellis_rd: true,
+        trellis_nonref: true,
         rd: true,
         refs: 5,
         mixed_refs: 1.5,

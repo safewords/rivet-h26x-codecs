@@ -97,6 +97,10 @@ pub struct IntraTools<S: Sample> {
     /// macroblock per list, as search candidates; set per picture by the
     /// encoder.
     pub(crate) la_mvs: Option<Vec<[Mv; 2]>>,
+    /// The picture about to be coded is a reference; set per picture by
+    /// the encoder (a B picture nothing predicts from may skip the
+    /// trellis, [`AnalysisCfg::trellis_nonref`]).
+    pub(crate) reference: bool,
 }
 
 impl<S: Sample> IntraTools<S> {
@@ -127,6 +131,7 @@ impl<S: Sample> IntraTools<S> {
             mb_offsets: None,
             cabac: false,
             la_mvs: None,
+            reference: true,
         }
     }
 
@@ -1260,7 +1265,9 @@ pub(crate) fn code_b_picture<S: Sample>(
             }),
         )
         .with_trellis(
-            tools.trellis_states(crate::h264::SliceType::B, qp, g.field_pic),
+            tools
+                .trellis_states(crate::h264::SliceType::B, qp, g.field_pic)
+                .filter(|_| tools.reference || cfg.trellis_nonref),
             g.bit_depth,
         )
     });
