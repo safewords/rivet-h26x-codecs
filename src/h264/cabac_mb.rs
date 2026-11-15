@@ -2252,18 +2252,27 @@ pub(crate) fn write_residual_block_cabac(
     start: usize,
     max_coeff: usize,
 ) -> usize {
-    // The significant scan positions, in scan order.
+    // The levels in scan order and the significant positions, gathered
+    // without a branch per coefficient: a block is mostly zeros in an
+    // unpredictable pattern, and this loop runs for every block every
+    // candidate prices.
+    let scan = &scan[start..start + max_coeff];
+    let mut lv = [0i32; 64];
     let mut sig_pos = [0u8; 64];
     let mut n_sig = 0usize;
-    for pos in 0..max_coeff {
-        if levels[scan[start + pos] as usize] != 0 {
-            sig_pos[n_sig] = pos as u8;
-            n_sig += 1;
-        }
+    for (pos, &r) in scan.iter().enumerate() {
+        let v = levels[r as usize];
+        lv[pos & 63] = v;
+        sig_pos[n_sig & 63] = pos as u8;
+        n_sig += (v != 0) as usize;
     }
+    // Every context index below is under NUM_CTX by construction; the
+    // mask says so to the compiler, which otherwise checks each bin.
+    let ctx = &mut st.ctx;
+    const M: usize = NUM_CTX - 1;
 
     if let Some(inc) = cbf_inc {
-        e.encode_decision(&mut st.ctx[CBF_CTX_BASE[cat] + inc], (n_sig != 0) as u32);
+        e.encode_decision(&mut ctx[(CBF_CTX_BASE[cat] + inc) & M], (n_sig != 0) as u32);
         if n_sig == 0 {
             return 0;
         }
@@ -2298,28 +2307,28 @@ pub(crate) fn write_residual_block_cabac(
         (&IDENTITY_OFF[..], &IDENTITY_OFF[..])
     };
 
-    // Significance map. The final position is never coded when it is the last
-    // scan position: the reader's loop stops before it and infers it, so
-    // writing anything there would be a bin it never reads.
+    // Significance map, a run of zero flags then the coefficient's one
+    // and its last flag, per significant coefficient. The final position
+    // is never coded when it is the last scan position: the reader's loop
+    // stops before it and infers it, so writing anything there would be a
+    // bin it never reads.
     let last = max_coeff - 1;
-    let final_pos = sig_pos[n_sig - 1] as usize;
-    let mut k = 0usize;
     let mut i = 0usize;
-    while i < last {
-        let is_sig = k < n_sig && sig_pos[k] as usize == i;
-        e.encode_decision(&mut st.ctx[sig_base + sig_off[i] as usize], is_sig as u32);
-        if is_sig {
-            let is_last = i == final_pos;
-            e.encode_decision(
-                &mut st.ctx[last_base + last_off[i] as usize],
-                is_last as u32,
-            );
-            if is_last {
-                break;
-            }
-            k += 1;
+    for k in 0..n_sig {
+        let p = sig_pos[k] as usize;
+        while i < p {
+            e.encode_decision(&mut ctx[(sig_base + sig_off[i] as usize) & M], 0);
+            i += 1;
         }
-        i += 1;
+        if p == last {
+            break;
+        }
+        e.encode_decision(&mut ctx[(sig_base + sig_off[p] as usize) & M], 1);
+        e.encode_decision(
+            &mut ctx[(last_base + last_off[p] as usize) & M],
+            (k + 1 == n_sig) as u32,
+        );
+        i = p + 1;
     }
 
     // Levels, highest frequency first.
@@ -2327,8 +2336,7 @@ pub(crate) fn write_residual_block_cabac(
     let mut num_eq1 = 0usize;
     let inc1_cap = if cat == CAT_CHROMA_DC { 3 } else { 4 };
     for k in (0..n_sig).rev() {
-        let pos = sig_pos[k] as usize;
-        let level = levels[scan[start + pos] as usize];
+        let level = lv[sig_pos[k] as usize & 63];
         let abs = level.unsigned_abs();
         let abs_m1 = abs - 1;
         let inc0 = if num_gt1 != 0 {
@@ -2337,18 +2345,18 @@ pub(crate) fn write_residual_block_cabac(
             (1 + num_eq1).min(4)
         };
         if abs_m1 == 0 {
-            e.encode_decision(&mut st.ctx[abs_base + inc0], 0);
+            e.encode_decision(&mut ctx[(abs_base + inc0) & M], 0);
         } else {
-            e.encode_decision(&mut st.ctx[abs_base + inc0], 1);
-            let inc1 = 5 + inc1_cap.min(num_gt1);
+            e.encode_decision(&mut ctx[(abs_base + inc0) & M], 1);
+            let c1 = &mut ctx[(abs_base + 5 + inc1_cap.min(num_gt1)) & M];
             // The reader counts from one and stops at fourteen without
             // consuming a terminator, so a capped prefix writes ones only.
             let prefix = abs_m1.min(14);
             for _ in 1..prefix {
-                e.encode_decision(&mut st.ctx[abs_base + inc1], 1);
+                e.encode_decision(c1, 1);
             }
             if prefix < 14 {
-                e.encode_decision(&mut st.ctx[abs_base + inc1], 0);
+                e.encode_decision(c1, 0);
             } else {
                 // UEG0 escape: ones while the remainder covers the next
                 // doubling, a zero, then that many bits of what is left.
