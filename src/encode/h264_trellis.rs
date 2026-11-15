@@ -295,11 +295,11 @@ impl Trellis {
                 }
                 // The rounded level and one less.
                 let sig = os + if node == NONE { l1 } else { l0 };
+                // `t >= 1` here (zero-only positions were taken above): the
+                // candidates are `t - 1` (when that is a level) and `t`.
                 let lo = t.saturating_sub(1).max(1);
-                for lv in lo..=t {
-                    if lv == 0 {
-                        continue;
-                    }
+                let n_lv = if lo == t { 1 } else { 2 };
+                for &lv in [lo, t].iter().take(n_lv) {
                     let d = xi - lv as f32;
                     let j = c + d * d + sig + level_cost(node, lv);
                     let to = next(node, lv);
