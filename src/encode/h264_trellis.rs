@@ -78,6 +78,16 @@ fn qstep(qp: i32) -> f32 {
 /// level; 5..=8 larger levels seen 1..=4+.
 const NONE: usize = 0;
 const NODES: usize = 9;
+/// Every node coming from itself with a zero level.
+const STAY: [u32; LANES] = {
+    let mut t = [0u32; LANES];
+    let mut n = 0;
+    while n < LANES {
+        t[n] = (n as u32) << 24;
+        n += 1;
+    }
+    t
+};
 /// The per-node arrays' length: the nine nodes padded to whole vectors,
 /// so a copy of one is a few register moves rather than a library call.
 const LANES: usize = 12;
@@ -172,18 +182,21 @@ impl Trellis {
         }
         // Exact levels and their rounded magnitudes, in scan order.
         let scale = 1.0 / (1u64 << qbits) as f32;
+        // In raster order first, where the arithmetic is one vector
+        // expression, then taken into the scan.
+        let mut xr = [0f32; N];
+        for ((o, &c), &m) in xr.iter_mut().zip(&coeffs[..N]).zip(&mf[..N]) {
+            *o = (c.unsigned_abs() as f32) * m as f32 * scale;
+        }
         let mut x = [0f32; N];
         let mut top = [0u32; N];
         let mut last = usize::MAX;
         for i in 0..count {
-            let r = scan[start + i] as usize;
-            let v = (coeffs[r].unsigned_abs() as f32) * mf[r] as f32 * scale;
+            let v = xr[scan[start + i] as usize & (N - 1)];
             x[i] = v;
             let t = (v + 0.5) as u32;
             top[i] = t;
-            if t != 0 {
-                last = i;
-            }
+            last = if t != 0 { i } else { last };
         }
         if last == usize::MAX {
             return 0;
@@ -262,16 +275,15 @@ impl Trellis {
                 } else {
                     0.0
                 };
-                // Only zero is on offer: every path stays on its node.
-                let mut m = live;
-                let mut nf = [0u32; LANES];
-                while m != 0 {
-                    let node = m.trailing_zeros() as usize;
-                    m &= m - 1;
-                    cost[node] = cost[node] + d0 + if node == NONE { 0.0 } else { zs0 };
-                    nf[node] = (node as u32) << 24;
+                // Only zero is on offer: every path stays on its node. As
+                // one expression over every lane — a dead node's cost is
+                // infinite and stays so, and no path reads its entry.
+                let mut zv = [zs0; LANES];
+                zv[NONE] = 0.0;
+                for (c, z) in cost.iter_mut().zip(zv) {
+                    *c = *c + d0 + z;
                 }
-                from[i].write(nf);
+                from[i].write(STAY);
                 continue;
             }
             let (zs, os, l0, l1) = if coded_sig {
