@@ -174,15 +174,21 @@ unsafe fn satd_pair(r0: int16x8_t, r1: int16x8_t, r2: int16x8_t, r3: int16x8_t) 
             vreinterpretq_s32_s16(a1),
             vreinterpretq_s32_s16(a3),
         ));
-        let [w0, w1, w2, w3] = butterfly(c0, c1, c2, c3);
+        // The last butterfly stage folded into the sum: its outputs pair
+        // as `x + y` and `x - y`, and `|x + y| + |x - y| = 2 max(|x|, |y|)`,
+        // so the tile's sum is twice the sum of the maxima — even, which
+        // makes the tile's `(sum + 1) >> 1` exactly that sum of maxima.
+        let s0 = vaddq_s16(c0, c3);
+        let s1 = vaddq_s16(c1, c2);
+        let s2 = vsubq_s16(c1, c2);
+        let s3 = vsubq_s16(c0, c3);
         let s = vaddq_s16(
-            vaddq_s16(vabsq_s16(w0), vabsq_s16(w1)),
-            vaddq_s16(vabsq_s16(w2), vabsq_s16(w3)),
+            vmaxq_s16(vabsq_s16(s0), vabsq_s16(s1)),
+            vmaxq_s16(vabsq_s16(s2), vabsq_s16(s3)),
         );
-        // [A01, A23, B01, B23] -> [A, B, A, B], then the tile rounding.
+        // [A01, A23, B01, B23] -> [A, B, A, B].
         let p = vpaddlq_s16(s);
-        let q = vpaddq_s32(p, p);
-        vshrq_n_s32(vaddq_s32(q, vdupq_n_s32(1)), 1)
+        vpaddq_s32(p, p)
     }
 }
 
