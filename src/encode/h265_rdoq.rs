@@ -94,6 +94,8 @@ struct Pos {
     /// Distortion with the level zero (beyond the last position nothing
     /// is coded at all).
     zero: f64,
+    /// The decided cost of every position ahead of this one.
+    before: f64,
 }
 
 /// Bits of `coeff_abs_level_remaining` `v` at Rice parameter `rice`, as
@@ -247,11 +249,26 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
         e * e * err_scale
     };
     let tabs = sub_block_tables();
-    let scan = b.scan_idx as usize;
     let half = step >> 1;
-    let mut last = None;
+    levels[..n * n].fill(0);
+    // Nothing reaches half a step: every level rounds to zero, and the
+    // search below could only confirm it.
+    let peak = coeffs[..n * n]
+        .iter()
+        .map(|c| c.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    if i64::from(peak) * scale < half {
+        return 0;
+    }
     let raster = raster_of(b.scan_idx, b.log2);
-    for (k, &r) in raster.iter().enumerate() {
+    let Some(last) = raster
+        .iter()
+        .rposition(|&r| i64::from(coeffs[r as usize].unsigned_abs()) * scale >= half)
+    else {
+        return 0;
+    };
+    for (k, &r) in raster[..=last].iter().enumerate() {
         let idx = r as usize;
         let scaled = i64::from(coeffs[idx].unsigned_abs()) * scale;
         pos[k] = Pos {
@@ -260,15 +277,7 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             zero: 0.0,
             ..Pos::default()
         };
-        if scaled >= half {
-            last = Some(k);
-        }
     }
-    let _ = (tabs, scan);
-    levels[..n * n].fill(0);
-    let Some(last) = last else {
-        return 0;
-    };
     for p in &mut pos[..=last] {
         p.zero = dist(p.scaled, 0);
     }
@@ -404,11 +413,10 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
 
     // 3. The last position. `before` is the cost of everything ahead of a
     // candidate, as decided; `after` the distortion of everything beyond.
-    // Reuse `scaled` no further: hold the running cost ahead of each
-    // position in `zero`'s place would lose it, so a small array.
-    let mut before = [0f64; 1025];
-    for k in 0..=last {
-        before[k + 1] = before[k] + pos[k].coded;
+    let mut run = 0f64;
+    for p in &mut pos[..=last] {
+        p.before = run;
+        run += p.coded;
     }
     let mut after = 0f64;
     let mut best_last = last;
@@ -422,7 +430,7 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             } else {
                 (xc as u32, yc as u32)
             };
-            let cost = before[k]
+            let cost = p.before
                 + p.as_last
                 + after
                 + lambda * last_pos_bits(b.cx, b.c_idx, b.log2, lx, ly);
