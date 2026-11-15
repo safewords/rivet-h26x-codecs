@@ -211,6 +211,25 @@ impl<S: Sample> HalfPlanes<S> {
 #[inline]
 pub(crate) fn mvd_component_bits(d: i32) -> u32 {
     let a = d.unsigned_abs();
+    match MVD_BITS.get(a as usize) {
+        Some(&b) => u32::from(b),
+        None => mvd_bits_of(a),
+    }
+}
+
+/// [`mvd_component_bits`] for the magnitudes a search meets most, by table.
+static MVD_BITS: [u8; 2048] = {
+    let mut t = [0u8; 2048];
+    let mut a = 0;
+    while a < 2048 {
+        t[a] = mvd_bits_of(a as u32) as u8;
+        a += 1;
+    }
+    t
+};
+
+/// [`mvd_component_bits`] of magnitude `a`, computed.
+const fn mvd_bits_of(a: u32) -> u32 {
     match a {
         0 => 1,
         1 => 3,
