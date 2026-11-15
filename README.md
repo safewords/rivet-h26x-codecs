@@ -211,6 +211,95 @@ distortion and transform kernels only — the CABAC pricing of candidates
 (a quarter of the time), the candidates' residual coding (a fifth), the
 search's own control flow and the trellis are scalar.
 
+### H.265 compression against x265
+
+The same `--preset veryfast | medium | slow` selects the H.265 encoder's
+tier (`Config::preset`, Medium by default; `src/encode/h265_tune.rs`). Under
+`--codec h265` the flag also sets that codec's structure — three B pictures
+in the scheduler's pyramid, SAO, references 1 / 2 / 4 — and the tier's
+quantiser offsets: the configured QP is a P picture's, I pictures code 3
+below it, the reference B 2 above and the others 4 above (only under
+`Config::pyramid`, so a constant-QP stream without one stays constant).
+`Config::legacy_decisions` gives the untiered decisions.
+
+What every tier decides with (`h265_me`, `h265_intra`, `h265_search`,
+`h265_rdoq`): SATD-domain costs at the square root of the SSD Lagrangian
+(they had been priced at the SSD one, nine times too dear at QP 32: +51 %
+→ +30 % on its own); a motion search priced in vector bits, seeded with the
+parent unit's vector and reading every fractional phase from planes each
+reference computes once through the decoder's kernels; each unit weighed
+in SSD + λ·bits with and without its residual, and coded intra (2Nx2N, and
+NxN at 8x8) where that is cheaper; rates from an estimating CABAC encoder;
+sign data hiding. Slow adds rate-distortion optimised quantisation. Medium
+and veryfast prune: a skip cheaper than 0.5 λ per sample (veryfast: every
+skip) is not split, intra is coded only where its best mode's SATD cost
+beats the inter search, angles are searched coarse to fine, and pictures
+nothing references take the cheapest settings.
+
+Measured with `parity.py` (30 frames, QP 22/27/32/37 against x265 `--tune
+psnr --crf 18/23/28/33`, x265 one thread; BD-rate, negative = fewer bits
+than x265; CPU = summed child CPU seconds, rivet / x265, at `--jobs 3`,
+indicative — a `--jobs 1` medium run read 1.62x where `--jobs 4` read 1.64x):
+
+| `--preset medium` vs x265 medium | BD PSNR-Y | BD PSNR-avg | CPU |
+|---|---:|---:|---:|
+| foreman CIF | −10.84 % | −10.21 % | 1.32x |
+| mobile CIF | −1.44 % | −0.50 % | 1.08x |
+| akiyo CIF | −21.09 % | −19.54 % | 1.37x |
+| ducks_take_off 720p | +11.15 % | +9.67 % | 0.97x |
+| park_joy 720p | +5.49 % | +4.90 % | 1.26x |
+| **mean** | **−3.35 %** | **−3.14 %** | **1.11x** |
+
+| `--preset veryfast` vs x265 veryfast | BD PSNR-Y | BD PSNR-avg | CPU |
+|---|---:|---:|---:|
+| foreman CIF | −9.38 % | −8.51 % | 1.48x |
+| mobile CIF | −0.19 % | +1.12 % | 1.29x |
+| akiyo CIF | −21.12 % | −19.65 % | 1.43x |
+| ducks_take_off 720p | +3.44 % | +2.81 % | 1.12x |
+| park_joy 720p | +1.79 % | +1.25 % | 1.43x |
+| **mean** | **−5.09 %** | **−4.60 %** | **1.27x** |
+
+| `--preset slow` vs x265 slow | BD PSNR-Y | BD PSNR-avg | CPU |
+|---|---:|---:|---:|
+| foreman CIF | +4.52 % | +2.70 % | 1.32x |
+| mobile CIF | +13.90 % | +13.63 % | 1.64x |
+| akiyo CIF | −11.28 % | −11.35 % | 1.55x |
+| ducks_take_off 720p | +10.59 % | +12.02 % | 1.23x |
+| park_joy 720p | +12.07 % | +12.83 % | 1.48x |
+| **mean** | **+5.96 %** | **+5.97 %** | **1.36x** |
+
+Where it started (the same harness, `--bframes 3 --refs 4 --sao` at constant
+QP): +46.7 % against medium at 2.31x the CPU, +65.7 % against slow, +40.5 %
+against veryfast. The steps, mean BD-rate against medium: the SATD
+Lagrangian +51.3 → +29.8 (CIF clips); per-kind quantiser offsets and the
+pyramid +1.85; dropping residual by RD +0.35; the priced search −0.49;
+intra by RD −3.46 (and NxN −4.40); sign hiding −6.06 at 1.62x; the medium
+pruning −3.35 at 1.1x.
+
+What is left, and why. The CIF means carry the tiers: akiyo and foreman
+gain from the I-picture offset and intra decisions, while the 720p clips
+trail. x265's own ablation (black box) says where: without its lookahead
+quantiser propagation (`--no-cutree`) x265 medium loses 21.9 % on ducks,
+14.3 % on park_joy and 4.1 % on foreman; `--ctu 32` costs it nothing
+(−1.2 to +0.7 %), TMVP 0.9–2.7 %, weighted prediction 0. rivet has its own
+propagation (`h265_cutree`, `--tree N`), and as built it loses (medium,
+strength 2.0: −3.31 → +2.58 %; 1.0: −1.57 %; with the I offset dropped,
+−2.87 / +0.04 %; 0.5: −3.04 %), so no tier turns it on: its model or its
+application is wrong somewhere not yet found, and that is the largest
+single gap. Slow's further gap is tools x265 slow has and rivet lacks or
+has slowly: rectangular / asymmetric partitions (`--parts sym` gained
+nothing at 1.9x the CPU), TMVP, RD refinement of modes. The CPU gap is
+implementation: candidate residuals and their CABAC pricing (a fifth to a
+quarter of the time), SAO decisions (9–13 %), the intra trials.
+
+Tried and dropped (medium unless named): an early skip (best merge coded
+first, kept when nothing survives) −0.5 % BD for 0.99x; diamond sub-sample
+patterns −1.2 to −2.0 % for 0.95–0.98x; search widening rings −0.2 % for
+1.06x (kept at slow); limiting references to the parent's −0.9 % for 0.96x;
+two references instead of three −0.07 % for 0.94x (kept); a flat GOP at its
+best offsets +12.0 %, pyramids of 5 and 7 +6.3 / +4.7 % against +1.85 % at 3;
+RDOQ at medium −2.2 % BD for 1.31x CPU (slow only).
+
 ## Threading and SIMD
 
 Both decoders are threaded two ways, on one FIFO worker pool sized to the
