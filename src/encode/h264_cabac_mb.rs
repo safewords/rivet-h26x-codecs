@@ -338,6 +338,174 @@ fn write_b_body(
     }
 }
 
+/// One intra macroblock of an I slice, `mb_type` included: the bins, and
+/// the record its neighbours' contexts read.
+#[allow(clippy::too_many_arguments)]
+fn intra_mb_cabac(
+    e: &mut CabacEncoder,
+    st: &mut CabacState,
+    dec: &MbDecision,
+    left: Option<&Coded>,
+    above: Option<&Coded>,
+    cfi: u32,
+    t8x8: bool,
+    g: &Geometry,
+) -> Coded {
+    let inc = left.map_or(0, |m| m.not_nxn as usize) + above.map_or(0, |m| m.not_nxn as usize);
+    write_mb_type_i_cabac(e, st, inc, intra_mb_type_code(dec));
+    write_intra_body(e, st, dec, left, above, cfi, t8x8, g.bit_depth, g.field_pic);
+    Coded {
+        nb: WrittenMb::from_decision(dec, cfi == 3),
+        not_nxn: !dec.kind.is_nxn(),
+        chroma_nonzero: dec.chroma_mode != 0,
+    }
+}
+
+/// One macroblock of a P slice, `mb_skip_flag` included.
+#[allow(clippy::too_many_arguments)]
+fn p_mb_cabac(
+    e: &mut CabacEncoder,
+    st: &mut CabacState,
+    mb: &PMb<'_>,
+    left: Option<&Coded>,
+    above: Option<&Coded>,
+    cfi: u32,
+    t8x8: bool,
+    g: &Geometry,
+) -> Coded {
+    let lnb = left.map(|m| &m.nb);
+    let anb = above.map(|m| &m.nb);
+    // Every macroblock of a P slice codes mb_skip_flag, whatever it
+    // turns out to be.
+    write_mb_skip_cabac(e, st, lnb, anb, false, matches!(mb, PMb::Skip(_)));
+    match *mb {
+        PMb::Skip(dec) => {
+            // A skip wrote its flag and writes nothing else; the
+            // qp-delta carry clears, as the decoder's slice loop
+            // clears it when it takes the skip branch.
+            st.prev_qp_delta_nonzero = false;
+            Coded {
+                nb: WrittenMb::from_inter_decision(dec, cfi == 3),
+                not_nxn: true,
+                chroma_nonzero: false,
+            }
+        }
+        PMb::Coded(dec) => {
+            write_p16_body(
+                e,
+                st,
+                dec,
+                left,
+                above,
+                cfi,
+                t8x8,
+                g.bit_depth,
+                g.field_pic,
+                false,
+            );
+            Coded {
+                nb: WrittenMb::from_inter_decision(dec, cfi == 3),
+                not_nxn: true,
+                chroma_nonzero: false,
+            }
+        }
+        PMb::Intra(idec) => {
+            // Intra in a P slice: the same macroblock, `mb_type`
+            // shifted by 5 (Table 7-11's note).
+            write_mb_type_p_cabac(e, st, 5 + intra_mb_type_code(idec));
+            write_intra_body(
+                e,
+                st,
+                idec,
+                left,
+                above,
+                cfi,
+                t8x8,
+                g.bit_depth,
+                g.field_pic,
+            );
+            Coded {
+                nb: WrittenMb::from_decision(idec, cfi == 3),
+                not_nxn: !idec.kind.is_nxn(),
+                chroma_nonzero: idec.chroma_mode != 0,
+            }
+        }
+    }
+}
+
+/// One macroblock of a B slice, `mb_skip_flag` included.
+#[allow(clippy::too_many_arguments)]
+fn b_mb_cabac(
+    e: &mut CabacEncoder,
+    st: &mut CabacState,
+    mb: &BMb<'_>,
+    left: Option<&Coded>,
+    above: Option<&Coded>,
+    cfi: u32,
+    t8x8: bool,
+    g: &Geometry,
+) -> Coded {
+    let lnb = left.map(|m| &m.nb);
+    let anb = above.map(|m| &m.nb);
+    write_mb_skip_cabac(e, st, lnb, anb, true, matches!(mb, BMb::Skip(_)));
+    // The B `mb_type` first-bin context counts available neighbours
+    // that are neither B_Skip nor B_Direct_16x16.
+    let cond =
+        |m: Option<&Coded>| -> usize { m.map_or(0, |m| !(m.nb.skip || m.nb.direct) as usize) };
+    let inc = cond(left) + cond(above);
+    match *mb {
+        BMb::Skip(dec) => {
+            st.prev_qp_delta_nonzero = false;
+            Coded {
+                nb: WrittenMb::from_b_decision(dec, cfi == 3),
+                not_nxn: true,
+                chroma_nonzero: false,
+            }
+        }
+        BMb::Direct(dec) | BMb::Explicit(dec) => {
+            write_b_body(
+                e,
+                st,
+                dec,
+                inc,
+                left,
+                above,
+                cfi,
+                t8x8,
+                g.bit_depth,
+                g.field_pic,
+                false,
+            );
+            Coded {
+                nb: WrittenMb::from_b_decision(dec, cfi == 3),
+                not_nxn: true,
+                chroma_nonzero: false,
+            }
+        }
+        BMb::Intra(idec) => {
+            // Intra in a B slice: the same macroblock behind the B
+            // prefix, `mb_type` shifted by 23.
+            write_mb_type_b_cabac(e, st, inc, 23 + intra_mb_type_code(idec));
+            write_intra_body(
+                e,
+                st,
+                idec,
+                left,
+                above,
+                cfi,
+                t8x8,
+                g.bit_depth,
+                g.field_pic,
+            );
+            Coded {
+                nb: WrittenMb::from_decision(idec, cfi == 3),
+                not_nxn: !idec.kind.is_nxn(),
+                chroma_nonzero: idec.chroma_mode != 0,
+            }
+        }
+    }
+}
+
 /// Write every macroblock of an all-intra CABAC picture: the shared walk
 /// makes the decisions, reconstructs and runs the loop filter; this side
 /// spells bins and keeps the `WrittenMb` chain. The slice header is
@@ -359,29 +527,20 @@ pub fn write_intra_picture_cabac<S: Sample>(
     let mut st = CabacState::new(SliceType::I, 0, qp as i32);
     let mut e = CabacEncoder::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
-    let fmbs = code_intra_picture(g, tools, qp, planes, rec, |mb_x, mb_y, dec| {
+    let fmbs = code_intra_picture(g, tools, qp, planes, rec, |mb_x, mb_y, dec, trial| {
         let idx = coded.len();
         let left = (mb_x > 0).then(|| &coded[idx - 1]);
         let above = (mb_y > 0).then(|| &coded[idx - mbw]);
-        let inc = left.map_or(0, |m| m.not_nxn as usize) + above.map_or(0, |m| m.not_nxn as usize);
-        write_mb_type_i_cabac(&mut e, &mut st, inc, intra_mb_type_code(dec));
-        write_intra_body(
-            &mut e,
-            &mut st,
-            dec,
-            left,
-            above,
-            cfi,
-            t8x8,
-            g.bit_depth,
-            g.field_pic,
-        );
-        coded.push(Coded {
-            nb: WrittenMb::from_decision(dec, cfi == 3),
-            not_nxn: !dec.kind.is_nxn(),
-            chroma_nonzero: dec.chroma_mode != 0,
-        });
+        if trial {
+            let mut ce = CabacEncoder::counting();
+            let mut st2 = st.clone();
+            let _ = intra_mb_cabac(&mut ce, &mut st2, dec, left, above, cfi, t8x8, g);
+            return ce.fractional_bits();
+        }
+        let entry = intra_mb_cabac(&mut e, &mut st, dec, left, above, cfi, t8x8, g);
+        coded.push(entry);
         e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
+        0.0
     });
     w.align_zero();
     fmbs
@@ -419,70 +578,20 @@ pub fn write_p_picture_cabac<S: Sample>(
         rec,
         refp,
         weights,
-        |mb_x, mb_y, mb| {
+        |mb_x, mb_y, mb, trial| {
             let idx = coded.len();
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
             let above = (mb_y > 0).then(|| &coded[idx - mbw]);
-            let lnb = left.map(|m| &m.nb);
-            let anb = above.map(|m| &m.nb);
-            // Every macroblock of a P slice codes mb_skip_flag, whatever it
-            // turns out to be.
-            write_mb_skip_cabac(&mut e, &mut st, lnb, anb, false, matches!(mb, PMb::Skip(_)));
-            let entry = match mb {
-                PMb::Skip(dec) => {
-                    // A skip wrote its flag and writes nothing else; the
-                    // qp-delta carry clears, as the decoder's slice loop
-                    // clears it when it takes the skip branch.
-                    st.prev_qp_delta_nonzero = false;
-                    Coded {
-                        nb: WrittenMb::from_inter_decision(dec, cfi == 3),
-                        not_nxn: true,
-                        chroma_nonzero: false,
-                    }
-                }
-                PMb::Coded(dec) => {
-                    write_p16_body(
-                        &mut e,
-                        &mut st,
-                        dec,
-                        left,
-                        above,
-                        cfi,
-                        t8x8,
-                        g.bit_depth,
-                        g.field_pic,
-                        false,
-                    );
-                    Coded {
-                        nb: WrittenMb::from_inter_decision(dec, cfi == 3),
-                        not_nxn: true,
-                        chroma_nonzero: false,
-                    }
-                }
-                PMb::Intra(idec) => {
-                    // Intra in a P slice: the same macroblock, `mb_type`
-                    // shifted by 5 (Table 7-11's note).
-                    write_mb_type_p_cabac(&mut e, &mut st, 5 + intra_mb_type_code(idec));
-                    write_intra_body(
-                        &mut e,
-                        &mut st,
-                        idec,
-                        left,
-                        above,
-                        cfi,
-                        t8x8,
-                        g.bit_depth,
-                        g.field_pic,
-                    );
-                    Coded {
-                        nb: WrittenMb::from_decision(idec, cfi == 3),
-                        not_nxn: !idec.kind.is_nxn(),
-                        chroma_nonzero: idec.chroma_mode != 0,
-                    }
-                }
-            };
+            if trial {
+                let mut ce = CabacEncoder::counting();
+                let mut st2 = st.clone();
+                let _ = p_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g);
+                return ce.fractional_bits();
+            }
+            let entry = p_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g);
             coded.push(entry);
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
+            0.0
         },
     );
     w.align_zero();
@@ -526,72 +635,20 @@ pub fn write_b_picture_cabac<S: Sample>(
         refs,
         col,
         weights,
-        |mb_x, mb_y, mb| {
+        |mb_x, mb_y, mb, trial| {
             let idx = coded.len();
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
             let above = (mb_y > 0).then(|| &coded[idx - mbw]);
-            let lnb = left.map(|m| &m.nb);
-            let anb = above.map(|m| &m.nb);
-            write_mb_skip_cabac(&mut e, &mut st, lnb, anb, true, matches!(mb, BMb::Skip(_)));
-            // The B `mb_type` first-bin context counts available neighbours
-            // that are neither B_Skip nor B_Direct_16x16.
-            let cond = |m: Option<&Coded>| -> usize {
-                m.map_or(0, |m| !(m.nb.skip || m.nb.direct) as usize)
-            };
-            let inc = cond(left) + cond(above);
-            let entry = match mb {
-                BMb::Skip(dec) => {
-                    st.prev_qp_delta_nonzero = false;
-                    Coded {
-                        nb: WrittenMb::from_b_decision(dec, cfi == 3),
-                        not_nxn: true,
-                        chroma_nonzero: false,
-                    }
-                }
-                BMb::Direct(dec) | BMb::Explicit(dec) => {
-                    write_b_body(
-                        &mut e,
-                        &mut st,
-                        dec,
-                        inc,
-                        left,
-                        above,
-                        cfi,
-                        t8x8,
-                        g.bit_depth,
-                        g.field_pic,
-                        false,
-                    );
-                    Coded {
-                        nb: WrittenMb::from_b_decision(dec, cfi == 3),
-                        not_nxn: true,
-                        chroma_nonzero: false,
-                    }
-                }
-                BMb::Intra(idec) => {
-                    // Intra in a B slice: the same macroblock behind the B
-                    // prefix, `mb_type` shifted by 23.
-                    write_mb_type_b_cabac(&mut e, &mut st, inc, 23 + intra_mb_type_code(idec));
-                    write_intra_body(
-                        &mut e,
-                        &mut st,
-                        idec,
-                        left,
-                        above,
-                        cfi,
-                        t8x8,
-                        g.bit_depth,
-                        g.field_pic,
-                    );
-                    Coded {
-                        nb: WrittenMb::from_decision(idec, cfi == 3),
-                        not_nxn: !idec.kind.is_nxn(),
-                        chroma_nonzero: idec.chroma_mode != 0,
-                    }
-                }
-            };
+            if trial {
+                let mut ce = CabacEncoder::counting();
+                let mut st2 = st.clone();
+                let _ = b_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g);
+                return ce.fractional_bits();
+            }
+            let entry = b_mb_cabac(&mut e, &mut st, &mb, left, above, cfi, t8x8, g);
             coded.push(entry);
             e.encode_terminate((coded.len() == total) as u32); // end_of_slice_flag
+            0.0
         },
     );
     w.align_zero();

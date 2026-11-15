@@ -671,7 +671,7 @@ fn interp<S: Sample>(
 /// macroblock's: a partition interpolates from its own corner, so a 16x8
 /// lower half reads eight rows further down and its window moves with it.
 #[allow(clippy::too_many_arguments)]
-fn luma_pred_into<S: Sample>(
+pub(crate) fn luma_pred_into<S: Sample>(
     ctx: &MeCtx<S>,
     r: &Recon<S>,
     x: i32,
@@ -1011,7 +1011,7 @@ fn put_bi<S: Sample>(
 /// `rec` afterwards is bit-identical to what a decoder derives for the
 /// same vectors.
 #[allow(clippy::too_many_arguments)]
-fn predict_inter_rect<S: Sample>(
+pub(crate) fn predict_inter_rect<S: Sample>(
     ctx: &MeCtx<S>,
     rec: &mut [Recon<S>],
     refs: [&[Recon<S>]; 2],
@@ -1234,27 +1234,27 @@ fn predict_inter_rect<S: Sample>(
 /// The coded residual of one inter macroblock, in the layout
 /// [`InterDecision`] (and the B decision) carry — produced by
 /// `code_inter_mb_residual` once the prediction stands in `rec`.
-struct InterResidual {
+pub(crate) struct InterResidual {
     /// `transform_size_8x8_flag`. Forced false when `cbp_luma` is zero:
     /// the syntax then carries no flag and a decoder infers zero, so
     /// recording anything else would leave the encoder's loop filter and
     /// the next macroblock's contexts disagreeing with a decoder's over a
     /// bit nobody wrote.
-    transform_8x8: bool,
+    pub(crate) transform_8x8: bool,
     /// `CodedBlockPatternLuma`.
-    cbp_luma: u8,
+    pub(crate) cbp_luma: u8,
     /// `CodedBlockPatternChroma`.
-    cbp_chroma: u8,
+    pub(crate) cbp_chroma: u8,
     /// Luma levels per 4x4 (raster), DC in place.
-    luma: [[i16; 16]; 16],
+    pub(crate) luma: [[i16; 16]; 16],
     /// Nonzero count per luma block.
-    nz_luma: [u8; 16],
+    pub(crate) nz_luma: [u8; 16],
     /// Chroma DC levels per component.
-    chroma_dc: [[i16; 16]; 2],
+    pub(crate) chroma_dc: [[i16; 16]; 2],
     /// Chroma AC levels per component and block, position 0 zeroed.
-    chroma_ac: [[[i16; 16]; 16]; 2],
+    pub(crate) chroma_ac: [[[i16; 16]; 16]; 2],
     /// Nonzero count per chroma block.
-    nz_chroma: [[u8; 16]; 2],
+    pub(crate) nz_chroma: [[u8; 16]; 2],
 }
 
 /// A macroblock's worth of luma out of a plane, packed 16 by 16.
@@ -1387,7 +1387,7 @@ fn placeholder_inter_transform_size(ssd_4x4: u64, ssd_8x8: u64, lam: f32) -> boo
 /// by the P and B paths — the prediction differs between them, the
 /// residual machinery must not.
 #[allow(clippy::too_many_arguments)]
-fn code_inter_mb_residual<S: Sample>(
+pub(crate) fn code_inter_mb_residual<S: Sample>(
     ctx: &MeCtx<S>,
     rec: &mut [Recon<S>],
     mb_x: usize,
@@ -1397,6 +1397,7 @@ fn code_inter_mb_residual<S: Sample>(
     src_chroma: [&[S]; 2],
     chroma_stride: usize,
     allow_8x8: bool,
+    force: Option<bool>,
 ) -> InterResidual {
     let (px, py) = (mb_x * 16, mb_y * 16);
     let soff = py * luma_stride + px;
@@ -1419,18 +1420,44 @@ fn code_inter_mb_residual<S: Sample>(
     // The prediction, before any residual is added to it: the 8x8
     // candidate has to start from the same samples, and whichever loses
     // has to be undone.
+    if let Some(t8) = force {
+        // The caller decides the transform size (and prices both).
+        if t8 {
+            debug_assert!(ctx.t8x8 && allow_8x8);
+            code_luma_8x8(
+                ctx,
+                &mut rec[0],
+                off,
+                &src_luma[soff..],
+                luma_stride,
+                &mut out,
+            );
+            out.transform_8x8 = true;
+        } else {
+            code_luma_4x4(
+                ctx,
+                &mut rec[0],
+                off,
+                &src_luma[soff..],
+                luma_stride,
+                &mut out,
+            );
+        }
+    }
     let mut pred = [S::default(); 256];
-    gather16(&rec[0], off, &mut pred);
-    code_luma_4x4(
-        ctx,
-        &mut rec[0],
-        off,
-        &src_luma[soff..],
-        luma_stride,
-        &mut out,
-    );
+    if force.is_none() {
+        gather16(&rec[0], off, &mut pred);
+        code_luma_4x4(
+            ctx,
+            &mut rec[0],
+            off,
+            &src_luma[soff..],
+            luma_stride,
+            &mut out,
+        );
+    }
 
-    if ctx.t8x8 && allow_8x8 {
+    if force.is_none() && ctx.t8x8 && allow_8x8 {
         // Score what the 4x4 reconstructed, keep it, and try the 8x8 from
         // the same prediction.
         let mut recon4 = [S::default(); 256];
@@ -1803,6 +1830,7 @@ pub fn code_macroblock_p<S: Sample>(
         src_chroma,
         chroma_stride,
         out.no_sub_mb_part_less_than_8x8(),
+        None,
     );
     out.transform_8x8 = r.transform_8x8;
     out.cbp_luma = r.cbp_luma;
@@ -2466,7 +2494,7 @@ pub fn spatial_direct(
 /// own (the census scores the plain prediction beside the weighted one).
 /// `src` is the source at the rectangle's own corner.
 #[allow(clippy::too_many_arguments)]
-fn rect_satd_under<S: Sample>(
+pub(crate) fn rect_satd_under<S: Sample>(
     ctx: &MeCtx<S>,
     refs: &BRefs<S>,
     x: i32,
@@ -3190,6 +3218,7 @@ pub fn code_macroblock_b<S: Sample>(
         src_chroma,
         chroma_stride,
         out.no_sub_mb_part_less_than_8x8(),
+        None,
     );
     out.transform_8x8 = r.transform_8x8;
     out.cbp_luma = r.cbp_luma;

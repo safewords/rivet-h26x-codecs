@@ -101,6 +101,7 @@ static INTER_CBP_TO_GOLOMB_GRAY: [u8; 16] = {
 /// block, exactly when the reader stores them; blocks a cleared cbp bit
 /// skips stay zero, which is what the reader's per-macroblock reset
 /// leaves behind.
+#[derive(Clone)]
 struct NzState {
     /// Per luma-*like* plane (luma; in 4:4:4 also Cb and Cr, which the
     /// reader's `nC` treats as three luma planes — `nb.nz_top` /
@@ -650,6 +651,11 @@ fn write_mb_residual(
     }
 }
 
+/// The length of `ue(v)` for `v`.
+fn ue_bits(v: u32) -> u64 {
+    (2 * (32 - (v + 1).leading_zeros()) - 1) as u64
+}
+
 /// Write every macroblock of an all-intra CAVLC picture: the shared walk
 /// (`h264_pic::code_intra_picture`) makes the decisions, reconstructs and runs the
 /// loop filter; this side only spells bits and keeps the `nC` state. The
@@ -681,8 +687,15 @@ pub fn write_intra_picture<S: Sample>(
     );
     st.field = g.field_pic;
     let t8x8 = tools.transform_8x8;
-    code_intra_picture(g, tools, qp, planes, rec, |mb_x, mb_y, dec| {
+    code_intra_picture(g, tools, qp, planes, rec, |mb_x, mb_y, dec, trial| {
+        if trial {
+            let mut w2 = BitWriter::new();
+            let mut st2 = st.clone();
+            write_macroblock(&mut w2, dec, &mut st2, mb_x, mb_x > 0, mb_y > 0, 0, t8x8);
+            return w2.position() as f64;
+        }
         write_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, 0, t8x8);
+        0.0
     })
 }
 
@@ -733,23 +746,62 @@ pub fn write_p_picture<S: Sample>(
         rec,
         refp,
         weights,
-        |mb_x, mb_y, mb| match mb {
-            PMb::Skip(_) => {
-                skip_run += 1;
-                skip_nz(&mut st, mb_x);
+        |mb_x, mb_y, mb, trial| {
+            if trial {
+                // A skip lengthens the run; a coded macroblock closes it
+                // with a `ue(v)` and spells its own layer.
+                let run_bits = ue_bits(skip_run);
+                let mut w2 = BitWriter::new();
+                let mut st2 = st.clone();
+                return match mb {
+                    PMb::Skip(_) => 1.0,
+                    PMb::Coded(dec) => {
+                        write_p16_macroblock(
+                            &mut w2,
+                            dec,
+                            &mut st2,
+                            mb_x,
+                            mb_x > 0,
+                            mb_y > 0,
+                            t8x8,
+                            false,
+                        );
+                        (w2.position() + run_bits) as f64
+                    }
+                    PMb::Intra(idec) => {
+                        write_macroblock(
+                            &mut w2,
+                            idec,
+                            &mut st2,
+                            mb_x,
+                            mb_x > 0,
+                            mb_y > 0,
+                            5,
+                            t8x8,
+                        );
+                        (w2.position() + run_bits) as f64
+                    }
+                };
             }
-            PMb::Coded(dec) => {
-                w.ue(skip_run);
-                skip_run = 0;
-                write_p16_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+            match mb {
+                PMb::Skip(_) => {
+                    skip_run += 1;
+                    skip_nz(&mut st, mb_x);
+                }
+                PMb::Coded(dec) => {
+                    w.ue(skip_run);
+                    skip_run = 0;
+                    write_p16_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+                }
+                PMb::Intra(idec) => {
+                    w.ue(skip_run);
+                    skip_run = 0;
+                    // Intra in a P slice: the same macroblock, `mb_type` shifted
+                    // by 5 (Table 7-11's note).
+                    write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 5, t8x8);
+                }
             }
-            PMb::Intra(idec) => {
-                w.ue(skip_run);
-                skip_run = 0;
-                // Intra in a P slice: the same macroblock, `mb_type` shifted
-                // by 5 (Table 7-11's note).
-                write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 5, t8x8);
-            }
+            0.0
         },
     );
     if skip_run > 0 {
@@ -912,23 +964,60 @@ pub fn write_b_picture<S: Sample>(
         refs,
         col,
         weights,
-        |mb_x, mb_y, mb| match mb {
-            BMb::Skip(_) => {
-                skip_run += 1;
-                skip_nz(&mut st, mb_x);
+        |mb_x, mb_y, mb, trial| {
+            if trial {
+                let run_bits = ue_bits(skip_run);
+                let mut w2 = BitWriter::new();
+                let mut st2 = st.clone();
+                return match mb {
+                    BMb::Skip(_) => 1.0,
+                    BMb::Direct(dec) | BMb::Explicit(dec) => {
+                        write_b_macroblock(
+                            &mut w2,
+                            dec,
+                            &mut st2,
+                            mb_x,
+                            mb_x > 0,
+                            mb_y > 0,
+                            t8x8,
+                            false,
+                        );
+                        (w2.position() + run_bits) as f64
+                    }
+                    BMb::Intra(idec) => {
+                        write_macroblock(
+                            &mut w2,
+                            idec,
+                            &mut st2,
+                            mb_x,
+                            mb_x > 0,
+                            mb_y > 0,
+                            23,
+                            t8x8,
+                        );
+                        (w2.position() + run_bits) as f64
+                    }
+                };
             }
-            BMb::Direct(dec) | BMb::Explicit(dec) => {
-                w.ue(skip_run);
-                skip_run = 0;
-                write_b_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+            match mb {
+                BMb::Skip(_) => {
+                    skip_run += 1;
+                    skip_nz(&mut st, mb_x);
+                }
+                BMb::Direct(dec) | BMb::Explicit(dec) => {
+                    w.ue(skip_run);
+                    skip_run = 0;
+                    write_b_macroblock(w, dec, &mut st, mb_x, mb_x > 0, mb_y > 0, t8x8, false);
+                }
+                BMb::Intra(idec) => {
+                    w.ue(skip_run);
+                    skip_run = 0;
+                    // Intra in a B slice: the same macroblock, `mb_type` shifted
+                    // by 23 (Table 7-14's note).
+                    write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 23, t8x8);
+                }
             }
-            BMb::Intra(idec) => {
-                w.ue(skip_run);
-                skip_run = 0;
-                // Intra in a B slice: the same macroblock, `mb_type` shifted
-                // by 23 (Table 7-14's note).
-                write_macroblock(w, idec, &mut st, mb_x, mb_x > 0, mb_y > 0, 23, t8x8);
-            }
+            0.0
         },
     );
     if skip_run > 0 {

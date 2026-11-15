@@ -22,7 +22,9 @@ use crate::dsp::distortion::DistortionDsp;
 use crate::dsp::h264::H264Dsp;
 use crate::dsp::h264_enc::{H264EncDsp, Quant};
 use crate::encode::aq;
+use crate::encode::h264_analyse::{AnalysisCfg, MbChoice, Nb, PicAn, SrcMb, b_mb, intra_mb, p_mb};
 use crate::encode::h264_deblock::{deblock_recon, nz_mask_of};
+use crate::encode::h264_hpel::{MeRef, build_hpel};
 use crate::encode::h264_intra::{
     IntraCtx, MbAvail, MbDecision, MbKind, code_macroblock, code_macroblock_modes8,
 };
@@ -80,6 +82,10 @@ pub struct IntraTools<S: Sample> {
     /// (`encode::level::MotionLimits`). One constant per encoder, like the
     /// switches above; none until the encoder has chosen its level.
     pub(crate) motion: crate::encode::level::MotionLimits,
+    /// The rate-distortion analysis ([`crate::encode::h264_analyse`]) and
+    /// how hard it works, for progressive frame pictures; `None` keeps the
+    /// established decisions everywhere.
+    pub(crate) analysis: Option<AnalysisCfg>,
 }
 
 impl<S: Sample> IntraTools<S> {
@@ -106,7 +112,14 @@ impl<S: Sample> IntraTools<S> {
             subparts,
             aq_strength: 0.0,
             motion: crate::encode::level::MotionLimits::NONE,
+            analysis: None,
         }
+    }
+
+    /// The same tools deciding progressive pictures by `cfg`'s analysis.
+    pub(crate) fn with_analysis(mut self, cfg: Option<AnalysisCfg>) -> Self {
+        self.analysis = cfg;
+        self
     }
 
     /// The same tools with adaptive quantisation at `strength` (0 off).
@@ -620,6 +633,42 @@ impl<'a, S: Sample> PicCoding<'a, S> {
     }
 }
 
+/// Candidate vectors per list from the coded neighbours of macroblock
+/// `(mb_x, mb_y)` — left, above, above-right — where they predict from
+/// that list.
+fn nb_cands(
+    pm: &PicMotion,
+    mb_x: usize,
+    mb_y: usize,
+    mbs_wide: usize,
+) -> ([[Mv; 4]; 2], [usize; 2]) {
+    let mut out = [[Mv::ZERO; 4]; 2];
+    let mut n = [0usize; 2];
+    let addr = mb_y * mbs_wide + mb_x;
+    let near = [
+        (mb_x > 0, addr.wrapping_sub(1), 3usize),
+        (mb_y > 0, addr.wrapping_sub(mbs_wide), 12),
+        (
+            mb_y > 0 && mb_x + 1 < mbs_wide,
+            addr.wrapping_sub(mbs_wide).wrapping_add(1),
+            12,
+        ),
+    ];
+    for l in 0..2 {
+        for &(ok, a, blk) in &near {
+            if !ok || pm.frame.mb_intra[a] {
+                continue;
+            }
+            let m = pm.frame.motion[l][a * 16 + blk];
+            if m.ref_idx >= 0 && !out[l][..n[l]].contains(&m.mv) {
+                out[l][n[l]] = m.mv;
+                n[l] += 1;
+            }
+        }
+    }
+    (out, n)
+}
+
 /// One coded macroblock of a P picture, as the walk hands it to a
 /// serialiser. The decision is borrowed for exactly one call — spell its
 /// bits, update your entropy state, return.
@@ -650,7 +699,7 @@ pub(crate) fn code_intra_picture<S: Sample>(
     qp: u8,
     planes: &[Plane<'_, S>],
     rec: &mut [Recon<S>],
-    mut emit: impl FnMut(usize, usize, &MbDecision),
+    mut emit: impl FnMut(usize, usize, &MbDecision, bool) -> f64,
 ) -> PicMotion {
     let pc = PicCoding::new(g, tools, qp, planes);
     let ctx = &pc.ctx;
@@ -661,6 +710,13 @@ pub(crate) fn code_intra_picture<S: Sample>(
     pm.field_pic = g.field_pic;
     let mut top_modes: Vec<[Option<u8>; 4]> = vec![[None; 4]; mbs_wide];
     let mut chain = QpChain::new(ctx.qp, g.bit_depth);
+    let analysis = tools.analysis.filter(|_| !g.field_pic);
+    let srcmb = SrcMb {
+        y: src_y,
+        ys: pc.luma_stride,
+        c: [src_cb, src_cr],
+        cs: pc.chroma_stride,
+    };
     for mb_y in 0..mbs_high {
         let mut left_modes: [Option<u8>; 4] = [None; 4];
         for mb_x in 0..mbs_wide {
@@ -672,25 +728,47 @@ pub(crate) fn code_intra_picture<S: Sample>(
             };
             let addr = mb_y * mbs_wide + mb_x;
             let mctx = pc.ctx_at(pc.mb_qp(addr));
-            let (mut dec, modes) = code_macroblock(
-                &mctx,
-                rec,
-                mb_x,
-                mb_y,
-                src_y,
-                pc.luma_stride,
-                [src_cb, src_cr],
-                pc.chroma_stride,
-                mb,
-                &left_modes,
-                &top_modes[mb_x],
-            );
+            let (mut dec, modes) = if let Some(cfg) = analysis {
+                let nb = Nb {
+                    avail: mb,
+                    left_modes: &left_modes,
+                    top_modes: &top_modes[mb_x],
+                    cands: [[Mv::ZERO; 4]; 2],
+                    ncands: [0; 2],
+                };
+                let (d, m, _) = intra_mb(
+                    &cfg,
+                    &mctx,
+                    rec,
+                    mb_x,
+                    mb_y,
+                    &srcmb,
+                    &nb,
+                    chain.prev,
+                    &mut |d: &MbDecision| emit(mb_x, mb_y, d, true),
+                );
+                (d, m)
+            } else {
+                code_macroblock(
+                    &mctx,
+                    rec,
+                    mb_x,
+                    mb_y,
+                    src_y,
+                    pc.luma_stride,
+                    [src_cb, src_cr],
+                    pc.chroma_stride,
+                    mb,
+                    &left_modes,
+                    &top_modes[mb_x],
+                )
+            };
             let q = chain.settle(
                 mctx.qp,
                 has_residual(filter_kind(dec.kind), dec.cbp_luma | (dec.cbp_chroma << 4)),
             );
             dec.qp_delta = q.delta as i8;
-            emit(mb_x, mb_y, &dec);
+            emit(mb_x, mb_y, &dec, false);
             pm.commit(
                 addr,
                 coded_info(
@@ -751,7 +829,7 @@ pub(crate) fn code_p_picture<S: Sample>(
     rec: &mut [Recon<S>],
     refp: &[Recon<S>],
     weights: Option<&PredWeightTable>,
-    mut emit: impl FnMut(usize, usize, PMb<'_>),
+    mut emit: impl FnMut(usize, usize, PMb<'_>, bool) -> f64,
 ) -> PicMotion {
     let pc = PicCoding::new(g, tools, qp, planes);
     let ctx = &pc.ctx;
@@ -789,6 +867,26 @@ pub(crate) fn code_p_picture<S: Sample>(
     let mut dnb = MbNeighbours::default();
     let mut st = MbMotionState::new();
     let mut chain = QpChain::new(ctx.qp, g.bit_depth);
+    let analysis = tools.analysis.filter(|_| !g.field_pic);
+    let hpel = analysis.map(|_| build_hpel(pref.search, ctx.max));
+    let mut an = analysis.map(|cfg| {
+        let h = hpel.as_ref().expect("built with the analysis");
+        PicAn::new(
+            cfg,
+            [
+                Some(MeRef {
+                    p: [pref.search, &h.h, &h.v, &h.c],
+                }),
+                None,
+            ],
+        )
+    });
+    let srcmb = SrcMb {
+        y: src_y,
+        ys: pc.luma_stride,
+        c: [src_cb, src_cr],
+        cs: pc.chroma_stride,
+    };
     for mb_y in 0..mbs_high {
         let mut left_modes: [Option<u8>; 4] = [None; 4];
         for mb_x in 0..mbs_wide {
@@ -796,18 +894,57 @@ pub(crate) fn code_p_picture<S: Sample>(
             st.start(&pm.frame, &pm.info, addr, &mut dnb);
             let mctx = pc.ctx_at(pc.mb_qp(addr));
             let ctx = &mctx;
-            let mut dec = code_macroblock_p(
-                ctx,
-                rec,
-                &pref,
-                mb_x,
-                mb_y,
-                src_y,
-                pc.luma_stride,
-                [src_cb, src_cr],
-                pc.chroma_stride,
-                &mut st,
-            );
+            let mut decided_intra = None;
+            let mut dec = if let Some(an) = an.as_mut() {
+                let (cands, ncands) = nb_cands(&pm, mb_x, mb_y, mbs_wide);
+                let nb = Nb {
+                    avail: MbAvail {
+                        left: mb_x > 0,
+                        top: mb_y > 0,
+                        top_left: mb_x > 0 && mb_y > 0,
+                        top_right: mb_y > 0 && mb_x + 1 < mbs_wide,
+                    },
+                    left_modes: &left_modes,
+                    top_modes: &top_modes[mb_x],
+                    cands,
+                    ncands,
+                };
+                match p_mb(
+                    an,
+                    ctx,
+                    rec,
+                    &pref,
+                    mb_x,
+                    mb_y,
+                    &srcmb,
+                    &mut st,
+                    &nb,
+                    chain.prev,
+                    &mut |m: PMb<'_>| emit(mb_x, mb_y, m, true),
+                ) {
+                    MbChoice::Inter(d) => d,
+                    MbChoice::Intra(d, modes) => {
+                        decided_intra = Some((d, modes));
+                        InterDecision {
+                            kind: InterMbKind::UseIntra,
+                            ..InterDecision::default()
+                        }
+                    }
+                }
+            } else {
+                code_macroblock_p(
+                    ctx,
+                    rec,
+                    &pref,
+                    mb_x,
+                    mb_y,
+                    src_y,
+                    pc.luma_stride,
+                    [src_cb, src_cr],
+                    pc.chroma_stride,
+                    &mut st,
+                )
+            };
             // The weighting's model check, at the vectors this macroblock
             // chose (a skip's is the derived one, over the whole 16x16).
             if weighted_luma.is_some() && dec.kind != InterMbKind::UseIntra {
@@ -835,7 +972,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                 InterMbKind::PSkip => {
                     // A skip carries no delta and holds the prediction.
                     let q = chain.settle(ctx.qp, false);
-                    emit(mb_x, mb_y, PMb::Skip(&dec));
+                    emit(mb_x, mb_y, PMb::Skip(&dec), false);
                     pm.commit(
                         addr,
                         coded_info(DecKind::PSkip, 0, false, q, [0; 2]),
@@ -853,7 +990,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                         has_residual(dec.kind.dec_kind(), dec.cbp_luma | (dec.cbp_chroma << 4)),
                     );
                     dec.qp_delta = q.delta as i8;
-                    emit(mb_x, mb_y, PMb::Coded(&dec));
+                    emit(mb_x, mb_y, PMb::Coded(&dec), false);
                     let mut rects = [(0usize, 0usize, 0usize, 0usize); 16];
                     let n = dec.rects(&mut rects);
                     pm.commit(
@@ -877,19 +1014,21 @@ pub(crate) fn code_p_picture<S: Sample>(
                         top_left: mb_x > 0 && mb_y > 0,
                         top_right: mb_y > 0 && mb_x + 1 < mbs_wide,
                     };
-                    let (mut idec, modes) = code_macroblock(
-                        ctx,
-                        rec,
-                        mb_x,
-                        mb_y,
-                        src_y,
-                        pc.luma_stride,
-                        [src_cb, src_cr],
-                        pc.chroma_stride,
-                        mb,
-                        &left_modes,
-                        &top_modes[mb_x],
-                    );
+                    let (mut idec, modes) = decided_intra.take().unwrap_or_else(|| {
+                        code_macroblock(
+                            ctx,
+                            rec,
+                            mb_x,
+                            mb_y,
+                            src_y,
+                            pc.luma_stride,
+                            [src_cb, src_cr],
+                            pc.chroma_stride,
+                            mb,
+                            &left_modes,
+                            &top_modes[mb_x],
+                        )
+                    });
                     let q = chain.settle(
                         ctx.qp,
                         has_residual(
@@ -898,7 +1037,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                         ),
                     );
                     idec.qp_delta = q.delta as i8;
-                    emit(mb_x, mb_y, PMb::Intra(&idec));
+                    emit(mb_x, mb_y, PMb::Intra(&idec), false);
                     pm.commit(
                         addr,
                         coded_info(
@@ -969,7 +1108,7 @@ pub(crate) fn code_b_picture<S: Sample>(
     refs: [&[Recon<S>]; 2],
     col: &Colocated,
     weights: BWeights<'_>,
-    mut emit: impl FnMut(usize, usize, BMb<'_>),
+    mut emit: impl FnMut(usize, usize, BMb<'_>, bool) -> f64,
 ) -> PicMotion {
     let pc = PicCoding::new(g, tools, qp, planes);
     let ctx = &pc.ctx;
@@ -1011,6 +1150,30 @@ pub(crate) fn code_b_picture<S: Sample>(
     let mut dnb = MbNeighbours::default();
     let mut st = MbMotionState::new();
     let mut chain = QpChain::new(ctx.qp, g.bit_depth);
+    let analysis = tools.analysis.filter(|_| !g.field_pic);
+    let hpel = analysis.map(|_| {
+        [
+            build_hpel(brefs.search[0], ctx.max),
+            build_hpel(brefs.search[1], ctx.max),
+        ]
+    });
+    let mut an = analysis.map(|cfg| {
+        let h = hpel.as_ref().expect("built with the analysis");
+        PicAn::new(
+            cfg,
+            [0, 1].map(|l| {
+                Some(MeRef {
+                    p: [brefs.search[l], &h[l].h, &h[l].v, &h[l].c],
+                })
+            }),
+        )
+    });
+    let srcmb = SrcMb {
+        y: src_y,
+        ys: pc.luma_stride,
+        c: [src_cb, src_cr],
+        cs: pc.chroma_stride,
+    };
     for mb_y in 0..mbs_high {
         let mut left_modes: [Option<u8>; 4] = [None; 4];
         for mb_x in 0..mbs_wide {
@@ -1018,22 +1181,63 @@ pub(crate) fn code_b_picture<S: Sample>(
             st.start(&pm.frame, &pm.info, addr, &mut dnb);
             let mctx = pc.ctx_at(pc.mb_qp(addr));
             let ctx = &mctx;
-            let mut dec = code_macroblock_b(
-                ctx,
-                rec,
-                &brefs,
-                mb_x,
-                mb_y,
-                src_y,
-                pc.luma_stride,
-                [src_cb, src_cr],
-                pc.chroma_stride,
-                &mut st,
-                col,
-                addr,
-                false,
-                col.map.cur_parity,
-            );
+            let mut decided_intra = None;
+            let mut dec = if let Some(an) = an.as_mut() {
+                let (cands, ncands) = nb_cands(&pm, mb_x, mb_y, mbs_wide);
+                let nb = Nb {
+                    avail: MbAvail {
+                        left: mb_x > 0,
+                        top: mb_y > 0,
+                        top_left: mb_x > 0 && mb_y > 0,
+                        top_right: mb_y > 0 && mb_x + 1 < mbs_wide,
+                    },
+                    left_modes: &left_modes,
+                    top_modes: &top_modes[mb_x],
+                    cands,
+                    ncands,
+                };
+                match b_mb(
+                    an,
+                    ctx,
+                    rec,
+                    &brefs,
+                    mb_x,
+                    mb_y,
+                    &srcmb,
+                    &mut st,
+                    col,
+                    addr,
+                    &nb,
+                    chain.prev,
+                    &mut |m: BMb<'_>| emit(mb_x, mb_y, m, true),
+                ) {
+                    MbChoice::Inter(d) => d,
+                    MbChoice::Intra(d, modes) => {
+                        decided_intra = Some((d, modes));
+                        BDecision {
+                            kind: BMbKind::UseIntra,
+                            ..BDecision::default()
+                        }
+                    }
+                }
+            } else {
+                code_macroblock_b(
+                    ctx,
+                    rec,
+                    &brefs,
+                    mb_x,
+                    mb_y,
+                    src_y,
+                    pc.luma_stride,
+                    [src_cb, src_cr],
+                    pc.chroma_stride,
+                    &mut st,
+                    col,
+                    addr,
+                    false,
+                    col.map.cur_parity,
+                )
+            };
             // The weighting's model check, at the vectors and lists this
             // macroblock chose (direct and skip at their derived ones).
             if luma_weighted && dec.kind != BMbKind::UseIntra {
@@ -1059,19 +1263,21 @@ pub(crate) fn code_b_picture<S: Sample>(
                     top_left: mb_x > 0 && mb_y > 0,
                     top_right: mb_y > 0 && mb_x + 1 < mbs_wide,
                 };
-                let (mut idec, modes) = code_macroblock(
-                    ctx,
-                    rec,
-                    mb_x,
-                    mb_y,
-                    src_y,
-                    pc.luma_stride,
-                    [src_cb, src_cr],
-                    pc.chroma_stride,
-                    mb,
-                    &left_modes,
-                    &top_modes[mb_x],
-                );
+                let (mut idec, modes) = decided_intra.take().unwrap_or_else(|| {
+                    code_macroblock(
+                        ctx,
+                        rec,
+                        mb_x,
+                        mb_y,
+                        src_y,
+                        pc.luma_stride,
+                        [src_cb, src_cr],
+                        pc.chroma_stride,
+                        mb,
+                        &left_modes,
+                        &top_modes[mb_x],
+                    )
+                });
                 let q = chain.settle(
                     ctx.qp,
                     has_residual(
@@ -1080,7 +1286,7 @@ pub(crate) fn code_b_picture<S: Sample>(
                     ),
                 );
                 idec.qp_delta = q.delta as i8;
-                emit(mb_x, mb_y, BMb::Intra(&idec));
+                emit(mb_x, mb_y, BMb::Intra(&idec), false);
                 pm.commit(
                     addr,
                     coded_info(
@@ -1112,6 +1318,7 @@ pub(crate) fn code_b_picture<S: Sample>(
                     }
                     BMbKind::UseIntra => unreachable!(),
                 },
+                false,
             );
             // The rectangles the decoder's motion jobs cover, whose left
             // and top edges are where the loop filter compares motion.

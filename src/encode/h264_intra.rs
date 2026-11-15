@@ -287,7 +287,7 @@ fn top_right_ready(bx: usize, by: usize, mb: MbAvail) -> bool {
 
 /// Availability for the 4x4 block at `(bx, by)` of a macroblock whose own
 /// neighbours are `mb`.
-fn avail_4x4(bx: usize, by: usize, mb: MbAvail) -> IntraAvail {
+pub(crate) fn avail_4x4(bx: usize, by: usize, mb: MbAvail) -> IntraAvail {
     IntraAvail {
         top: if by == 0 { mb.top } else { true },
         left: if bx == 0 { mb.left } else { true },
@@ -319,7 +319,7 @@ fn avail_4x4(bx: usize, by: usize, mb: MbAvail) -> IntraAvail {
 ///   its top-right samples from the 8x8 above-right *inside* this
 ///   macroblock, which is already reconstructed, and the right-hand one
 ///   has nothing there.
-fn avail_8x8(bx: usize, by: usize, mb: MbAvail) -> IntraAvail {
+pub(crate) fn avail_8x8(bx: usize, by: usize, mb: MbAvail) -> IntraAvail {
     IntraAvail {
         top: if by > 0 { true } else { mb.top },
         left: if bx > 0 { true } else { mb.left },
@@ -432,7 +432,7 @@ pub(crate) fn quad_rasters(blk8: usize) -> [usize; 4] {
 
 /// The prediction of an Intra_4x4 mode (8.3.1.1): the smaller of the left
 /// and top blocks' modes, DC when either is missing.
-fn predicted_mode(left: Option<u8>, top: Option<u8>) -> u8 {
+pub(crate) fn predicted_mode(left: Option<u8>, top: Option<u8>) -> u8 {
     match (left, top) {
         (Some(a), Some(b)) => a.min(b),
         _ => 2,
@@ -440,7 +440,7 @@ fn predicted_mode(left: Option<u8>, top: Option<u8>) -> u8 {
 }
 
 /// Turn a chosen mode into the flag and remainder the syntax carries.
-fn as_syntax(chosen: u8, predicted: u8) -> PredMode {
+pub(crate) fn as_syntax(chosen: u8, predicted: u8) -> PredMode {
     if chosen == predicted {
         PredMode {
             use_predicted: true,
@@ -459,7 +459,7 @@ fn as_syntax(chosen: u8, predicted: u8) -> PredMode {
 }
 
 /// Read a `w` by `h` block out of a plane into a packed buffer.
-fn gather<S: Sample>(p: &Recon<S>, off: usize, w: usize, h: usize, out: &mut [S]) {
+pub(crate) fn gather<S: Sample>(p: &Recon<S>, off: usize, w: usize, h: usize, out: &mut [S]) {
     for y in 0..h {
         out[y * w..y * w + w].copy_from_slice(&p.data[off + y * p.stride..off + y * p.stride + w]);
     }
@@ -469,7 +469,7 @@ fn gather<S: Sample>(p: &Recon<S>, off: usize, w: usize, h: usize, out: &mut [S]
 /// place: `off` addresses the block in `rec`, which already holds the
 /// prediction. Returns the levels and their nonzero count.
 #[allow(clippy::too_many_arguments)]
-fn code_block_4x4<S: Sample>(
+pub(crate) fn code_block_4x4<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut Recon<S>,
     off: usize,
@@ -507,7 +507,7 @@ fn code_block_4x4<S: Sample>(
 
 /// Dequantise levels and add the inverse transform to the prediction
 /// already in `rec` — the decoder's own path, so the two cannot disagree.
-fn reconstruct_4x4<S: Sample>(
+pub(crate) fn reconstruct_4x4<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut Recon<S>,
     off: usize,
@@ -542,7 +542,7 @@ fn reconstruct_4x4<S: Sample>(
 /// of squared errors of the reconstruction, which is what a
 /// rate-distortion comparison between candidate modes wants.
 #[allow(clippy::too_many_arguments)]
-fn code_i16x16<S: Sample>(
+pub(crate) fn code_i16x16<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut Recon<S>,
     px: usize,
@@ -944,7 +944,7 @@ fn code_i4x4<S: Sample>(
 
 /// Code the chroma of a macroblock at the chosen mode, into both planes.
 #[allow(clippy::too_many_arguments)]
-fn code_chroma<S: Sample>(
+pub(crate) fn code_chroma<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut [Recon<S>],
     cx: usize,
