@@ -187,7 +187,7 @@ impl AnalysisCfg {
         trellis: true,
         trellis_rd: true,
         rd: true,
-        refs: 4,
+        refs: 5,
         mixed_refs: 1.5,
         bi_refine: 2,
         bi_part_ratio: 1.2,

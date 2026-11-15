@@ -208,6 +208,10 @@ fn main() {
                 // (`h265_tune::apply_preset`).
                 if codec_arg.as_deref() == Some("h265") {
                     h26x::encode::h265_tune::apply_preset(&mut cfg, preset);
+                } else if preset == Preset::Slow {
+                    // H.264 slow's P pictures search five references (the
+                    // pyramid alone keeps four).
+                    cfg.max_refs = cfg.max_refs.max(5);
                 }
             }
             // H.264: B pyramid on or off.
