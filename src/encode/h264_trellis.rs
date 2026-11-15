@@ -78,6 +78,9 @@ fn qstep(qp: i32) -> f32 {
 /// level; 5..=8 larger levels seen 1..=4+.
 const NONE: usize = 0;
 const NODES: usize = 9;
+/// The per-node arrays' length: the nine nodes padded to whole vectors,
+/// so a copy of one is a few register moves rather than a library call.
+const LANES: usize = 12;
 
 #[inline]
 fn first_inc(node: usize) -> usize {
@@ -93,7 +96,9 @@ fn rest_inc(node: usize) -> usize {
     if node >= 5 { 5 + (node - 4).min(4) } else { 5 }
 }
 
-#[inline]
+/// The node a path moves to on a level of `abs` (the definition
+/// [`next_table`] tabulates).
+#[cfg(test)]
 fn next(node: usize, abs: u32) -> usize {
     if abs == 1 {
         match node {
@@ -108,6 +113,14 @@ fn next(node: usize, abs: u32) -> usize {
             _ => 8,
         }
     }
+}
+
+/// [`next`] for every node at once, for a level of `abs`.
+#[inline]
+fn next_table(abs: u32) -> &'static [u8; NODES] {
+    static ONE: [u8; NODES] = [2, 2, 3, 4, 4, 5, 6, 7, 8];
+    static BIG: [u8; NODES] = [5, 5, 5, 5, 5, 6, 7, 8, 8];
+    if abs == 1 { &ONE } else { &BIG }
 }
 
 impl Trellis {
@@ -221,16 +234,18 @@ impl Trellis {
         };
         let max_idx = count - 1;
 
-        let mut cost = [f32::INFINITY; NODES];
+        let mut cost = [f32::INFINITY; LANES];
         // Everything past `last` is zero and costs its squared error only.
         cost[NONE] = (last + 1..count).map(|i| x[i] * x[i]).sum();
         let mut live: u16 = 1 << NONE;
         // Per position and resulting node: the node it came from and the
         // level chosen, packed.
-        let mut from = [[0u32; NODES]; N];
+        // Written at every position from `last` down before it is read,
+        // so it starts uninitialised: zeroing it was a 2 KB memset a block.
+        let mut from = [const { std::mem::MaybeUninit::<[u32; LANES]>::uninit() }; N];
         for i in (0..=last).rev() {
-            let mut nc = [f32::INFINITY; NODES];
-            let mut nf = [0u32; NODES];
+            let mut nc = [f32::INFINITY; LANES];
+            let mut nf = [0u32; LANES];
             let mut nlive: u16 = 0;
             let t = top[i];
             let coded_sig = i < max_idx;
@@ -249,14 +264,14 @@ impl Trellis {
                 };
                 // Only zero is on offer: every path stays on its node.
                 let mut m = live;
-                let mut nf = [0u32; NODES];
+                let mut nf = [0u32; LANES];
                 while m != 0 {
                     let node = m.trailing_zeros() as usize;
                     m &= m - 1;
                     cost[node] = cost[node] + d0 + if node == NONE { 0.0 } else { zs0 };
                     nf[node] = (node as u32) << 24;
                 }
-                from[i] = nf;
+                from[i].write(nf);
                 continue;
             }
             let (zs, os, l0, l1) = if coded_sig {
@@ -279,6 +294,20 @@ impl Trellis {
             } else {
                 (0.0, 0.0, 0.0, 0.0)
             };
+            // `t >= 1` here (zero-only positions were taken above): the
+            // candidates are `t - 1` (when that is a level) and `t`, each
+            // with its squared error and the node table it moves by.
+            let lo = t.saturating_sub(1).max(1);
+            let n_lv = if lo == t { 1 } else { 2 };
+            let cands = [lo, t];
+            let dd = [
+                (xi - lo as f32) * (xi - lo as f32),
+                (xi - t as f32) * (xi - t as f32),
+            ];
+            let moves = [next_table(lo), next_table(t)];
+            // Every comparison below is a select rather than a branch: which
+            // path wins a node is data, and mispredicting it was most of
+            // the trellis's time.
             let mut m = live;
             while m != 0 {
                 let node = m.trailing_zeros() as usize;
@@ -287,32 +316,34 @@ impl Trellis {
                 // Zero.
                 if t <= 2 {
                     let j = c + d0 + if node == NONE { 0.0 } else { zs };
-                    if j < nc[node] {
-                        nc[node] = j;
-                        nf[node] = (node as u32) << 24;
-                        nlive |= 1 << node;
-                    }
+                    let better = j < nc[node];
+                    nc[node] = if better { j } else { nc[node] };
+                    nf[node] = if better {
+                        (node as u32) << 24
+                    } else {
+                        nf[node]
+                    };
+                    nlive |= (better as u16) << node;
                 }
                 // The rounded level and one less.
                 let sig = os + if node == NONE { l1 } else { l0 };
-                // `t >= 1` here (zero-only positions were taken above): the
-                // candidates are `t - 1` (when that is a level) and `t`.
-                let lo = t.saturating_sub(1).max(1);
-                let n_lv = if lo == t { 1 } else { 2 };
-                for &lv in [lo, t].iter().take(n_lv) {
-                    let d = xi - lv as f32;
-                    let j = c + d * d + sig + level_cost(node, lv);
-                    let to = next(node, lv);
-                    if j < nc[to] {
-                        nc[to] = j;
-                        nf[to] = ((node as u32) << 24) | lv;
-                        nlive |= 1 << to;
-                    }
+                for k in 0..n_lv {
+                    let lv = cands[k];
+                    let j = c + dd[k] + sig + level_cost(node, lv);
+                    let to = moves[k][node] as usize;
+                    let better = j < nc[to];
+                    nc[to] = if better { j } else { nc[to] };
+                    nf[to] = if better {
+                        ((node as u32) << 24) | lv
+                    } else {
+                        nf[to]
+                    };
+                    nlive |= (better as u16) << to;
                 }
             }
             cost = nc;
             live = nlive;
-            from[i] = nf;
+            from[i].write(nf);
         }
         // The coded block flag: an all-zero block saves it.
         if let Some(cb) = cbf_base {
@@ -331,7 +362,8 @@ impl Trellis {
         }
         let mut nz = 0;
         for i in 0..=last {
-            let e = from[i][node];
+            // SAFETY: every position up to `last` was written above.
+            let e = unsafe { from[i].assume_init_ref() }[node];
             let lv = e & 0xff_ffff;
             if lv != 0 {
                 let r = scan[start + i] as usize;
@@ -345,5 +377,23 @@ impl Trellis {
             node = (e >> 24) as usize;
         }
         nz
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_table_is_next() {
+        for abs in 1..20 {
+            for n in 0..NODES {
+                assert_eq!(
+                    next_table(abs)[n] as usize,
+                    next(n, abs),
+                    "node {n} abs {abs}"
+                );
+            }
+        }
     }
 }
