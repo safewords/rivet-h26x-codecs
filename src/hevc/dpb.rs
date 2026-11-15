@@ -45,6 +45,9 @@ pub struct RefEntry<S: Sample = u16> {
     pub poc: i32,
     /// Marked long-term for the current picture.
     pub long_term: bool,
+    /// The current picture itself (`pps_curr_pic_ref_enabled_flag`): its
+    /// samples are the ones decoded so far, before the in-loop filters.
+    pub cur: bool,
 }
 
 /// The reference picture set of the current picture, resolved to pictures.
@@ -56,12 +59,19 @@ pub struct RefSets<S: Sample = u16> {
     pub st_curr_after: Vec<RefEntry<S>>,
     /// `RefPicSetLtCurr`.
     pub lt_curr: Vec<RefEntry<S>>,
+    /// The current picture as a reference of its own slices
+    /// (`pps_curr_pic_ref_enabled_flag`; marked long-term while it is
+    /// decoded, 8.1.3).
+    pub curr_pic: Option<RefEntry<S>>,
 }
 
 impl<S: Sample> RefSets<S> {
     /// `NumPicTotalCurr`.
     pub fn num_pic_total_curr(&self) -> usize {
-        self.st_curr_before.len() + self.st_curr_after.len() + self.lt_curr.len()
+        self.st_curr_before.len()
+            + self.st_curr_after.len()
+            + self.lt_curr.len()
+            + self.curr_pic.is_some() as usize
     }
 
     /// 8.3.4: build `RefPicList0/1` for a slice.
@@ -95,6 +105,10 @@ impl<S: Sample> RefSets<S> {
                         temp.push(e);
                     }
                 }
+                // 8-8 / 8-10: the current picture closes every round.
+                if let Some(c) = &self.curr_pic {
+                    temp.push(c);
+                }
             }
             let mut l = Vec::with_capacity(n_active);
             for i in 0..n_active {
@@ -109,6 +123,15 @@ impl<S: Sample> RefSets<S> {
                     return Err(crate::Error::bitstream("list_entry out of range"));
                 }
                 l.push(temp[idx].clone());
+            }
+            // 8-9: without a modification, list 0 ends in the current
+            // picture when the temporary list was longer.
+            if list == 0
+                && hdr.list_entry[0].is_none()
+                && num_temp > n_active
+                && let Some(c) = &self.curr_pic
+            {
+                l[n_active - 1] = c.clone();
             }
             *out_list = l;
         }
@@ -243,8 +266,15 @@ impl<S: Sample> Dpb<S> {
     }
 
     /// C.5.2.2: output/removal before decoding the current picture (after
-    /// the RPS has been applied).
-    pub fn before_decode(&mut self, irap_no_rasl_output: bool, no_output_of_prior_pics: bool) {
+    /// the RPS has been applied). `two_versions` is the current picture's
+    /// `TwoVersionsOfCurrDecPicFlag`: its unfiltered copy takes a buffer of
+    /// its own, so the fullness limit is one lower.
+    pub fn before_decode(
+        &mut self,
+        irap_no_rasl_output: bool,
+        no_output_of_prior_pics: bool,
+        two_versions: bool,
+    ) {
         if irap_no_rasl_output {
             if no_output_of_prior_pics {
                 self.pics.clear();
@@ -258,7 +288,8 @@ impl<S: Sample> Dpb<S> {
         self.remove_unused();
         while self.num_needed_for_output() > self.max_num_reorder as usize
             || self.latency_exceeded()
-            || self.pics.len() >= self.max_dec_pic_buffering as usize
+            || self.pics.len()
+                >= (self.max_dec_pic_buffering as usize).saturating_sub(two_versions as usize)
         {
             if !self.bump_one() {
                 break;
@@ -482,6 +513,7 @@ impl<S: Sample> Dpb<S> {
                     frame: pics[i].frame.clone(),
                     poc: pics[i].poc,
                     long_term: pics[i].long_term,
+                    cur: false,
                 })
                 .collect()
         };
@@ -489,6 +521,7 @@ impl<S: Sample> Dpb<S> {
             st_curr_before: entries(st_before_idx, &self.pics),
             st_curr_after: entries(st_after_idx, &self.pics),
             lt_curr: entries(lt_curr_idx, &self.pics),
+            curr_pic: None,
         }
     }
 }

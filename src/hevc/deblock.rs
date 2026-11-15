@@ -271,8 +271,8 @@ pub fn deblock_rows<S: Sample>(
             (
                 beta,
                 tc,
-                info.filter_exempt[p] & 1 != 0,
-                info.filter_exempt[q] & 1 != 0,
+                info.filter_exempt[p] & 5 != 0,
+                info.filter_exempt[q] & 5 != 0,
             )
         };
     // Chroma tc of one segment (bS == 2) for both components: they share the
@@ -437,8 +437,8 @@ pub fn deblock_rows<S: Sample>(
                                 let ks = seg * per_seg + k;
                                 tcs[0][ks] = t[0];
                                 tcs[1][ks] = t[1];
-                                np[ks] = info.filter_exempt[q - 1] & 1 != 0;
-                                nq[ks] = info.filter_exempt[q] & 1 != 0;
+                                np[ks] = info.filter_exempt[q - 1] & 5 != 0;
+                                nq[ks] = info.filter_exempt[q] & 5 != 0;
                             }
                         }
                         if !any {
@@ -487,8 +487,8 @@ pub fn deblock_rows<S: Sample>(
                                 let ks = seg * per_seg + k;
                                 tcs[0][ks] = t[0];
                                 tcs[1][ks] = t[1];
-                                np[ks] = info.filter_exempt[q - w4] & 1 != 0;
-                                nq[ks] = info.filter_exempt[q] & 1 != 0;
+                                np[ks] = info.filter_exempt[q - w4] & 5 != 0;
+                                nq[ks] = info.filter_exempt[q] & 5 != 0;
                             }
                         }
                         if any {

@@ -94,6 +94,47 @@ pub struct Pps {
     pub chroma_qp_offset_lists: Vec<(i32, i32)>,
     /// `log2_sao_offset_scale_luma`, `log2_sao_offset_scale_chroma`.
     pub log2_sao_offset_scale: (u32, u32),
+    /// The screen content coding extension (7.3.2.3.3), when present.
+    pub scc: Option<PpsScc>,
+}
+
+/// `pps_scc_extension()` (7.3.2.3.3 / 7.4.3.3.3).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PpsScc {
+    /// `pps_curr_pic_ref_enabled_flag`.
+    pub curr_pic_ref: bool,
+    /// `residual_adaptive_colour_transform_enabled_flag`.
+    pub act: bool,
+    /// `pps_slice_act_qp_offsets_present_flag`.
+    pub slice_act_qp_offsets_present: bool,
+    /// `PpsActQpOffsetY`, `PpsActQpOffsetCb`, `PpsActQpOffsetCr`
+    /// (`pps_act_*_qp_offset_plus5 - 5`, `pps_act_cr_qp_offset_plus3 - 3`).
+    pub act_qp_offsets: [i32; 3],
+    /// `pps_palette_predictor_initializer[comp][i]`, entry-major, when
+    /// `pps_palette_predictor_initializers_present_flag` (possibly empty:
+    /// `pps_num_palette_predictor_initializers` may be 0).
+    pub palette_init: Option<Vec<[u16; 3]>>,
+}
+
+impl Pps {
+    /// `pps_curr_pic_ref_enabled_flag` (false without the SCC extension).
+    pub fn curr_pic_ref(&self) -> bool {
+        self.scc.as_ref().is_some_and(|s| s.curr_pic_ref)
+    }
+
+    /// `residual_adaptive_colour_transform_enabled_flag` (false without the
+    /// SCC extension).
+    pub fn act(&self) -> bool {
+        self.scc.as_ref().is_some_and(|s| s.act)
+    }
+
+    /// `TwoVersionsOfCurrDecPicFlag` (7-40): the current picture is a
+    /// reference of its own slices and the in-loop filters may change it,
+    /// so prediction from it reads the samples before filtering.
+    pub fn two_versions_of_curr_dec_pic(&self, sps: &super::sps::Sps) -> bool {
+        self.curr_pic_ref()
+            && (sps.sao_enabled || !self.deblocking_disabled || self.deblocking_override_enabled)
+    }
 }
 
 impl Pps {
@@ -190,12 +231,16 @@ impl Pps {
         let mut diff_cu_chroma_qp_offset_depth = 0;
         let mut chroma_qp_offset_lists = Vec::new();
         let mut log2_sao_offset_scale = (0, 0);
+        let mut scc = None;
+        let mut trailing_unparsed = false;
         if r.flag() {
+            // pps_extension_present_flag: the extensions follow in the order
+            // of their flags (7.3.2.3.1).
             range_ext = r.flag();
-            let _multilayer = r.flag();
-            let _3d = r.flag();
-            let _scc = r.flag();
-            r.bits(4);
+            let multilayer = r.flag();
+            let ext_3d = r.flag();
+            let scc_flag = r.flag();
+            let ext_4bits = r.bits(4);
             if range_ext {
                 // pps_range_extension()
                 if transform_skip_enabled {
@@ -228,54 +273,25 @@ impl Pps {
                     return Err(Error::bitstream("pps_range_extension values out of range"));
                 }
             }
-            // Other extensions are not parsed: their data sits before the
-            // trailing bits, so do not insist on rbsp_trailing_bits here.
-            return Ok(Pps {
-                id,
-                sps_id,
-                dependent_slice_segments_enabled,
-                output_flag_present,
-                num_extra_slice_header_bits,
-                sign_data_hiding,
-                cabac_init_present,
-                num_ref_idx_l0_default,
-                num_ref_idx_l1_default,
-                init_qp,
-                constrained_intra_pred,
-                transform_skip_enabled,
-                cu_qp_delta_enabled,
-                diff_cu_qp_delta_depth,
-                cb_qp_offset,
-                cr_qp_offset,
-                slice_chroma_qp_offsets_present,
-                weighted_pred,
-                weighted_bipred,
-                transquant_bypass_enabled,
-                tiles_enabled,
-                entropy_coding_sync,
-                col_bd: Vec::new(),
-                row_bd: Vec::new(),
-                tiles_raw,
-                loop_filter_across_tiles,
-                loop_filter_across_slices,
-                deblocking_override_enabled,
-                deblocking_disabled,
-                beta_offset,
-                tc_offset,
-                scaling_list,
-                lists_modification_present,
-                log2_parallel_merge_level,
-                slice_header_extension_present,
-                range_ext,
-                log2_max_transform_skip_size,
-                cross_component_prediction,
-                chroma_qp_offset_list,
-                diff_cu_chroma_qp_offset_depth,
-                chroma_qp_offset_lists: chroma_qp_offset_lists.clone(),
-                log2_sao_offset_scale,
-            });
+            if (multilayer || ext_3d) && scc_flag {
+                // pps_multilayer_extension() (F.7.3.2.3.4) and
+                // pps_3d_extension() (I.7.3.2.3.7) are not parsed, so the
+                // SCC extension behind them cannot be found.
+                return Err(Error::unsupported(
+                    "PPS multilayer / 3D extension followed by the SCC extension",
+                ));
+            }
+            if scc_flag {
+                scc = Some(parse_pps_scc(&mut r)?);
+            }
+            // The multilayer / 3D extensions and extension data are not
+            // parsed: their bits sit before the trailing bits, so do not
+            // insist on reading those.
+            trailing_unparsed = multilayer || ext_3d || ext_4bits != 0;
         }
-        r.finish("PPS")?;
+        if !trailing_unparsed {
+            r.finish("PPS")?;
+        }
         Ok(Pps {
             id,
             sps_id,
@@ -319,6 +335,7 @@ impl Pps {
             diff_cu_chroma_qp_offset_depth,
             chroma_qp_offset_lists,
             log2_sao_offset_scale,
+            scc,
         })
     }
 
@@ -373,4 +390,49 @@ impl Pps {
         self.row_bd = row_bd;
         Ok(())
     }
+}
+
+/// `pps_scc_extension()` (7.3.2.3.3), with the 7.4.3.3.3 ranges.
+fn parse_pps_scc(r: &mut BitReader) -> Result<PpsScc> {
+    let mut s = PpsScc {
+        curr_pic_ref: r.flag(),
+        act: r.flag(),
+        ..PpsScc::default()
+    };
+    if s.act {
+        s.slice_act_qp_offsets_present = r.flag();
+        // The semantics print `pps_act_cb_qp_offset_plus5` in the Cr
+        // derivation; the Cr element is the one meant.
+        s.act_qp_offsets = [r.se() - 5, r.se() - 5, r.se() - 3];
+        if s.act_qp_offsets.iter().any(|o| !(-12..=12).contains(o)) {
+            return Err(Error::bitstream("PpsActQpOffset out of range"));
+        }
+    }
+    if r.flag() {
+        // pps_palette_predictor_initializers_present_flag
+        let n = r.ue() as usize;
+        if n > 128 {
+            return Err(Error::bitstream(
+                "pps_num_palette_predictor_initializers out of range",
+            ));
+        }
+        let mut init = vec![[0u16; 3]; n];
+        if n > 0 {
+            let monochrome = r.flag();
+            let bd_luma = r.ue() + 8;
+            let bd_chroma = if monochrome { 8 } else { r.ue() + 8 };
+            if bd_luma > 16 || bd_chroma > 16 {
+                return Err(Error::bitstream("palette entry bit depth out of range"));
+            }
+            let num_comps = if monochrome { 1 } else { 3 };
+            for comp in 0..num_comps {
+                let bits = if comp == 0 { bd_luma } else { bd_chroma };
+                for e in init.iter_mut() {
+                    e[comp] = r.bits(bits) as u16;
+                }
+            }
+        }
+        s.palette_init = Some(init);
+    }
+    Ok(s)
 }

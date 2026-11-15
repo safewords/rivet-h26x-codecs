@@ -639,6 +639,29 @@ pub struct Sps {
     /// implicit_rdpcm, explicit_rdpcm, extended_precision, intra_smoothing_disabled,
     /// high_precision_offsets, persistent_rice_adaptation, cabac_bypass_alignment)`.
     pub range_ext: Option<[bool; 9]>,
+    /// The screen content coding extension (7.3.2.2.3), when present.
+    pub scc: Option<SpsScc>,
+}
+
+/// `sps_scc_extension()` (7.3.2.2.3 / 7.4.3.2.3).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SpsScc {
+    /// `sps_curr_pic_ref_enabled_flag`.
+    pub curr_pic_ref: bool,
+    /// `palette_mode_enabled_flag`.
+    pub palette_mode: bool,
+    /// `palette_max_size`.
+    pub palette_max_size: u32,
+    /// `PaletteMaxPredictorSize` (7-35).
+    pub palette_max_predictor_size: u32,
+    /// `sps_palette_predictor_initializer[comp][i]`, entry-major (`[i][comp]`;
+    /// one component in 4:0:0), when
+    /// `sps_palette_predictor_initializers_present_flag`.
+    pub palette_init: Option<Vec<[u16; 3]>>,
+    /// `motion_vector_resolution_control_idc`.
+    pub mv_resolution_control_idc: u32,
+    /// `intra_boundary_filtering_disabled_flag`.
+    pub intra_boundary_filtering_disabled: bool,
 }
 
 impl Sps {
@@ -681,6 +704,24 @@ impl Sps {
     /// `cabac_bypass_alignment_enabled_flag`.
     pub fn cabac_bypass_alignment(&self) -> bool {
         self.rext(8)
+    }
+
+    /// `palette_mode_enabled_flag` (false without the SCC extension).
+    pub fn palette_mode(&self) -> bool {
+        self.scc.as_ref().is_some_and(|s| s.palette_mode)
+    }
+
+    /// `intra_boundary_filtering_disabled_flag` (false without the SCC
+    /// extension).
+    pub fn intra_boundary_filtering_disabled(&self) -> bool {
+        self.scc
+            .as_ref()
+            .is_some_and(|s| s.intra_boundary_filtering_disabled)
+    }
+
+    /// `motion_vector_resolution_control_idc` (0 without the SCC extension).
+    pub fn mv_resolution_control_idc(&self) -> u32 {
+        self.scc.as_ref().map_or(0, |s| s.mv_resolution_control_idc)
     }
 
     /// Whether the picture decodes on the wide pipeline: `i32`
@@ -879,12 +920,14 @@ impl Sps {
             None
         };
         let mut range_ext = None;
+        let mut scc = None;
         if r.flag() {
-            // sps_extension_present_flag
+            // sps_extension_present_flag: the extensions follow in the
+            // order of their flags (7.3.2.2.1).
             let range = r.flag();
-            let _multilayer = r.flag();
-            let _3d = r.flag();
-            let _scc = r.flag();
+            let multilayer = r.flag();
+            let ext_3d = r.flag();
+            let scc_flag = r.flag();
             r.bits(4); // sps_extension_4bits
             if range {
                 let mut f = [false; 9];
@@ -893,8 +936,28 @@ impl Sps {
                 }
                 range_ext = Some(f);
             }
-            // Other extensions are not parsed; the flags above suffice to
-            // refuse them.
+            if multilayer {
+                // sps_multilayer_extension() (F.7.3.2.2.4): one flag, which
+                // only inter-layer prediction reads.
+                r.flag(); // inter_view_mv_vert_constraint_flag
+            }
+            if ext_3d && scc_flag {
+                // sps_3d_extension() (I.7.3.2.2.5) is not parsed, so the
+                // SCC extension behind it cannot be found.
+                return Err(Error::unsupported(
+                    "SPS 3D extension followed by the SCC extension",
+                ));
+            }
+            if scc_flag && !ext_3d {
+                scc = Some(parse_sps_scc(
+                    &mut r,
+                    chroma_format_idc,
+                    bit_depth_luma,
+                    bit_depth_chroma,
+                )?);
+            }
+            // Anything after (sps_extension_4bits data, or the 3D
+            // extension when nothing follows it) is not needed.
         }
         r.finish("SPS")?;
         Ok(Sps {
@@ -932,8 +995,64 @@ impl Sps {
             strong_intra_smoothing,
             vui,
             range_ext,
+            scc,
         })
     }
+}
+
+/// `sps_scc_extension()` (7.3.2.2.3), with the 7.4.3.2.3 ranges this
+/// decoder relies on.
+fn parse_sps_scc(
+    r: &mut BitReader,
+    chroma_format_idc: u32,
+    bit_depth_luma: u32,
+    bit_depth_chroma: u32,
+) -> Result<SpsScc> {
+    let mut s = SpsScc {
+        curr_pic_ref: r.flag(),
+        palette_mode: r.flag(),
+        ..SpsScc::default()
+    };
+    if s.palette_mode {
+        s.palette_max_size = r.ue();
+        let delta = r.ue();
+        // Annex A caps them at 64 / 128; anything far beyond is not a
+        // palette this decoder should allocate for.
+        if s.palette_max_size > 64 || delta > 128 {
+            return Err(Error::bitstream("palette_max_size out of range"));
+        }
+        s.palette_max_predictor_size = s.palette_max_size + delta;
+        if r.flag() {
+            // sps_palette_predictor_initializers_present_flag
+            let n = r.ue() as usize + 1;
+            if n > s.palette_max_predictor_size as usize {
+                return Err(Error::bitstream(
+                    "sps_num_palette_predictor_initializers out of range",
+                ));
+            }
+            let num_comps = if chroma_format_idc == 0 { 1 } else { 3 };
+            let mut init = vec![[0u16; 3]; n];
+            for comp in 0..num_comps {
+                let bits = if comp == 0 {
+                    bit_depth_luma
+                } else {
+                    bit_depth_chroma
+                };
+                for e in init.iter_mut() {
+                    e[comp] = r.bits(bits) as u16;
+                }
+            }
+            s.palette_init = Some(init);
+        }
+    }
+    s.mv_resolution_control_idc = r.bits(2);
+    if s.mv_resolution_control_idc == 3 {
+        return Err(Error::bitstream(
+            "motion_vector_resolution_control_idc is 3 (reserved)",
+        ));
+    }
+    s.intra_boundary_filtering_disabled = r.flag();
+    Ok(s)
 }
 
 #[cfg(test)]

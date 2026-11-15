@@ -43,6 +43,7 @@ use super::mvpred::RefCtx;
 use super::pic::{Geometry, PicInfo, PicInfoPool, SliceFilterParams};
 use super::pps::Pps;
 use super::sao::{SaoBand, sao_ctb_row};
+use super::scc::SccDec;
 use super::slice::{SliceHeader, SliceType, nal_type};
 use super::sps::{ScalingList, Sps, Vps};
 
@@ -140,6 +141,14 @@ struct PicShared<S: Sample> {
     /// A row completed while another thread held `filters`.
     filter_pending: AtomicBool,
     frames: FramePool<S>,
+    /// `pps_curr_pic_ref_enabled_flag`: the picture's own samples before
+    /// the in-loop filters, for its blocks that predict from it (8.1.3:
+    /// "the current decoded picture before the invocation of the in-loop
+    /// filter process"). Every coding unit is copied here as soon as it is
+    /// reconstructed, by the task that decoded it — the same disjoint-region
+    /// discipline as the frame — so the row filters can trail the decode as
+    /// usual. Allocated with the frame, returned to the pool at the tail.
+    ibc: UnsafeCell<Option<Frame<S>>>,
     deblock: bool,
     sao: bool,
     trace: TraceCfg,
@@ -538,6 +547,10 @@ fn run_substream<S: Sample>(
         lists[0].iter().map(|e| e.long_term).collect(),
         lists[1].iter().map(|e| e.long_term).collect(),
     ];
+    let is_cur: [Vec<bool>; 2] = [
+        lists[0].iter().map(|e| e.cur).collect(),
+        lists[1].iter().map(|e| e.cur).collect(),
+    ];
     let no_backward_pred = pocs[0].iter().chain(pocs[1].iter()).all(|&p| p <= pic.poc);
     let (col, col_shared) = if ind.temporal_mvp_enabled && ind.slice_type != SliceType::I {
         let list = if ind.slice_type == SliceType::B && !ind.collocated_from_l0 {
@@ -546,6 +559,11 @@ fn run_substream<S: Sample>(
             0
         };
         match lists[list].get(ind.collocated_ref_idx as usize) {
+            Some(e) if e.cur => {
+                return Err(Error::bitstream(
+                    "the collocated picture is the current picture",
+                ));
+            }
             Some(e) => (Some(unsafe { e.frame.get() }), Some(&*e.frame)),
             None => return Err(Error::bitstream("collocated_ref_idx out of range")),
         }
@@ -571,6 +589,7 @@ fn run_substream<S: Sample>(
         ctb_addr_ts == 0 || info.tile_id_ts[ctb_addr_ts] != info.tile_id_ts[ctb_addr_ts - 1];
     let row_start = pps.entropy_coding_sync && ctb_addr_rs % wc == tile_col_start(ctb_addr_rs);
     let mut cx = Contexts::new(init_type, ind.slice_qp);
+    cx.palette = super::scc::palette_predictor_init(sps, pps);
     let mut first_qg = true;
     let mut qp_prev_init = ind.slice_qp;
     if first_in_tile {
@@ -654,6 +673,15 @@ fn run_substream<S: Sample>(
         intra: IntraScratch::default(),
         warnings: 0,
         trace: pic.trace,
+        scc: SccDec {
+            // SAFETY: the unfiltered copy follows the frame's discipline —
+            // each task writes the coding units it decodes and reads only
+            // blocks decoded before them (8.5.3.2.1's constraints).
+            ibc: unsafe { (*pic.ibc.get()).as_mut() },
+            is_cur,
+            two_versions: pps.two_versions_of_curr_dec_pic(sps),
+            ..SccDec::default()
+        },
     };
 
     let result = (|| -> Result<()> {
@@ -1060,6 +1088,10 @@ fn finish_picture_tasks<S: Sample>(pic: &PicShared<S>) {
         let mut f = pic.filters.lock().unwrap();
         f.finish(pic, frame, info);
     }
+    // SAFETY: as above, no task is left to read the unfiltered copy.
+    if let Some(m) = unsafe { (*pic.ibc.get()).take() } {
+        pic.frames.give(m);
+    }
     frame.poc = pic.poc;
     pic.frame.progress.finish();
     if prof::enabled() {
@@ -1431,6 +1463,17 @@ impl<S: Sample> HevcDecoderImpl<S> {
                 f.colour_plane = pic.sps.separate_colour_plane;
                 *frame = f;
             }
+            if pic.pps.curr_pic_ref() {
+                let m = self.frames.take(
+                    pic.sps.width as usize,
+                    pic.sps.height as usize,
+                    pic.sps.chroma_format(),
+                    pic.sps.bit_depth_luma,
+                    pic.sps.bit_depth_chroma,
+                );
+                // SAFETY: no task of the picture runs yet.
+                unsafe { *pic.ibc.get() = Some(m) };
+            }
             cur.buffers_ready = true;
         }
         // Slice bookkeeping (main thread, before any task of it runs).
@@ -1622,7 +1665,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
         let chroma = sps.chroma_format();
         let crop = sps.conf_win;
         let idr = nal_type::is_idr(t);
-        let sets = self.dpb.apply_rps(
+        let mut sets = self.dpb.apply_rps(
             hdr,
             &sps,
             poc,
@@ -1633,15 +1676,28 @@ impl<S: Sample> HevcDecoderImpl<S> {
             self.decode_index,
             crop,
         );
+        let two_versions = pps.two_versions_of_curr_dec_pic(&sps);
         if irap && self.no_rasl_output && !first_pic {
             let no_output = if t == nal_type::CRA {
                 true
             } else {
                 hdr.no_output_of_prior_pics
             };
-            self.dpb.before_decode(true, no_output);
+            self.dpb.before_decode(true, no_output, two_versions);
         } else {
-            self.dpb.before_decode(false, false);
+            self.dpb.before_decode(false, false, two_versions);
+        }
+        if pps.curr_pic_ref() {
+            // The current picture in its own reference lists (8.3.4),
+            // marked long-term while it is decoded (8.1.3). Its samples are
+            // read from `PicShared::ibc`, never through this entry's frame,
+            // which only stands in for it.
+            sets.curr_pic = Some(super::dpb::RefEntry {
+                frame: Arc::new(SharedFrame::new(Frame::empty(), poc, 0, true)),
+                poc,
+                long_term: true,
+                cur: true,
+            });
         }
         let pic_output = hdr.pic_output;
 
@@ -1748,6 +1804,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
             }),
             filter_pending: AtomicBool::new(false),
             frames: self.frames.clone(),
+            ibc: UnsafeCell::new(None),
             deblock: self.deblock,
             sao: self.sao,
             trace: TraceCfg::from_env(),

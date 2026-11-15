@@ -20,6 +20,7 @@ use super::residual::{
     residual_scan_idx, rotate_residual4, scale_coefficients, scale_coefficients_i32,
     transform_skip_residual, transform_skip_residual_i32,
 };
+use super::scc::SccDec;
 use super::slice::{PredWeightTable, SliceHeader, SliceType};
 use super::sps::{ScalingList, Sps};
 use crate::dsp::hevc::{HevcDsp, add_residual_wide, idct_wide, idst4_wide};
@@ -187,6 +188,9 @@ pub struct SliceDec<'a, S: Sample = u16> {
     pub warnings: u64,
     /// Debug tracing (from the `H26X_TRACE_*` environment variables).
     pub trace: TraceCfg,
+    /// Screen content coding state (palette, current-picture reference,
+    /// adaptive colour transform).
+    pub scc: SccDec<'a, S>,
 }
 
 /// What to print while decoding (debugging aid; all off by default).
@@ -529,6 +533,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let intra;
         let mut part_mode = PartMode::P2Nx2N;
         let mut pcm = false;
+        let mut palette = false;
         if skip {
             intra = false;
         } else {
@@ -537,7 +542,12 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             } else {
                 true
             };
-            if !intra || log2_cb == self.sps.log2_min_cb_size {
+            // palette_mode_flag (7.3.8.5): intra CUs no larger than the
+            // largest transform block.
+            if intra && self.sps.palette_mode() && log2_cb <= self.sps.log2_max_tb_size {
+                palette = bin(&mut self.cabac, &mut self.cx, PALETTE_MODE_FLAG_OFFSET) != 0;
+            }
+            if !palette && (!intra || log2_cb == self.sps.log2_min_cb_size) {
                 part_mode = self.parse_part_mode(intra, log2_cb)?;
             }
         }
@@ -568,7 +578,20 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let mut intra_modes = [1u32; 4];
         let mut chroma_mode_syntax = [0u32; 4];
         let cat = self.sps.chroma_array_type();
-        if intra {
+        if palette {
+            self.palette_coding(x0, y0, log2_cb, bypass)?;
+            // A palette CU has no intra prediction mode; its neighbours'
+            // MPM derivation (8.4.2) reads it as INTRA_DC, as for PCM.
+            PicInfo::fill4(
+                &mut self.info.intra_mode,
+                w4,
+                x0 as usize,
+                y0 as usize,
+                cw,
+                ch,
+                1,
+            );
+        } else if intra {
             if part_mode == PartMode::P2Nx2N
                 && self.sps.pcm_enabled
                 && log2_cb >= self.sps.pcm.2
@@ -662,7 +685,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
 
         // Residual.
         let mut rqt_root_cbf = true;
-        if !pcm {
+        if !pcm && !palette {
             if !intra && !(part_mode == PartMode::P2Nx2N && self.last_pu_merged) && !skip {
                 rqt_root_cbf =
                     bin(&mut self.cabac, &mut self.cx, NO_RESIDUAL_DATA_FLAG_OFFSET) != 0;
@@ -708,7 +731,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
 
         if self.trace.cu {
             eprintln!(
-                "cu poc={} x={} y={} n={} intra={} skip={} pcm={} bypass={} qp={} part={:?} modes={:?} csyn={:?}",
+                "cu poc={} x={} y={} n={} intra={} skip={} pcm={} palette={} bypass={} qp={} part={:?} modes={:?} csyn={:?}",
                 self.refs.cur_poc,
                 x0,
                 y0,
@@ -716,6 +739,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 intra,
                 skip,
                 pcm,
+                palette,
                 bypass,
                 self.qp_y,
                 part_mode,
@@ -733,7 +757,12 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             ch,
             self.qp_y as i8,
         );
-        let exempt = ((pcm && self.sps.pcm.4) as u8) | ((bypass as u8) << 1) | (bypass as u8);
+        // Bit 2: deblocking leaves a palette CU's samples alone (8.7.2.5.7 /
+        // 8.7.2.5.8), SAO does not.
+        let exempt = ((pcm && self.sps.pcm.4) as u8)
+            | ((bypass as u8) << 1)
+            | (bypass as u8)
+            | ((palette as u8) << 2);
         if exempt != 0 {
             PicInfo::fill4(
                 &mut self.info.filter_exempt,
@@ -767,6 +796,9 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         for xx in (x0 as usize..(x0 as usize + cw)).step_by(4) {
             let i = self.info.idx4(xx, y0 as usize);
             self.info.edges[i] |= 4;
+        }
+        if self.scc.ibc.is_some() {
+            self.ibc_store(x0 as usize, y0 as usize, cw, ch);
         }
         Ok(())
     }
@@ -1014,13 +1046,52 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                         c.ref_idx[list],
                         mvp_flags[list],
                     );
-                    // uLX = (mvpLX + mvdLX + 2^16) % 2^16 -> wrapping i16 add.
-                    c.mv[list] = Mv::new(
-                        mvp.x.wrapping_add(mvds[list].x),
-                        mvp.y.wrapping_add(mvds[list].y),
-                    );
+                    let ri = c.ref_idx[list] as usize;
+                    c.mv[list] = if self.hdr.use_integer_mv || self.scc.is_cur(list, ri) {
+                        // 8-98 – 8-101: whole-sample vectors, the
+                        // difference in whole samples.
+                        let f = |p: i16, d: i16| ((((p as i32) >> 2) + d as i32) << 2) as i16;
+                        Mv::new(f(mvp.x, mvds[list].x), f(mvp.y, mvds[list].y))
+                    } else {
+                        // uLX = (mvpLX + mvdLX + 2^16) % 2^16 -> wrapping i16 add.
+                        Mv::new(
+                            mvp.x.wrapping_add(mvds[list].x),
+                            mvp.y.wrapping_add(mvds[list].y),
+                        )
+                    };
                 }
                 cand = c;
+            }
+        }
+        let mut cand = cand;
+        if merged {
+            // 8-124 / 8-125: merged vectors to whole samples.
+            for list in 0..2 {
+                let ri = cand.ref_idx[list];
+                if ri >= 0 && (self.hdr.use_integer_mv || self.scc.is_cur(list, ri as usize)) {
+                    let mv = cand.mv[list];
+                    cand.mv[list] = Mv::new((mv.x >> 2) << 2, (mv.y >> 2) << 2);
+                }
+            }
+        }
+        // 8.5.3.2.1: an 8x8 bi-prediction with no whole-sample vector and
+        // two different motions drops list 1 when the current picture has
+        // two versions. The clause sizes the block as nPbSw x nPbSh from
+        // the CU size and PartMode (8-86 / 8-87), which would also catch
+        // the 16x16 AMP partitions; the conformance stream that exercises
+        // the rule (Bipred_8by8_A, every picture hash) decodes only with
+        // the prediction block's own size, 8x8.
+        if cand.ref_idx[0] >= 0 && cand.ref_idx[1] >= 0 && self.scc.two_versions && w == 8 && h == 8
+        {
+            // noIntegerMvFlag (8-102): neither vector whole-sample.
+            let whole = |mv: Mv| mv.x & 3 == 0 && mv.y & 3 == 0;
+            let no_integer = !(whole(cand.mv[0]) || whole(cand.mv[1]));
+            // identicalMvs (8-103).
+            let poc = |l: usize| self.refs.pocs[l].get(cand.ref_idx[l] as usize).copied();
+            let identical = cand.mv[0] == cand.mv[1] && poc(0) == poc(1);
+            if no_integer && !identical {
+                cand.ref_idx[1] = -1;
+                cand.mv[1] = Mv::ZERO;
             }
         }
         self.last_pu_merged = merged;
@@ -1065,7 +1136,9 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         // (8-tap luma: 3 above / 4 below; 4-tap chroma: 1 / 2, in luma rows).
         let pic_h = self.frame.height as i32;
         for list in 0..2 {
-            if cand.ref_idx[list] < 0 {
+            if cand.ref_idx[list] < 0 || self.scc.is_cur(list, cand.ref_idx[list] as usize) {
+                // The current picture's own samples are there already
+                // (8.5.3.2.1's availability constraints).
                 continue;
             }
             let mv = cand.mv[list];
@@ -1099,16 +1172,21 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 self.refs.cur_poc, cand.mv, cand.ref_idx, mi.ref_delta, weighting
             );
         }
-        let f0 = if cand.ref_idx[0] >= 0 {
-            Some((self.ref_frames[0][cand.ref_idx[0] as usize], cand.mv[0]))
-        } else {
-            None
+        // A reference that is the current picture reads its unfiltered copy.
+        let ibc: Option<&Frame<S>> = self.scc.ibc.as_deref();
+        let pick = |list: usize| -> Option<(&Frame<S>, Mv)> {
+            let ri = cand.ref_idx[list];
+            if ri < 0 {
+                return None;
+            }
+            let f = if self.scc.is_cur(list, ri as usize) {
+                ibc?
+            } else {
+                self.ref_frames[list][ri as usize]
+            };
+            Some((f, cand.mv[list]))
         };
-        let f1 = if cand.ref_idx[1] >= 0 {
-            Some((self.ref_frames[1][cand.ref_idx[1] as usize], cand.mv[1]))
-        } else {
-            None
-        };
+        let (f0, f1) = (pick(0), pick(1));
         // Blocks may extend past the picture edge (the last CTB row/col);
         // predict the whole PB — the border absorbs it.
         if self.wide {
@@ -1437,79 +1515,37 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             }
         }
         let cbf_chroma = cbf_c[0][0] || cbf_c[1][0] || cbf_c[0][1] || cbf_c[1][1];
-        if (cbf_luma || cbf_chroma) && self.pps.cu_qp_delta_enabled && !self.is_cu_qp_delta_coded {
-            // cu_qp_delta_abs / sign.
-            let mut prefix = 0u32;
-            let mut ctx = CU_QP_DELTA_OFFSET;
-            while prefix < 5 && bin(&mut self.cabac, &mut self.cx, ctx) != 0 {
-                prefix += 1;
-                ctx = CU_QP_DELTA_OFFSET + 1;
-            }
-            let mut val = prefix as i32;
-            if prefix >= 5 {
-                let mut k = 0u32;
-                let mut v = 0i32;
-                loop {
-                    if self.cabac.bypass() != 0 {
-                        v += 1 << k;
-                        k += 1;
-                        if k > 24 {
-                            return Err(Error::bitstream("cu_qp_delta runaway"));
-                        }
+        let mut act = false;
+        if cbf_luma || cbf_chroma {
+            // tu_residual_act_flag (7.3.8.10): inter CUs, and intra CUs
+            // whose chroma follows luma (intra_chroma_pred_mode 4 in every
+            // prediction block).
+            if self.pps.act()
+                && (!cu.intra
+                    || if cu.intra_split {
+                        cu.chroma_syntax.iter().all(|&m| m == 4)
                     } else {
-                        break;
-                    }
-                }
-                v += self.cabac.bypass_bits(k) as i32;
-                val += v;
+                        cu.chroma_syntax[0] == 4
+                    })
+            {
+                act = bin(&mut self.cabac, &mut self.cx, TU_RESIDUAL_ACT_FLAG_OFFSET) != 0;
             }
-            if val != 0 && self.cabac.bypass() != 0 {
-                val = -val;
+            self.delta_qp(cu.x0, cu.y0)?;
+            if cbf_chroma && !cu.bypass {
+                self.chroma_qp_offset();
             }
-            self.is_cu_qp_delta_coded = true;
-            self.cu_qp_delta_val = val;
-            let bd_off = 6 * (self.sps.bit_depth_luma as i32 - 8);
-            if val < -(26 + bd_off / 2) || val > 25 + bd_off / 2 {
-                return Err(Error::bitstream("CuQpDeltaVal out of range"));
-            }
-            self.set_qp(cu.x0, cu.y0);
-        }
-        // cu_chroma_qp_offset_flag / _idx (range extension chroma QP offset lists).
-        if self.hdr.cu_chroma_qp_offset_enabled
-            && cbf_chroma
-            && !cu.bypass
-            && !self.is_cu_chroma_qp_offset_coded
-        {
-            let flag = bin(
-                &mut self.cabac,
-                &mut self.cx,
-                CU_CHROMA_QP_OFFSET_FLAG_OFFSET,
-            ) != 0;
-            let mut idx = 0usize;
-            let len = self.pps.chroma_qp_offset_lists.len();
-            if flag && len > 1 {
-                // TR, cMax = len - 1, all bins one context.
-                while idx + 1 < len
-                    && bin(
-                        &mut self.cabac,
-                        &mut self.cx,
-                        CU_CHROMA_QP_OFFSET_IDX_OFFSET,
-                    ) != 0
-                {
-                    idx += 1;
-                }
-            }
-            self.cu_qp_offset_c = if flag {
-                [
-                    self.pps.chroma_qp_offset_lists[idx].0,
-                    self.pps.chroma_qp_offset_lists[idx].1,
-                ]
-            } else {
-                [0, 0]
-            };
-            self.is_cu_chroma_qp_offset_coded = true;
         }
 
+        // Adaptive colour transform (4:4:4 only): the TU's three residuals
+        // are gathered, transformed together (8.6.8) and only then added.
+        if act {
+            let nn = n * n;
+            for b in self.scc.act_res.iter_mut() {
+                b.clear();
+                b.resize(nn, 0);
+            }
+        }
+        self.scc.act_capture = act;
         // Luma: intra prediction (per TB) then residual.
         if cu.intra {
             let mode = self.info.intra_mode[self.info.idx4(x0 as usize, y0 as usize)] as u32;
@@ -1593,8 +1629,92 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 }
             }
         }
+        if act {
+            self.scc.act_capture = false;
+            self.act_reconstruct(x0 as usize, y0 as usize, n, cu.bypass);
+        }
         let _ = depth;
         Ok(())
+    }
+
+    /// `delta_qp()` (7.3.8.14) for the CU at `(x_cu, y_cu)`: the QP delta
+    /// once per quantisation group, and the CU's `QpY` re-derived with it.
+    pub(crate) fn delta_qp(&mut self, x_cu: i32, y_cu: i32) -> Result<()> {
+        if !self.pps.cu_qp_delta_enabled || self.is_cu_qp_delta_coded {
+            return Ok(());
+        }
+        // cu_qp_delta_abs / sign.
+        let mut prefix = 0u32;
+        let mut ctx = CU_QP_DELTA_OFFSET;
+        while prefix < 5 && bin(&mut self.cabac, &mut self.cx, ctx) != 0 {
+            prefix += 1;
+            ctx = CU_QP_DELTA_OFFSET + 1;
+        }
+        let mut val = prefix as i32;
+        if prefix >= 5 {
+            let mut k = 0u32;
+            let mut v = 0i32;
+            loop {
+                if self.cabac.bypass() != 0 {
+                    v += 1 << k;
+                    k += 1;
+                    if k > 24 {
+                        return Err(Error::bitstream("cu_qp_delta runaway"));
+                    }
+                } else {
+                    break;
+                }
+            }
+            v += self.cabac.bypass_bits(k) as i32;
+            val += v;
+        }
+        if val != 0 && self.cabac.bypass() != 0 {
+            val = -val;
+        }
+        self.is_cu_qp_delta_coded = true;
+        self.cu_qp_delta_val = val;
+        let bd_off = 6 * (self.sps.bit_depth_luma as i32 - 8);
+        if val < -(26 + bd_off / 2) || val > 25 + bd_off / 2 {
+            return Err(Error::bitstream("CuQpDeltaVal out of range"));
+        }
+        self.set_qp(x_cu, y_cu);
+        Ok(())
+    }
+
+    /// `chroma_qp_offset()` (7.3.8.15): the range extension's chroma QP
+    /// offset list entry, once per chroma QP offset group.
+    pub(crate) fn chroma_qp_offset(&mut self) {
+        if !self.hdr.cu_chroma_qp_offset_enabled || self.is_cu_chroma_qp_offset_coded {
+            return;
+        }
+        let flag = bin(
+            &mut self.cabac,
+            &mut self.cx,
+            CU_CHROMA_QP_OFFSET_FLAG_OFFSET,
+        ) != 0;
+        let mut idx = 0usize;
+        let len = self.pps.chroma_qp_offset_lists.len();
+        if flag && len > 1 {
+            // TR, cMax = len - 1, all bins one context.
+            while idx + 1 < len
+                && bin(
+                    &mut self.cabac,
+                    &mut self.cx,
+                    CU_CHROMA_QP_OFFSET_IDX_OFFSET,
+                ) != 0
+            {
+                idx += 1;
+            }
+        }
+        self.cu_qp_offset_c = if flag {
+            [
+                self.pps.chroma_qp_offset_lists[idx].0,
+                self.pps.chroma_qp_offset_lists[idx].1,
+            ]
+        } else {
+            [0, 0]
+        };
+        self.is_cu_chroma_qp_offset_coded = true;
     }
 
     /// Intra prediction of one transform block of component `c_idx` at
@@ -1628,7 +1748,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let strong = self.sps.strong_intra_smoothing;
         let filter = (c_idx == 0 || self.sps.chroma_array_type() == 3)
             && !self.sps.intra_smoothing_disabled();
-        let boundary_filter = c_idx == 0 && !(self.sps.implicit_rdpcm() && bypass);
+        // disableIntraBoundaryFilter (8.4.4.2.6), and
+        // intra_boundary_filtering_disabled_flag for DC too (8.4.4.2.5).
+        let boundary_filter = c_idx == 0
+            && !(self.sps.implicit_rdpcm() && bypass)
+            && !self.sps.intra_boundary_filtering_disabled();
         // Borrow the side data on its own so the scratch, which lives beside
         // it, stays reachable.
         let info: &PicInfo = self.info;
@@ -1732,6 +1856,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             for (r, &l) in coeffs[..n * n].iter_mut().zip(&self.luma_res_wide) {
                 *r = ((res_scale as i64 * (((l as i64) << bdc) >> bdy)) >> 3) as i32;
             }
+            if self.scc.act_capture {
+                self.scc.act_res[c_idx].copy_from_slice(&coeffs[..n * n]);
+                self.coeffs_wide = coeffs;
+                return;
+            }
             let plane = if c_idx == 1 {
                 &mut self.frame.cb
             } else {
@@ -1758,6 +1887,13 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         let (bdy, bdc) = (self.sps.bit_depth_luma, self.sps.bit_depth_chroma);
         for (r, &l) in coeffs[..n * n].iter_mut().zip(&self.luma_res) {
             *r = ((res_scale * (((l as i32) << bdc) >> bdy)) >> 3).clamp(-32768, 32767) as i16;
+        }
+        if self.scc.act_capture {
+            for (d, &v) in self.scc.act_res[c_idx].iter_mut().zip(&coeffs[..n * n]) {
+                *d = v as i32;
+            }
+            self.coeffs = coeffs;
+            return;
         }
         let bd = bdc;
         let max = (1i32 << bd) - 1;
@@ -1811,12 +1947,23 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             persistent_rice: self.sps.persistent_rice(),
             trace: self.trace.tb_hit(c_idx, x, y, n),
         };
-        // QP for the component.
+        // QP for the component (8.6.1 / 8.6.2); a TU under the adaptive
+        // colour transform takes the ACT offsets instead (8-285 – 8-291).
+        let act_off = |c: usize| -> i32 {
+            self.pps.scc.as_ref().map_or(0, |s| s.act_qp_offsets[c]) + self.hdr.act_qp_offsets[c]
+        };
         let qp = if c_idx == 0 {
-            self.qp_y + 6 * (self.sps.bit_depth_luma as i32 - 8)
+            let bd_off = 6 * (self.sps.bit_depth_luma as i32 - 8);
+            if self.scc.act_capture {
+                (self.qp_y + bd_off + act_off(0)).clamp(0, 51 + bd_off)
+            } else {
+                self.qp_y + bd_off
+            }
         } else {
             let bd_off_c = 6 * (self.sps.bit_depth_chroma as i32 - 8);
-            let off = if c_idx == 1 {
+            let off = if self.scc.act_capture {
+                act_off(c_idx)
+            } else if c_idx == 1 {
                 self.pps.cb_qp_offset + self.hdr.cb_qp_offset
             } else {
                 self.pps.cr_qp_offset + self.hdr.cr_qp_offset
@@ -1932,7 +2079,13 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 eprintln!("  pred {pred:?} res {res:?}");
             }
         }
-        (self.dsp.add_residual)(&mut plane.data[off..], stride, &coeffs, n, max);
+        if self.scc.act_capture {
+            for (d, &v) in self.scc.act_res[c_idx].iter_mut().zip(&coeffs[..n * n]) {
+                *d = v as i32;
+            }
+        } else {
+            (self.dsp.add_residual)(&mut plane.data[off..], stride, &coeffs, n, max);
+        }
         self.coeffs = coeffs;
         Ok(())
     }
@@ -2062,7 +2215,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 eprintln!("  pred {pred:?} res {res:?}");
             }
         }
-        add_residual_wide(&mut plane.data[off..], stride, &coeffs, n, max);
+        if self.scc.act_capture {
+            self.scc.act_res[c_idx].copy_from_slice(&coeffs[..n * n]);
+        } else {
+            add_residual_wide(&mut plane.data[off..], stride, &coeffs, n, max);
+        }
         self.coeffs_wide = coeffs;
         Ok(())
     }
@@ -4099,6 +4256,7 @@ mod write_round_trip {
             intra: IntraScratch::default(),
             warnings: 0,
             trace: TraceCfg::default(),
+            scc: Default::default(),
         };
         for ctb in 0..wc * hc {
             dec.decode_ctu(ctb, ctb).unwrap_or_else(|e| {
@@ -4417,6 +4575,7 @@ mod write_round_trip {
             intra: IntraScratch::default(),
             warnings: 0,
             trace: TraceCfg::default(),
+            scc: Default::default(),
         };
         for ctb in 0..wc * hc {
             dec.decode_ctu(ctb, ctb)
@@ -4856,6 +5015,7 @@ mod write_round_trip {
             intra: IntraScratch::default(),
             warnings: 0,
             trace: TraceCfg::default(),
+            scc: Default::default(),
         };
         for ctb in 0..wc * hc {
             dec.decode_ctu(ctb, ctb)

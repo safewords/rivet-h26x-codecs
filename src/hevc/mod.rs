@@ -19,6 +19,7 @@ pub(crate) mod pic;
 pub(crate) mod pps;
 pub(crate) mod residual;
 pub(crate) mod sao;
+pub(crate) mod scc;
 pub(crate) mod slice;
 pub(crate) mod sps;
 pub(crate) mod tables;

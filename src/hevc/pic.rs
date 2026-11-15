@@ -76,7 +76,8 @@ pub struct PicInfo {
     pub qp_y: Vec<i8>,
     /// Per 4x4: bit 0 = samples are exempt from the loop filters (pcm with
     /// `pcm_loop_filter_disabled_flag`, or `cu_transquant_bypass`); bit 1 =
-    /// `cu_transquant_bypass_flag` (for the deblocking nDp/nDq rule too).
+    /// `cu_transquant_bypass_flag` (for the deblocking nDp/nDq rule too);
+    /// bit 2 = exempt from deblocking only (`palette_mode_flag`).
     pub filter_exempt: Vec<u8>,
     /// Per 4x4: the luma transform block covering it has nonzero coefficients.
     pub cbf_luma: Vec<u8>,

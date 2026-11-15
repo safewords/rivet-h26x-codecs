@@ -188,6 +188,12 @@ pub struct SliceHeader {
     pub pred_weights: Option<PredWeightTable>,
     /// `MaxNumMergeCand`.
     pub max_num_merge_cand: u32,
+    /// `use_integer_mv_flag` (inferred from
+    /// `motion_vector_resolution_control_idc` when absent, 7.4.7.1).
+    pub use_integer_mv: bool,
+    /// `slice_act_y_qp_offset`, `slice_act_cb_qp_offset`,
+    /// `slice_act_cr_qp_offset` (0 when absent).
+    pub act_qp_offsets: [i32; 3],
     /// `SliceQpY`.
     pub slice_qp: i32,
     /// `slice_cb_qp_offset`.
@@ -410,6 +416,7 @@ impl SliceHeader {
         let mut collocated_ref_idx = 0;
         let mut pred_weights = None;
         let mut max_num_merge_cand = 5;
+        let mut use_integer_mv = sps.mv_resolution_control_idc() != 0;
         if slice_type != SliceType::I {
             num_ref_idx = [
                 pps.num_ref_idx_l0_default,
@@ -428,18 +435,10 @@ impl SliceHeader {
             if num_ref_idx[0] > 15 || num_ref_idx[1] > 15 {
                 return Err(Error::bitstream("num_ref_idx_active out of range"));
             }
-            // NumPicTotalCurr for the list modification bit width.
-            let mut num_pic_total_curr = 0u32;
-            for &(_, used) in st_rps.neg.iter().chain(st_rps.pos.iter()) {
-                if used {
-                    num_pic_total_curr += 1;
-                }
-            }
-            for e in &lt {
-                if e.used {
-                    num_pic_total_curr += 1;
-                }
-            }
+            // NumPicTotalCurr (7-57) for the list modification bit width;
+            // the current picture counts when it may reference itself.
+            let num_pic_total_curr =
+                num_pic_total_curr_minus_cur(&st_rps, &lt) + pps.curr_pic_ref() as u32;
             if pps.lists_modification_present && num_pic_total_curr > 1 {
                 let bits = 32 - (num_pic_total_curr - 1).leading_zeros();
                 if r.flag() {
@@ -484,11 +483,24 @@ impl SliceHeader {
             if (pps.weighted_pred && slice_type == SliceType::P)
                 || (pps.weighted_bipred && slice_type == SliceType::B)
             {
+                // Entries that are the current picture carry no weights
+                // (7.3.6.3: their POC is the current picture's).
+                let non_cur = num_pic_total_curr_minus_cur(&st_rps, &lt);
+                let cur = [0, 1].map(|l| {
+                    curr_pic_entries(
+                        l,
+                        num_ref_idx[l] as usize,
+                        non_cur as usize,
+                        pps.curr_pic_ref(),
+                        list_entry[l].as_deref(),
+                    )
+                });
                 pred_weights = Some(parse_pred_weight_table(
                     &mut r,
                     &sps,
                     slice_type,
                     num_ref_idx,
+                    &cur,
                 )?);
             }
             let five_minus = r.ue();
@@ -498,6 +510,9 @@ impl SliceHeader {
                 ));
             }
             max_num_merge_cand = 5 - five_minus;
+            if sps.mv_resolution_control_idc() == 2 {
+                use_integer_mv = r.flag();
+            }
         }
         let slice_qp = pps.init_qp + r.se();
         let qp_bd_offset = 6 * (sps.bit_depth_luma as i32 - 8);
@@ -509,6 +524,21 @@ impl SliceHeader {
         if pps.slice_chroma_qp_offsets_present {
             cb_qp_offset = r.se();
             cr_qp_offset = r.se();
+        }
+        let mut act_qp_offsets = [0i32; 3];
+        if pps
+            .scc
+            .as_ref()
+            .is_some_and(|s| s.slice_act_qp_offsets_present)
+        {
+            let base = pps.scc.as_ref().map_or([0; 3], |s| s.act_qp_offsets);
+            for (o, b) in act_qp_offsets.iter_mut().zip(base) {
+                *o = r.se();
+                // PpsActQpOffset + slice_act_*_qp_offset in -12..=12 (7.4.7.1).
+                if !(-12..=12).contains(&(*o + b)) {
+                    return Err(Error::bitstream("slice ACT QP offset out of range"));
+                }
+            }
         }
         let mut cu_chroma_qp_offset_enabled = false;
         if pps.chroma_qp_offset_list {
@@ -578,6 +608,8 @@ impl SliceHeader {
                 collocated_ref_idx,
                 pred_weights,
                 max_num_merge_cand,
+                use_integer_mv,
+                act_qp_offsets,
                 slice_qp,
                 cb_qp_offset,
                 cr_qp_offset,
@@ -593,6 +625,51 @@ impl SliceHeader {
             sps,
         ))
     }
+}
+
+/// `NumPicTotalCurr` (7-57) without the current picture's own entry: the
+/// short-term and long-term pictures the current picture uses.
+pub(crate) fn num_pic_total_curr_minus_cur(st_rps: &StRps, lt: &[LtEntry]) -> u32 {
+    let st = st_rps
+        .neg
+        .iter()
+        .chain(st_rps.pos.iter())
+        .filter(|&&(_, used)| used)
+        .count();
+    (st + lt.iter().filter(|e| e.used).count()) as u32
+}
+
+/// Which entries of `RefPicList{list}` are the current picture (8.3.4).
+///
+/// `RefPicListTemp` repeats the `non_cur` short- and long-term pictures
+/// followed, when `pps_curr_pic_ref_enabled_flag`, by the current picture
+/// (8-8 / 8-10), so position `i` is the current picture exactly when
+/// `i % (non_cur + 1) == non_cur`; the list picks positions `i` or
+/// `list_entry_lX[i]`, and without a modification of list 0 its last entry
+/// becomes the current picture when the temporary list was longer (8-9).
+/// The pictures themselves are no different between lists, so only the
+/// positions matter — which is what `pred_weight_table()` needs before
+/// the DPB has resolved any picture, and what the DPB's lists agree with.
+pub(crate) fn curr_pic_entries(
+    list: usize,
+    num_ref_idx: usize,
+    non_cur: usize,
+    curr_pic_ref: bool,
+    list_entry: Option<&[u32]>,
+) -> Vec<bool> {
+    let mut out = vec![false; num_ref_idx];
+    if !curr_pic_ref {
+        return out;
+    }
+    for (i, o) in out.iter_mut().enumerate() {
+        let idx = list_entry.map_or(i, |e| e.get(i).copied().unwrap_or(0) as usize);
+        *o = idx % (non_cur + 1) == non_cur;
+    }
+    let num_temp = num_ref_idx.max(non_cur + 1);
+    if list == 0 && list_entry.is_none() && num_temp > num_ref_idx && num_ref_idx > 0 {
+        out[num_ref_idx - 1] = true;
+    }
+    out
 }
 
 fn pic_size_is_one(sps: &Sps) -> bool {
@@ -643,6 +720,7 @@ fn parse_pred_weight_table(
     sps: &Sps,
     slice_type: SliceType,
     num_ref_idx: [u32; 2],
+    is_cur: &[Vec<bool>; 2],
 ) -> Result<PredWeightTable> {
     let luma_log2_denom = r.ue();
     if luma_log2_denom > 7 {
@@ -674,12 +752,13 @@ fn parse_pred_weight_table(
         let n = num_ref_idx[l] as usize;
         let mut luma_flags = vec![false; n];
         let mut chroma_flags = vec![false; n];
-        for f in luma_flags.iter_mut() {
-            *f = r.flag();
+        // Entries naming the current picture carry no flags (inferred 0).
+        for (f, &cur) in luma_flags.iter_mut().zip(&is_cur[l]) {
+            *f = !cur && r.flag();
         }
         if sps.chroma_array_type() != 0 {
-            for f in chroma_flags.iter_mut() {
-                *f = r.flag();
+            for (f, &cur) in chroma_flags.iter_mut().zip(&is_cur[l]) {
+                *f = !cur && r.flag();
             }
         }
         for i in 0..n {
