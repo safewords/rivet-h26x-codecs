@@ -1,7 +1,10 @@
-//! H.265 / HEVC decoding: Main / Main 10 / Main 12 and the format range
+//! H.265 / HEVC decoding: Main / Main 10 / Main 12, the format range
 //! extensions (4:0:0 – 4:4:4 at 8–16 bits, unequal luma / chroma depths,
-//! extended precision, CABAC bypass alignment — everything but separate
-//! colour planes), written from ITU-T H.265 (V11, 01/2026) with the same architecture as the
+//! extended precision, CABAC bypass alignment) and the screen content
+//! coding extensions (palette mode, prediction from the current picture,
+//! the adaptive colour transform, adaptive motion vector resolution; see
+//! the `scc` module for the combinations refused), written from ITU-T H.265
+//! (V11, 01/2026) with the same architecture as the
 //! H.264 half of the crate: parameter sets, slice segments, CTU parsing and
 //! reconstruction, deblocking + SAO, and an output-order DPB.
 
