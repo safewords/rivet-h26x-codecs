@@ -2961,11 +2961,12 @@ fn predict14<S: Sample>(
     }
 }
 
-/// The conventional Lagrangian `0.85 * 2^((QP − 12) / 3)`, in 8-bit SATD
-/// units — the intra module's constant, duplicated (see the module
-/// header). Callers multiply by `satd_lambda_scale` for deeper samples.
+/// The Lagrangian for a cost whose distortion is a SATD (or SAD): the
+/// square root of the SSD Lagrangian `0.85 * 2^((QP − 12) / 3)`
+/// ([`super::h265_intra::satd_lambda`]). Callers multiply by
+/// `satd_lambda_scale` for deeper samples.
 fn lambda(qp: i32) -> f32 {
-    0.85f32 * ((qp - 12) as f32 / 3.0).exp2()
+    super::h265_intra::satd_lambda(qp)
 }
 
 /// What a candidate shape costs to *signal*, in real bits.

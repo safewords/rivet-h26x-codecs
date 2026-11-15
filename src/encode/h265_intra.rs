@@ -1787,7 +1787,31 @@ fn mode_signalling_cost(qp: i32, signal: ModeSignal) -> f32 {
         ModeSignal::ChromaDerived => 1,
         ModeSignal::ChromaExplicit => 3,
     };
-    lambda_bits(qp, bins, 0)
+    satd_lambda(qp) * bins as f32
+}
+
+/// The Lagrangian for a cost whose distortion is a SATD or a SAD rather
+/// than an SSD: `sqrt(0.85 * 2^((QP - 12) / 3))`.
+///
+/// A distortion that is a sum of absolute differences grows linearly with
+/// the error where an SSD grows with its square, so the two cannot share a
+/// multiplier: at equal rate-distortion slope the SAD-domain one is the
+/// square root of the SSD-domain one (for a Laplacian residual the SSD of
+/// a block is about its SAD squared over its area, and differentiating
+/// that in the rate gives the root). This encoder priced every SATD
+/// against the SSD multiplier until 2026-11-15 — at QP 32 about 86 where
+/// 9.3 is right — which made a bit look nine times dearer than it is to
+/// the motion search, the merge-or-AMVP choice and the intra mode search,
+/// so motion stuck to its predictors and modes to the most probable ones.
+///
+/// Measured (one binary, the multiplier the only difference, 30 frames of
+/// foreman, mobile and akiyo CIF, QP 22-37, `--bframes 3 --refs 4
+/// --sao`, BD-rate against x265 `--preset medium --tune psnr`): luma
+/// +51.3% with the SSD multiplier, +31.0% with the root in the motion
+/// costs, +29.8% with it in the intra mode search as well. Scaling the root
+/// by 0.7, 1.4 and 2.0 gave +30.6, +29.9 and +31.1%: flat around 1.
+pub(crate) fn satd_lambda(qp: i32) -> f32 {
+    (0.85f32 * ((qp - 12) as f32 / 3.0).exp2()).sqrt()
 }
 
 /// How much a bit is worth against a SATD at `bit_depth` bits, relative
