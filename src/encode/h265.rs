@@ -301,12 +301,20 @@ struct Core<S: Sample> {
     /// reference's quantisation noise as residual however still the
     /// content is. `None` before the first picture.
     last_qp: Option<u8>,
+    /// The quantiser the last kept I or P picture was coded at: a B
+    /// picture under a bitrate is never planned finer than that
+    /// (`pick_picture_qp`).
+    last_anchor_qp: Option<u8>,
     geom: syn::Geometry,
     /// Reference pictures as the decoder holds them — full `Frame`s with
     /// their motion grids and extended borders, not cropped bytes: the
     /// inter decision predicts through the decoder's own MC, which reads
     /// padded planes, and derives candidates from stored motion.
     refs: Vec<crate::hevc::frame::Frame<S>>,
+    /// Each reference's half-sample luma planes, by POC, built once when
+    /// it is retained ([`super::h265_search::HalfPlanes`]); pruned with
+    /// `refs`.
+    half: Vec<(i32, std::sync::Arc<super::h265_search::HalfPlanes<S>>)>,
     /// The rate controller, when the configuration asked for a bitrate.
     /// `None` at a constant quantiser, which is the mode every other one
     /// is measured against.
@@ -675,6 +683,8 @@ impl<S: Sample> Core<S> {
             last_intra: 0,
             last_qp: None,
             refs: Vec::new(),
+            half: Vec::new(),
+            last_anchor_qp: None,
         })
     }
 
@@ -890,9 +900,13 @@ impl<S: Sample> Core<S> {
     fn commit(&mut self, c: &Coded, a: Attempt<S>, qp: u8) -> Access {
         self.recon.push(a.rec);
         self.last_qp = Some(qp);
+        if c.kind != Kind::B {
+            self.last_anchor_qp = Some(qp);
+        }
         self.census.by_kind[Census::slot(c.kind)].add(&a.census);
         if a.clears_refs {
             self.refs.clear();
+            self.half.clear();
         }
         self.retain_reference(c, a.frame);
         a.access
@@ -911,7 +925,7 @@ impl<S: Sample> Core<S> {
             }
             RateControl::Bitrate { .. } => {
                 let kind = pic_kind(c.kind);
-                if self.cfg.lookahead == 0 {
+                let planned = if self.cfg.lookahead == 0 {
                     self.rc
                         .as_mut()
                         .expect("a bitrate configuration builds a controller")
@@ -922,6 +936,26 @@ impl<S: Sample> Core<S> {
                         .as_mut()
                         .expect("a bitrate configuration builds a controller")
                         .pick_qp_ahead(kind, cost, &window)
+                };
+                // A B picture is never quantised finer than the anchors it
+                // predicts from. Its bits answer the quantiser least of any
+                // kind — on held content it is all skips at every
+                // quantiser down to the anchors' noise floor — so the
+                // controller's model of it, bits proportional to
+                // 2^(-QP/6), plans it far too fine as soon as it is
+                // measured cheap, and below the anchors' quantiser the
+                // unit decisions start paying for residual and intra the
+                // anchors already carry. The controller is told the
+                // quantiser actually used, so it learns from that.
+                match (c.kind, self.last_anchor_qp) {
+                    (Kind::B, Some(anchor)) if planned + B_BELOW_ANCHOR < anchor => {
+                        let floor = anchor - B_BELOW_ANCHOR;
+                        if let Some(rc) = self.rc.as_mut() {
+                            rc.note_recode(floor);
+                        }
+                        floor
+                    }
+                    _ => planned,
                 }
             }
         })
@@ -1387,6 +1421,13 @@ impl<S: Sample> Core<S> {
         if c.reference {
             frame.poc = c.poc;
             frame.extend_rows(0, frame.height);
+            self.half.push((
+                c.poc,
+                std::sync::Arc::new(super::h265_search::HalfPlanes::new(
+                    &frame.y,
+                    self.cfg.bit_depth,
+                )),
+            ));
             self.refs.push(frame);
             while self.refs.len() > self.refs_kept() {
                 let oldest = self
@@ -1398,6 +1439,8 @@ impl<S: Sample> Core<S> {
                     .expect("more references than kept, so at least one");
                 self.refs.remove(oldest);
             }
+            let kept: Vec<i32> = self.refs.iter().map(|f| f.poc).collect();
+            self.half.retain(|(p, _)| kept.contains(p));
         }
         debug_assert_eq!(
             self.refs.iter().map(|f| f.poc).collect::<Vec<_>>(),
@@ -1579,6 +1622,10 @@ impl<S: Sample> Core<S> {
         // the same field a decoder of this stream sizes its frames by.
         let mut pic = InterPicture::<S>::new(&sps, &pps, c.poc);
         pic.parts = self.cfg.inter_parts;
+        pic.half = self.half.clone();
+        let tune = super::h265_tune::Tune::of(&self.cfg);
+        pic.search_rings = tune.search_rings;
+        pic.rd_intra = tune.rd_intra;
 
         // Weighted prediction, for a P slice under `weighted_pred_flag` and
         // a B slice under `weighted_bipred_flag`: one entry per reference
@@ -2015,6 +2062,12 @@ impl<S: Sample> Core<S> {
 }
 
 /// The rate controller's kind for a scheduled picture.
+/// How far below its anchors' quantiser a B picture may be planned under
+/// a bitrate (`Core::pick_picture_qp`). At 0 the gate's monochrome
+/// detail clip underspent (0.49x of 64 kbit/s with lookahead and two B
+/// pictures); unbounded, the held clip overspent (2.31x).
+const B_BELOW_ANCHOR: u8 = 3;
+
 /// How many reference pictures the encoder holds: two for the B
 /// geometry, or as many past pictures as `max_refs` lets a P picture
 /// choose between, and under a B pyramid two anchors plus one picture of
@@ -2753,7 +2806,7 @@ fn write_tree<D: CodedUnit>(
 /// encoder is taken in (see `h265_me::Rate`).
 pub(crate) fn split_flag_bits(init_type: usize, qp: i32, split: bool) -> f32 {
     let mut cx = Contexts::new(init_type, qp);
-    let mut e = CabacEncoder::counting();
+    let mut e = CabacEncoder::estimating();
     write_split_cu_flag(
         &mut e,
         &mut cx,
@@ -2772,7 +2825,7 @@ pub(crate) fn split_flag_bits(init_type: usize, qp: i32, split: bool) -> f32 {
 /// quadtree's rate term, residual included.
 pub(crate) fn intra_cu_bits(d: &CuDecision, cat: u32, qp: i32, pps_bypass: bool) -> f32 {
     let mut cx = Contexts::new(0, qp);
-    let mut e = CabacEncoder::counting();
+    let mut e = CabacEncoder::estimating();
     write_cu_intra_i(&mut e, &mut cx, d, pps_bypass, cat, None);
     e.fractional_bits() as f32
 }
@@ -2791,7 +2844,7 @@ pub(crate) fn p_cu_bits(
     depth: u32,
 ) -> f32 {
     let mut cx = Contexts::new(if is_b { 2 } else { 1 }, qp);
-    let mut e = CabacEncoder::counting();
+    let mut e = CabacEncoder::estimating();
     match d {
         PCuDecision::Inter(d) => write_cu_inter(
             &mut e, &mut cx, d, None, None, cat, pps_bypass, None, nref, depth, is_b,
@@ -4900,6 +4953,13 @@ mod tests {
     /// shape costs is EXACTLY the number of bits `write_cu_inter` emits
     /// for it.
     ///
+    /// (Since 2026-11-15 both sides are priced by an *estimating* encoder,
+    /// `CabacEncoder::estimating`, which charges each bin its state's
+    /// average cost rather than tracking the arithmetic coder's range: the
+    /// property held here is that `Rate` prices exactly the bins the writer
+    /// spells, in exactly its contexts. `cabac_enc`'s tests hold the
+    /// estimate against the counted bits.)
+    ///
     /// This is the whole point of counting rather than estimating. The
     /// numbers it replaced — `tr_bins`, and an `mvd_cost` approximating
     /// exponential-Golomb as `5 + 2 * log2(a - 1)` — could not be checked
@@ -4927,7 +4987,7 @@ mod tests {
         // is short enough that the coder emits none of them.
         let emitted = |d: &InterCuDecision, qp: i32| -> f32 {
             let mut cx = Contexts::new(1, qp);
-            let mut e = CabacEncoder::counting();
+            let mut e = CabacEncoder::estimating();
             // The unit's `split_cu_flag`, which the tree walk writes
             // ahead of every unit above the minimum coding block, at the
             // neutral neighbour context `Rate` prices it in.
@@ -6723,6 +6783,20 @@ mod tests {
                 8,
                 0,
                 ConstantQp(30),
+                0.0,
+                2,
+            ),
+            // All-intra monochrome too: since inter pictures decide intra
+            // by coding it (2026-11-15) this clip's P pictures no longer
+            // take PART_NxN, and every format must spell it somewhere.
+            (
+                64,
+                64,
+                ChromaFormat::Monochrome,
+                8,
+                0,
+                0,
+                ConstantQp(26),
                 0.0,
                 2,
             ),

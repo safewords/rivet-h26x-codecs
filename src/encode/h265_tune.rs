@@ -45,6 +45,14 @@ pub(crate) struct Tune {
     /// pyramid or every B of a flat GOP; deeper layers take the last
     /// entry.
     pub b_qp_offset: [i32; 3],
+    /// How many times the full-sample motion search widens to square
+    /// rings at 4, 8 and 16 samples once its descent settles. Measured
+    /// 2026-11-15 (x265 parity, `--preset medium`): one widening -0.71%,
+    /// none -0.49%, three -0.73%, at 1.06x / 1.00x / 1.14x the CPU.
+    pub search_rings: u32,
+    /// Intra in inter pictures by coding it, under this cost gate
+    /// (`h265_me::InterPicture::rd_intra`), or by the flat-block proxy.
+    pub rd_intra: Option<f32>,
 }
 
 impl Tune {
@@ -52,6 +60,8 @@ impl Tune {
     pub const NEUTRAL: Tune = Tune {
         i_qp_offset: 0,
         b_qp_offset: [0; 3],
+        search_rings: 0,
+        rd_intra: Some(0.5),
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -67,6 +77,7 @@ impl Tune {
         Tune {
             i_qp_offset: -3,
             b_qp_offset: [2, 4, 5],
+            ..Tune::NEUTRAL
         }
     }
 

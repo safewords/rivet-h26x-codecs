@@ -248,6 +248,7 @@ use crate::encode::h265_intra::{
     code_cu_2nx2n_intra, code_cu_nxn_intra, cu_ssd, restore4, satd_lambda_scale, save4, ssd_lambda,
     sub_wh,
 };
+use crate::encode::h265_search;
 use crate::hevc::ctu::{
     PartMode, SplitCuNb, chroma_qp, explicit_weighting, write_cu_skip_flag, write_inter_pred_idc,
     write_merge_flag, write_merge_idx, write_mvd, write_mvp_flag, write_part_mode_inter,
@@ -641,6 +642,34 @@ pub struct InterPicture<S: Sample> {
     /// too when the two are close, and keeps the cheaper in SSD plus
     /// lambda times the bits of the whole CU.
     alts: Option<(PuPick, Option<PartsPick>)>,
+    /// The half-sample planes of the references, by POC, when the caller
+    /// has them (`h265_search::HalfPlanes`).
+    pub(crate) half: Vec<(i32, std::sync::Arc<h265_search::HalfPlanes<S>>)>,
+    /// How many times the full-sample search widens to its square rings
+    /// before it stops (`search_full`).
+    pub search_rings: u32,
+    /// The best vector each (list, reference) found at each coding-tree
+    /// depth, by the unit's position, for the units below it to start
+    /// from: a child's motion is most often its parent's.
+    seed_at: [[Option<(u32, u32, Mv)>; 16]; 4],
+    /// Whether a unit is offered intra by coding it (`Some`), or by the
+    /// flat-block proxy [`prefer_intra`] (`None`).
+    ///
+    /// Under `Some(gate)` every unit is decided inter first and then, unless
+    /// it is a skip or its cost per sample is below `gate` times lambda,
+    /// coded intra as well, the cheaper kept. Measured 2026-11-15 against
+    /// the proxy (x265 parity, 30 frames, `--preset medium`): the proxy
+    /// chose intra almost never, and coding intra where the inter unit kept
+    /// residual won 30-37% of those units on foreman and ducks — BD-rate
+    /// against x265 medium went from -0.49% to -3.46% (ducks +16.2 to
+    /// +10.9, foreman -6.7 to -12.4). Without the gate every unit tries:
+    /// -2.8% before the search work, at 1.7x the CPU; skips win intra 448
+    /// times in 338,000 trials and units under half a lambda per sample 896
+    /// in 235,000, which is what the gate leaves out (gate 1.0: -2.83%).
+    pub rd_intra: Option<f32>,
+    /// Set for one call of `code_whole`: predict, but code no residual —
+    /// the rate-distortion trial of a unit without its coefficients.
+    no_residual: bool,
     /// The picture descriptor the intra decision's availability and MPM
     /// mirrors read, built once from the SPS.
     geo: Geo,
@@ -731,6 +760,11 @@ impl<S: Sample> InterPicture<S> {
             split_depth: 1,
             parts: InterParts::None,
             alts: None,
+            no_residual: false,
+            rd_intra: None,
+            half: Vec::new(),
+            search_rings: 0,
+            seed_at: [[None; 16]; 4],
             geo: Geo::new(sps.log2_ctb_size, w, h, sps.chroma_array_type()),
             intra_scratch: IntraScratch::default(),
             scratch: McScratch::new(),
@@ -1048,9 +1082,29 @@ impl<S: Sample> InterPicture<S> {
                     .filter(|c| c.ref_idx[0] == r as i8)
                     .map(|c| c.mv[0]),
             );
-            let full = self.search_full(ctx, &rf.y, x0, y0, wh, src, y_stride, &seeds);
+            if let Some(p) = self.parent_seed(pu, 0, r) {
+                seeds.push(p);
+            }
+            let full = self.search_full(ctx, &rf.y, x0, y0, wh, src, y_stride, &seeds, lam, mvp[r]);
             let wp = self.wp_for(r)[0];
-            per_ref.push(self.refine_subpel(ctx, &rf.y, wp, 0, x0, y0, wh, src, y_stride, full));
+            let half = self.half_for(rf.poc);
+            let found = self.refine_subpel(
+                ctx,
+                &rf.y,
+                half.as_deref(),
+                wp,
+                0,
+                x0,
+                y0,
+                wh,
+                src,
+                y_stride,
+                full,
+                lam,
+                mvp[r],
+            );
+            self.note_seed(pu, 0, r, found.0);
+            per_ref.push(found);
         }
 
         // Cost the shapes. Merge candidates are scored at their exact
@@ -1373,6 +1427,9 @@ impl<S: Sample> InterPicture<S> {
             // Whole samples are searched on the weighted reference where the
             // list is weighted (`search_b`), the sub-sample rings below on
             // the reference itself under the weighted scoring.
+            if let Some(p) = self.parent_seed(pu, list, 0) {
+                seeds.push(p);
+            }
             let full = self.search_full(
                 ctx,
                 self.search_b[list].as_ref().unwrap_or(plane),
@@ -1382,12 +1439,30 @@ impl<S: Sample> InterPicture<S> {
                 src,
                 y_stride,
                 &seeds,
+                lam,
+                mvp[list],
             );
             // Scored under the weighting a one-list prediction from this
             // list carries, so the vector is chosen for the prediction
             // that will be made.
             let wp = self.wp_b[list][0];
-            uni[list] = self.refine_subpel(ctx, plane, wp, list, x0, y0, wh, src, y_stride, full);
+            let half = self.half_for(if list == 0 { ref0.poc } else { ref1.poc });
+            uni[list] = self.refine_subpel(
+                ctx,
+                plane,
+                half.as_deref(),
+                wp,
+                list,
+                x0,
+                y0,
+                wh,
+                src,
+                y_stride,
+                full,
+                lam,
+                mvp[list],
+            );
+            self.note_seed(pu, list, 0, uni[list].0);
         }
 
         // The three AMVP shapes. `inter_pred_idc` costs two bins for a uni
@@ -1618,7 +1693,7 @@ impl<S: Sample> InterPicture<S> {
         out.mv_l1 = pick.mv[1];
         out.ref_idx_l1 = pick.ref_idx[1];
 
-        if prefer_intra(ctx, pick.satd, src, y_stride, n) {
+        if self.rd_intra.is_none() && prefer_intra(ctx, pick.satd, src, y_stride, n) {
             out.kind = InterCuKind::UseIntra;
             // An intra CU's motion, stored now so later candidate
             // derivations see what the decoder will see.
@@ -1678,9 +1753,17 @@ impl<S: Sample> InterPicture<S> {
             }
         }
 
-        let any = self.code_residual_cu(
-            ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out,
-        );
+        let any = if self.no_residual {
+            out.rqt_root_cbf = false;
+            out.cbf_luma = false;
+            out.cbf_chroma = [false; 2];
+            out.cbf_chroma_bot = [false; 2];
+            false
+        } else {
+            self.code_residual_cu(
+                ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, &mut out,
+            )
+        };
         out.kind = match (pick.merge_idx, any, refs) {
             (Some(merge_idx), false, _) => InterCuKind::Skip { merge_idx },
             (Some(merge_idx), true, _) => InterCuKind::Merge { merge_idx },
@@ -2282,8 +2365,202 @@ impl<S: Sample> InterPicture<S> {
     /// leaf: the decision (inter, or the intra one it handed over to), its
     /// reconstruction SSD, and its counted syntax bits without the
     /// `split_cu_flag`.
+    ///
+    /// The inter decision ([`Self::tree_leaf_coded`]), then the same unit
+    /// without its residual where that is cheaper
+    /// ([`Self::tree_leaf_drop`]), then — under [`Self::rd_intra`] — the
+    /// unit coded intra, kept where its SSD plus lambda times its bits is
+    /// lower. See `rd_intra` for which units try.
     #[allow(clippy::too_many_arguments)]
     fn tree_leaf(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refs: TreeRefs<'_, S>,
+        x0: usize,
+        y0: usize,
+        log2: u32,
+        depth: u32,
+        src: &Srcs<'_, S>,
+    ) -> (PCuDecision, u64, f32) {
+        let (coded, ssd, bits) = self.tree_leaf_coded(ctx, refs, x0, y0, log2, depth, src);
+        let (coded, ssd, bits) =
+            self.tree_leaf_drop(ctx, refs, x0, y0, log2, depth, src, coded, ssd, bits);
+        let Some(gate) = self.rd_intra else {
+            return (coded, ssd, bits);
+        };
+        let PCuDecision::Inter(d) = &coded else {
+            return (coded, ssd, bits);
+        };
+        let n = 1usize << log2;
+        let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
+        let j = ssd as f64 + lam * f64::from(bits);
+        if ctx.bypass
+            || matches!(d.kind, InterCuKind::Skip { .. })
+            || j < f64::from(gate) * lam * (n * n) as f64
+        {
+            return (coded, ssd, bits);
+        }
+        let (nref, is_b) = match refs {
+            TreeRefs::P(l0) => (l0.len() as u32, false),
+            TreeRefs::B(..) => (1, true),
+        };
+        let saved = TrialSave::take(self, x0, y0, n);
+        // The unit's grids say intra from here on: the intra decision's
+        // own neighbours are outside it, and what it leaves must be what a
+        // decoder of an intra unit holds.
+        let w4 = self.info.w4;
+        PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 1);
+        PicInfo::fill4(&mut self.info.skip, w4, x0, y0, n, n, 0);
+        fill_motion(
+            &mut self.recon.motion,
+            self.recon.w4,
+            x0,
+            y0,
+            n,
+            n,
+            MotionInfo::INTRA,
+        );
+        let intra = PCuDecision::Intra(Box::new(self.code_cu_intra(
+            ctx,
+            x0,
+            y0,
+            log2,
+            src.y,
+            src.y_stride,
+            src.cb,
+            src.cr,
+            src.c_stride,
+        )));
+        let ssd_i = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
+        let bits_i =
+            crate::encode::h265::p_cu_bits(&intra, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth);
+        let j_i = (ssd_i as f64) + lam * f64::from(bits_i);
+        // At the minimum coding block the intra unit may also take
+        // `PART_NxN`, four 4x4 luma blocks with a mode each; tried where
+        // the 2Nx2N intra unit came within a quarter of the inter one.
+        if log2 == MIN_CB_LOG2 && j_i < 2.0 * j {
+            let mid = TrialSave::take(self, x0, y0, n);
+            let nxn = PCuDecision::Intra(Box::new(self.code_cu_intra_nxn(
+                ctx,
+                x0,
+                y0,
+                src.y,
+                src.y_stride,
+                src.cb,
+                src.cr,
+                src.c_stride,
+            )));
+            let ssd_n = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
+            let bits_n = crate::encode::h265::p_cu_bits(
+                &nxn, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
+            );
+            let j_n = ssd_n as f64 + lam * f64::from(bits_n);
+            if j_n < j_i.min(j) {
+                return (nxn, ssd_n, bits_n);
+            }
+            mid.put(self, x0, y0, n);
+        }
+        if j_i < j {
+            return (intra, ssd_i, bits_i);
+        }
+        saved.put(self, x0, y0, n);
+        (coded, ssd, bits)
+    }
+
+    /// The unit [`Self::tree_leaf_coded`] decided, or the same unit without
+    /// its residual where that is cheaper: a merge unit becomes a skip, an
+    /// AMVP unit codes `rqt_root_cbf` 0. Coefficients the quantiser kept
+    /// are not always worth their bits, and only the comparison in
+    /// distortion plus rate can say which.
+    #[allow(clippy::too_many_arguments)]
+    fn tree_leaf_drop(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        refs: TreeRefs<'_, S>,
+        x0: usize,
+        y0: usize,
+        log2: u32,
+        depth: u32,
+        src: &Srcs<'_, S>,
+        coded: PCuDecision,
+        ssd: u64,
+        bits: f32,
+    ) -> (PCuDecision, u64, f32) {
+        let PCuDecision::Inter(d) = &coded else {
+            return (coded, ssd, bits);
+        };
+        if !d.rqt_root_cbf || ctx.bypass || d.part != PartMode::P2Nx2N {
+            return (coded, ssd, bits);
+        }
+        let pick = match d.kind {
+            InterCuKind::Merge { merge_idx } => PuPick {
+                merge_idx: Some(merge_idx),
+                mv: [d.mv, d.mv_l1],
+                ref_idx: [d.ref_idx, d.ref_idx_l1],
+                ..PuPick::default()
+            },
+            InterCuKind::Amvp { mvp_flag, mvd } => PuPick {
+                mvd: [mvd, Mv::ZERO],
+                mvp_flag: [mvp_flag, 0],
+                mv: [d.mv, d.mv_l1],
+                ref_idx: [d.ref_idx, d.ref_idx_l1],
+                ..PuPick::default()
+            },
+            InterCuKind::BAmvp { idc, mvd, mvp_flag } => PuPick {
+                idc,
+                mvd,
+                mvp_flag,
+                mv: [d.mv, d.mv_l1],
+                ref_idx: [d.ref_idx, d.ref_idx_l1],
+                ..PuPick::default()
+            },
+            _ => return (coded, ssd, bits),
+        };
+        let (nref, is_b) = match refs {
+            TreeRefs::P(l0) => (l0.len() as u32, false),
+            TreeRefs::B(..) => (1, true),
+        };
+        let n = 1usize << log2;
+        let saved = TrialSave::take(self, x0, y0, n);
+        let out = InterCuDecision {
+            log2_cu: log2,
+            bypass: ctx.bypass,
+            qp_y: ctx.qp,
+            ..InterCuDecision::default()
+        };
+        self.no_residual = true;
+        let alt = self.code_whole(
+            ctx,
+            refs,
+            out,
+            pick,
+            x0,
+            y0,
+            log2,
+            src.y,
+            src.y_stride,
+            src.cb,
+            src.cr,
+            src.c_stride,
+        );
+        self.no_residual = false;
+        if alt.kind != InterCuKind::UseIntra {
+            let alt = PCuDecision::Inter(alt);
+            let ssd_a = cu_ssd(ctx, &self.recon, self.cat, x0, y0, n, src);
+            let bits_a = crate::encode::h265::p_cu_bits(
+                &alt, self.cat, ctx.qp, ctx.bypass, is_b, nref, depth,
+            );
+            let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
+            if (ssd_a as f64) + lam * f64::from(bits_a) < (ssd as f64) + lam * f64::from(bits) {
+                return (alt, ssd_a, bits_a);
+            }
+        }
+        saved.put(self, x0, y0, n);
+        (coded, ssd, bits)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tree_leaf_coded(
         &mut self,
         ctx: &MeCtx<'_, S>,
         refs: TreeRefs<'_, S>,
@@ -2484,10 +2761,50 @@ impl<S: Sample> InterPicture<S> {
         )
     }
 
-    /// Greedy small-diamond SAD descent at full-sample positions, seeded
-    /// at each of `seeds` (rounded toward zero to full samples, as the
-    /// decoder's `>> 2` addresses them), returning the best vector in
-    /// quarter units.
+    /// The half-sample planes of the reference at `poc`, if the caller
+    /// supplied them.
+    fn half_for(&self, poc: i32) -> Option<std::sync::Arc<h265_search::HalfPlanes<S>>> {
+        self.half
+            .iter()
+            .find(|(p, _)| *p == poc)
+            .map(|(_, h)| h.clone())
+    }
+
+    /// The coding-tree depth of the unit `pu` belongs to.
+    fn depth_of(&self, pu: &PuPos) -> usize {
+        (self.log2_ctb - (pu.n_cb as u32).trailing_zeros()) as usize
+    }
+
+    /// The vector the enclosing unit one depth up found for (`list`,
+    /// `r`), when it was searched over this unit's position.
+    fn parent_seed(&self, pu: &PuPos, list: usize, r: usize) -> Option<Mv> {
+        let d = self.depth_of(pu);
+        if d == 0 || r >= 8 {
+            return None;
+        }
+        let (px, py, mv) = self.seed_at[d - 1][list * 8 + r]?;
+        let n = (pu.n_cb as u32) * 2;
+        let inside = (pu.x_cb as u32).wrapping_sub(px) < n && (pu.y_cb as u32).wrapping_sub(py) < n;
+        inside.then_some(mv)
+    }
+
+    /// Record what this unit's search found, for the units below it.
+    fn note_seed(&mut self, pu: &PuPos, list: usize, r: usize, mv: Mv) {
+        let d = self.depth_of(pu);
+        if d < 4 && r < 8 && pu.w == pu.n_cb && pu.h == pu.n_cb {
+            self.seed_at[d][list * 8 + r] = Some((pu.x_cb as u32, pu.y_cb as u32, mv));
+        }
+    }
+
+    /// Full-sample search: every seed (rounded toward zero to full
+    /// samples, as the decoder's `>> 2` addresses them) scored, then a
+    /// small-diamond descent from the best, widened by square rings at 4,
+    /// 8 and 16 samples whenever the descent settles, so a unit whose
+    /// motion no seed predicted can still find it. Every candidate is
+    /// priced SAD plus `lam` times the bits of its difference from the
+    /// cheaper of `mvp` (`h265_search::mv_bits`): without the rate term
+    /// the search returns the vector of least distortion however much it
+    /// costs to say. Returns the best vector in quarter units.
     #[allow(clippy::too_many_arguments)]
     fn search_full(
         &self,
@@ -2499,65 +2816,120 @@ impl<S: Sample> InterPicture<S> {
         src: &[S],
         src_stride: usize,
         seeds: &[Mv],
+        lam: f32,
+        mvp: [Mv; 2],
     ) -> Mv {
         let clamp_pos = |fx: i32, fy: i32| -> (i32, i32) {
-            let pad = refp.pad as i32;
+            let pad = (refp.pad - h265_search::MARGIN) as i32;
             let xi = (x as i32 + fx).clamp(-pad, refp.width as i32 + pad - w as i32);
             let yi = (y as i32 + fy).clamp(-pad, refp.height as i32 + pad - h as i32);
             (xi - x as i32, yi - y as i32)
         };
-        let sad_of = |fx: i32, fy: i32| -> u32 {
+        let pq = [
+            (i32::from(mvp[0].x), i32::from(mvp[0].y)),
+            (i32::from(mvp[1].x), i32::from(mvp[1].y)),
+        ];
+        let cost_of = |fx: i32, fy: i32| -> u32 {
             let off = refp.offset((x as i32 + fx) as isize, (y as i32 + fy) as isize);
-            (ctx.dist.sad)(src, src_stride, &refp.data[off..], refp.stride, w, h)
+            let sad = (ctx.dist.sad)(src, src_stride, &refp.data[off..], refp.stride, w, h);
+            sad + (lam * h265_search::mv_bits(fx * 4, fy * 4, &pq) as f32) as u32
         };
         let mut best = (0i32, 0i32);
-        let mut best_sad = u32::MAX;
-        for s in seeds {
-            let (fx, fy) = clamp_pos(s.x as i32 >> 2, s.y as i32 >> 2);
-            let sad = sad_of(fx, fy);
-            if sad < best_sad {
-                best_sad = sad;
-                best = (fx, fy);
+        let mut best_cost = u32::MAX;
+        let mut tried: [(i32, i32); 16] = [(i32::MIN, 0); 16];
+        for (i, s) in seeds.iter().enumerate() {
+            let c = clamp_pos(s.x as i32 >> 2, s.y as i32 >> 2);
+            if tried.contains(&c) {
+                continue;
+            }
+            if i < tried.len() {
+                tried[i] = c;
+            }
+            let cost = cost_of(c.0, c.1);
+            if cost < best_cost {
+                best_cost = cost;
+                best = c;
             }
         }
         let centre = best;
-        // ±1 diamond, confined to SEARCH_RANGE around the seeded best and
-        // to the padded plane.
-        for _ in 0..(2 * SEARCH_RANGE) {
-            let mut improved = false;
-            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                let cand = (best.0 + dx, best.1 + dy);
-                if (cand.0 - centre.0).abs() > SEARCH_RANGE
-                    || (cand.1 - centre.1).abs() > SEARCH_RANGE
-                {
-                    continue;
+        let inside = |c: (i32, i32)| {
+            (c.0 - centre.0).abs() <= SEARCH_RANGE
+                && (c.1 - centre.1).abs() <= SEARCH_RANGE
+                && clamp_pos(c.0, c.1) == c
+        };
+        let mut rings = 0;
+        loop {
+            // Small diamond to convergence.
+            for _ in 0..(2 * SEARCH_RANGE) {
+                let mut improved = false;
+                let from = best;
+                for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let cand = (from.0 + dx, from.1 + dy);
+                    if !inside(cand) {
+                        continue;
+                    }
+                    let cost = cost_of(cand.0, cand.1);
+                    if cost < best_cost {
+                        best_cost = cost;
+                        best = cand;
+                        improved = true;
+                    }
                 }
-                if clamp_pos(cand.0, cand.1) != cand {
-                    continue;
-                }
-                let sad = sad_of(cand.0, cand.1);
-                if sad < best_sad {
-                    best_sad = sad;
-                    best = cand;
-                    improved = true;
+                if !improved {
+                    break;
                 }
             }
-            if !improved {
+            if rings >= self.search_rings {
+                break;
+            }
+            rings += 1;
+            // Square rings around the settled point; a better point
+            // restarts the descent from there.
+            let from = best;
+            let mut moved = false;
+            for r in [4i32, 8, 16] {
+                for (dx, dy) in [
+                    (r, 0),
+                    (-r, 0),
+                    (0, r),
+                    (0, -r),
+                    (r, r),
+                    (-r, r),
+                    (r, -r),
+                    (-r, -r),
+                ] {
+                    let cand = (from.0 + dx, from.1 + dy);
+                    if !inside(cand) {
+                        continue;
+                    }
+                    let cost = cost_of(cand.0, cand.1);
+                    if cost < best_cost {
+                        best_cost = cost;
+                        best = cand;
+                        moved = true;
+                    }
+                }
+            }
+            if !moved {
                 break;
             }
         }
         Mv::new((best.0 * 4) as i16, (best.1 * 4) as i16)
     }
 
-    /// SATD refinement: the eight half-sample neighbours of `start`, then
-    /// the eight quarter-sample neighbours of that winner — each scored
-    /// under `wp`, the luma weighting a one-list prediction from `list`
-    /// carries (see [`Self::satd_at_weighted`]).
+    /// Sub-sample refinement around `start`: the eight half-sample
+    /// neighbours, then the eight quarter-sample neighbours of the winner,
+    /// each scored SATD plus `lam` times its vector difference's bits from
+    /// the cheaper of `mvp`. Half-sample candidates read `half` — the
+    /// reference's exact half-sample phases — when it is given and the
+    /// unit predicts under default weighting; everything else
+    /// interpolates. Returns the vector and its SATD (without the rate).
     #[allow(clippy::too_many_arguments)]
     fn refine_subpel(
         &mut self,
         ctx: &MeCtx<'_, S>,
         refp: &Plane16<S>,
+        half: Option<&h265_search::HalfPlanes<S>>,
         wp: Weighting,
         list: usize,
         x: usize,
@@ -2566,10 +2938,21 @@ impl<S: Sample> InterPicture<S> {
         src: &[S],
         src_stride: usize,
         start: Mv,
+        lam: f32,
+        mvp: [Mv; 2],
     ) -> (Mv, u32) {
+        let pq = [
+            (i32::from(mvp[0].x), i32::from(mvp[0].y)),
+            (i32::from(mvp[1].x), i32::from(mvp[1].y)),
+        ];
+        let rate = |mv: Mv| {
+            (lam * h265_search::mv_bits(i32::from(mv.x), i32::from(mv.y), &pq) as f32) as u32
+        };
+        let half = half.filter(|_| matches!(wp, Weighting::Default));
         let mut best = start;
         let mut best_satd =
             self.satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, start, wp, list);
+        let mut best_cost = best_satd + rate(start);
         for step in [2i16, 1] {
             let centre = best;
             for dy in [-step, 0, step] {
@@ -2578,9 +2961,16 @@ impl<S: Sample> InterPicture<S> {
                         continue;
                     }
                     let mv = Mv::new(centre.x.wrapping_add(dx), centre.y.wrapping_add(dy));
-                    let satd =
-                        self.satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, mv, wp, list);
-                    if satd < best_satd {
+                    let satd = match half
+                        .and_then(|hp| hp.at(x, y, wh.0, wh.1, i32::from(mv.x), i32::from(mv.y)))
+                    {
+                        Some((p, ps)) => (ctx.dist.satd)(src, src_stride, p, ps, wh.0, wh.1),
+                        None => self
+                            .satd_at_weighted(ctx, refp, x, y, wh, src, src_stride, mv, wp, list),
+                    };
+                    let cost = satd + rate(mv);
+                    if cost < best_cost {
+                        best_cost = cost;
                         best_satd = satd;
                         best = mv;
                     }
@@ -2590,10 +2980,6 @@ impl<S: Sample> InterPicture<S> {
         (best, best_satd)
     }
 
-    /// Luma SATD of the prediction `mv` produces, through the decoder's
-    /// own interpolation kernels — the addressing mirrors `interp` and
-    /// `source` in `src/hevc/inter.rs`, and the sample-domain stage is the
-    /// default uni-prediction the decoder applies.
     #[allow(clippy::too_many_arguments)]
     fn satd_at(
         &mut self,
@@ -3045,7 +3431,7 @@ impl Rate {
     /// `CabacEncoder::fractional_bits`.
     fn count(&self, f: impl FnOnce(&mut CabacEncoder<'static>, &mut Contexts)) -> f32 {
         let mut cx = self.cx.clone();
-        let mut e = CabacEncoder::counting();
+        let mut e = CabacEncoder::estimating();
         f(&mut e, &mut cx);
         e.fractional_bits() as f32
     }

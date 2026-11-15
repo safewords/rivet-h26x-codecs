@@ -2225,7 +2225,7 @@ fn rdoq_trim<S: Sample>(
     // decoder's own reconstruction of it.
     let cost_of = |cand: &[i16], scratch: &mut [i16]| -> f32 {
         let mut cx = Contexts::new(0, qp);
-        let mut e = CabacEncoder::counting();
+        let mut e = CabacEncoder::estimating();
         let all_zero = cand[..n * n].iter().all(|&v| v == 0);
         let bits = if all_zero {
             // A cbf of 0 codes no residual block at all; the saving is the
@@ -2920,7 +2920,7 @@ fn cu_bits(d: &CuDecision, cat: u32, qp: i32, bypass: bool) -> f32 {
     use crate::cabac_enc::CabacEncoder;
     use crate::hevc::ctx::Contexts;
     let mut cx = Contexts::new(0, qp);
-    let mut e = CabacEncoder::counting();
+    let mut e = CabacEncoder::estimating();
     // The production serialiser, over the decision as coded: every
     // signalling bin AND every residual block, at their real widths.
     //

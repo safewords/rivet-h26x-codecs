@@ -95,6 +95,7 @@ pub mod h265_deblock;
 pub mod h265_intra;
 pub mod h265_me;
 pub(crate) mod h265_sao;
+pub(crate) mod h265_search;
 pub mod h265_syntax;
 pub mod h265_tune;
 pub(crate) mod h265_wp;

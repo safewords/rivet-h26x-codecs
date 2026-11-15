@@ -1,0 +1,271 @@
+//! Motion-search helpers for the H.265 encoder: the half-sample planes a
+//! reference picture is searched through, and the price of a motion
+//! vector difference.
+//!
+//! # Half-sample planes
+//!
+//! The sub-sample refinement used to interpolate every candidate it
+//! scored: eight half-sample and eight quarter-sample neighbours per
+//! prediction unit per reference, each a full 8-tap filter pass over the
+//! block — a quarter of an encode's CPU went to `qpel_h` / `qpel_v2`
+//! alone. A reference picture is searched by every unit of every picture
+//! that predicts from it, so its three half-sample phases are computed
+//! once, when it becomes a reference, and a half-sample candidate is then
+//! a read.
+//!
+//! The planes are **exact**: each is what 8.5.3.3.3.1 makes of the
+//! reference at that phase for a uni-predicted block under default
+//! weighting — the 8-tap half-sample filter, the intermediate shifts
+//! (`shift1` = `Min(4, BitDepth - 8)`, then 6 for the second pass) and
+//! the final `(x + offset) >> (14 - BitDepth)` rounding and clip. So the
+//! SATD of a half-sample candidate read from them equals the SATD of the
+//! prediction the decoder would make, and the search compares candidates
+//! on the same numbers as before. A unit under explicit weighting scores
+//! through the interpolating path as it always did.
+//!
+//! The planes cover the reference's padded area less a margin of four
+//! samples on every side, where the filter would reach outside it; the
+//! search keeps its candidates inside that margin.
+
+use crate::hevc::frame::Plane16;
+use crate::sample::Sample;
+
+/// The HEVC luma half-sample filter (Table 8-11, `fL[2]`).
+const HALF: [i32; 8] = [-1, 4, -11, 40, 40, -11, 4, -1];
+
+/// The three half-sample phases of one reference luma plane, laid out
+/// exactly as that plane is (same stride, same padding, same origin), so
+/// an offset computed for the reference indexes these too.
+pub(crate) struct HalfPlanes<S: Sample> {
+    /// `[x + 1/2, y]`, `[x, y + 1/2]`, `[x + 1/2, y + 1/2]`.
+    pub planes: [Vec<S>; 3],
+    /// The reference plane's stride.
+    pub stride: usize,
+    /// The reference plane's padding: valid samples lie within
+    /// `pad - MARGIN` of the picture.
+    pub pad: usize,
+    /// Picture width and height.
+    pub width: usize,
+    /// See `width`.
+    pub height: usize,
+}
+
+/// How far inside the padded area the planes are valid.
+pub(crate) const MARGIN: usize = 4;
+
+impl<S: Sample> HalfPlanes<S> {
+    /// Build the three phases of `p`, whose border must already be
+    /// extended, at `bit_depth`.
+    pub fn new(p: &Plane16<S>, bit_depth: u32) -> Self {
+        let (stride, rows) = (p.stride, p.data.len() / p.stride);
+        let shift1 = bit_depth.min(12) as i32 - 8;
+        let shift3 = 14 - bit_depth as i32;
+        let round3 = 1i32 << (shift3 - 1).max(0);
+        let max = (1i32 << bit_depth) - 1;
+        let fin = |v14: i32| -> S {
+            let v = if shift3 > 0 {
+                (v14 + round3) >> shift3
+            } else {
+                v14
+            };
+            S::from_i32(v.clamp(0, max))
+        };
+        let d = &p.data;
+        let mut h = vec![S::default(); d.len()];
+        let mut v = vec![S::default(); d.len()];
+        let mut hv = vec![S::default(); d.len()];
+        // The horizontal pass, kept at 14 bits for the second pass.
+        let mut h14 = vec![0i16; d.len()];
+        let (x_lo, x_hi) = (3usize, stride - 4);
+        for y in 0..rows {
+            let row = y * stride;
+            for x in x_lo..x_hi {
+                let o = row + x - 3;
+                let mut s = 0i32;
+                for (k, c) in HALF.iter().enumerate() {
+                    s += c * d[o + k].to_i32();
+                }
+                let t = s >> shift1;
+                h14[row + x] = t as i16;
+                h[row + x] = fin(t);
+            }
+        }
+        for y in 3..rows - 4 {
+            let row = y * stride;
+            for x in x_lo..x_hi {
+                let mut sv = 0i32;
+                let mut shv = 0i32;
+                for (k, c) in HALF.iter().enumerate() {
+                    let o = (y + k - 3) * stride + x;
+                    sv += c * d[o].to_i32();
+                    shv += c * i32::from(h14[o]);
+                }
+                v[row + x] = fin(sv >> shift1);
+                hv[row + x] = fin(shv >> 6);
+            }
+        }
+        HalfPlanes {
+            planes: [h, v, hv],
+            stride,
+            pad: p.pad,
+            width: p.width,
+            height: p.height,
+        }
+    }
+
+    /// The plane and offset of the half-sample-aligned position `mv`
+    /// (quarter-sample units, both components even) for a block at luma
+    /// `(x, y)` of `w` by `h`, or `None` when the block reaches past the
+    /// valid area or `mv` is not on the half-sample grid. For the
+    /// full-sample phase the caller reads the reference itself.
+    pub fn at(
+        &self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        mvx: i32,
+        mvy: i32,
+    ) -> Option<(&[S], usize)> {
+        if mvx & 1 != 0 || mvy & 1 != 0 {
+            return None;
+        }
+        let phase = match (mvx & 2 != 0, mvy & 2 != 0) {
+            (false, false) => return None,
+            (true, false) => 0,
+            (false, true) => 1,
+            (true, true) => 2,
+        };
+        let xi = x as i32 + (mvx >> 2);
+        let yi = y as i32 + (mvy >> 2);
+        let lim = (self.pad - MARGIN) as i32;
+        if xi < -lim
+            || yi < -lim
+            || xi + w as i32 > self.width as i32 + lim
+            || yi + h as i32 > self.height as i32 + lim
+        {
+            return None;
+        }
+        let off = ((self.pad as i32 + yi) as usize) * self.stride + (self.pad as i32 + xi) as usize;
+        Some((&self.planes[phase][off..], self.stride))
+    }
+}
+
+/// Approximate bits of one motion vector difference component `d`
+/// (quarter samples) as `write_mvd` codes it: `abs_mvd_greater0_flag`,
+/// `abs_mvd_greater1_flag`, the first-order Exp-Golomb remainder
+/// `abs_mvd_minus2` and the sign, each context-coded flag priced at one
+/// bit. Used inside the search, where a table of exact prices per
+/// candidate would cost more than it changes.
+#[inline]
+pub(crate) fn mvd_component_bits(d: i32) -> u32 {
+    let a = d.unsigned_abs();
+    match a {
+        0 => 1,
+        1 => 3,
+        _ => {
+            // First-order Exp-Golomb of a - 2 (9.3.3.6).
+            let (mut v, mut k, mut bits) = (a - 2, 1u32, 0u32);
+            while v >= 1 << k {
+                bits += 1;
+                v -= 1 << k;
+                k += 1;
+            }
+            3 + bits + 1 + k
+        }
+    }
+}
+
+/// Approximate bits of the difference between `mv` and the cheaper of the
+/// two predictors, plus the predictor flag.
+#[inline]
+pub(crate) fn mv_bits(mvx: i32, mvy: i32, mvp: &[(i32, i32); 2]) -> u32 {
+    let b = |p: (i32, i32)| mvd_component_bits(mvx - p.0) + mvd_component_bits(mvy - p.1);
+    b(mvp[0]).min(b(mvp[1])) + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cabac_enc::CabacEncoder;
+    use crate::hevc::ctu::write_mvd;
+    use crate::hevc::ctx::Contexts;
+    use crate::hevc::frame::Mv;
+
+    /// The approximate price stays within two bits of what the writer
+    /// spends on a lone vector difference at the slice's initial
+    /// probabilities, across the range a search reaches.
+    #[test]
+    fn the_mvd_price_tracks_the_writer() {
+        for d in [
+            -300i32, -64, -17, -5, -2, -1, 0, 1, 2, 3, 4, 7, 8, 33, 100, 512,
+        ] {
+            let mut cx = Contexts::new(1, 30);
+            let mut e = CabacEncoder::counting();
+            write_mvd(&mut e, &mut cx, Mv::new(d as i16, 0));
+            let real = e.fractional_bits();
+            let ours = f64::from(mvd_component_bits(d) + mvd_component_bits(0));
+            assert!(
+                (real - ours).abs() <= 2.5,
+                "d {d}: writer {real:.2}, model {ours}"
+            );
+        }
+    }
+
+    /// The half-sample planes are the decoder's own interpolation: every
+    /// phase at every position equals `predict_block`'s output for a
+    /// uni-predicted block under default weighting.
+    #[test]
+    fn half_planes_equal_the_decoders_interpolation() {
+        use crate::dsp::Cpu;
+        use crate::dsp::hevc::HevcDsp;
+        use crate::hevc::frame::Frame;
+        use crate::picture::ChromaFormat;
+        let (w, h) = (40usize, 24usize);
+        let mut f = Frame::<u8>::new(w, h, ChromaFormat::Yuv420, 8);
+        let mut s = 7u32;
+        for y in 0..h {
+            for x in 0..w {
+                s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                let o = f.y.offset(x as isize, y as isize);
+                f.y.data[o] = ((s >> 16) & 255) as u8;
+            }
+        }
+        f.extend_rows(0, h);
+        let hp = HalfPlanes::new(&f.y, 8);
+        let dsp = HevcDsp::<u8>::new(Cpu::SCALAR);
+        let mut out14 = vec![0i16; 64 * 64];
+        let mut tmp = vec![0i16; 64 * 80];
+        let mut out = vec![0u8; 64 * 64];
+        for &(mvx, mvy) in &[(2i32, 0i32), (0, 2), (2, 2), (-6, 10), (14, -2), (-30, -30)] {
+            for &(x, y) in &[(0usize, 0usize), (8, 4), (32, 16)] {
+                let (bw, bh) = (8usize, 8usize);
+                let xi = x as i32 + (mvx >> 2);
+                let yi = y as i32 + (mvy >> 2);
+                let (fx, fy) = ((mvx & 3) as usize, (mvy & 3) as usize);
+                let base = f.y.offset((xi - 3) as isize, (yi - 3) as isize);
+                let win = &f.y.data[base..];
+                let st = f.y.stride;
+                match (fx, fy) {
+                    (_, 0) => (dsp.qpel_h)(&mut out14, &win[3 * st..], st, bw, bh, fx, 0),
+                    (0, _) => (dsp.qpel_v)(&mut out14, &win[3..], st, bw, bh, fy, 0),
+                    _ => {
+                        (dsp.qpel_h)(&mut tmp, win, st, bw, bh + 7, fx, 0);
+                        (dsp.qpel_v2)(&mut out14, &tmp, bw, bw, bh, fy);
+                    }
+                }
+                (dsp.uni)(&mut out, bw, &out14, bw, bh, 6, 255);
+                let (p, ps) = hp.at(x, y, bw, bh, mvx, mvy).expect("inside");
+                for yy in 0..bh {
+                    for xx in 0..bw {
+                        assert_eq!(
+                            p[yy * ps + xx],
+                            out[yy * bw + xx],
+                            "mv ({mvx},{mvy}) at ({x},{y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
