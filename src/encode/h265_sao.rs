@@ -158,24 +158,24 @@ impl Cat {
     /// Record one sample: its reconstruction `r`, its error `e = src -
     /// rec`, and the top rail `max` of its bit depth.
     #[inline]
-    fn add(&mut self, r: i32, e: i64, max: i32) {
+    fn add(&mut self, r: i32, e: i64, max: i32, reach: usize) {
         self.all.count += 1;
         self.all.sum += e;
-        self.add_rail(r, e, max);
+        self.add_rail(r, e, max, reach);
     }
 
     /// The rail buckets' share of [`Cat::add`], for a sample whose count and
     /// sum a kernel has already taken into `all`.
     #[inline]
-    fn add_rail(&mut self, r: i32, e: i64, max: i32) {
+    fn add_rail(&mut self, r: i32, e: i64, max: i32, reach: usize) {
         let up = (max - r) as usize;
-        if up < CLIP_REACH {
+        if up < reach {
             self.up[up].count += 1;
             self.up[up].sum += e;
             self.dirty = true;
         }
         let down = r as usize;
-        if down < CLIP_REACH {
+        if down < reach {
             self.down[down].count += 1;
             self.down[down].sum += e;
             self.dirty = true;
@@ -373,6 +373,11 @@ struct Comp<'a, S: Sample> {
     ph: usize,
     max: i32,
     shift: i32,
+    /// How near a rail a sample must be for an offset this picture can
+    /// spell to clip it: `cMax` of `sao_offset_abs` plus one, at most
+    /// [`CLIP_REACH`]. At 8 bits that is 8, where video-range content
+    /// never reaches and every category's score is the plain quadratic.
+    reach: usize,
 }
 
 impl<S: Sample> Comp<'_, S> {
@@ -437,7 +442,12 @@ impl<S: Sample> Comp<'_, S> {
             let src = &self.src[y * self.src_stride + self.x0..][..self.w];
             for (r, s) in rec.iter().zip(src) {
                 let v = r.to_i32();
-                cats[((v >> self.shift) & 31) as usize].add(v, i64::from(s.to_i32() - v), self.max);
+                cats[((v >> self.shift) & 31) as usize].add(
+                    v,
+                    i64::from(s.to_i32() - v),
+                    self.max,
+                    self.reach,
+                );
             }
         }
     }
@@ -494,7 +504,7 @@ impl<S: Sample> Comp<'_, S> {
                 na,
                 nb,
                 self.max,
-                CLIP_REACH as i32,
+                self.reach as i32,
                 &mut tally,
                 near,
             );
@@ -503,7 +513,7 @@ impl<S: Sample> Comp<'_, S> {
                 c.all.sum += t[1];
             }
             for &(e, r, err) in near.iter() {
-                cats[e as usize].add_rail(r as i32, err as i64, self.max);
+                cats[e as usize].add_rail(r as i32, err as i64, self.max, self.reach);
             }
         }
         for y in self.y0..self.y0 + self.h {
@@ -526,7 +536,7 @@ impl<S: Sample> Comp<'_, S> {
                 let a = self.rec_at(xa as usize, ya as usize);
                 let b = self.rec_at(xb as usize, yb as usize);
                 let e = (2 + (v - a).signum() + (v - b).signum()) as usize;
-                cats[e].add(v, self.err_at(x, y), self.max);
+                cats[e].add(v, self.err_at(x, y), self.max, self.reach);
             }
         }
     }
@@ -763,6 +773,7 @@ pub fn sao_picture<S: Sample>(
                             sps.bit_depth_chroma
                         })
                         - 1,
+                    reach: (cmax as usize + 1).min(CLIP_REACH),
                     shift: if c == 0 {
                         sps.bit_depth_luma as i32
                     } else {
@@ -1228,7 +1239,7 @@ mod tests {
                     _ => next().rem_euclid(max + 1),
                 };
                 let s = (r + next().rem_euclid(81) - 40).clamp(0, max);
-                cat.add(r, (s - r) as i64, max);
+                cat.add(r, (s - r) as i64, max, CLIP_REACH);
                 samples.push((r as i64, s as i64));
             }
             let mut clipped = 0usize;
