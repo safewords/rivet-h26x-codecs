@@ -579,6 +579,12 @@ pub struct Config {
     /// coded finer where later pictures reuse them. Costs that many
     /// pictures of output delay; 0, the default, runs none.
     pub tree_lookahead: u32,
+    /// H.264: decide every macroblock with the original one-candidate
+    /// decisions (SATD with fixed mode-bit placeholders, no rate-distortion
+    /// pricing) instead of the analysis (`encode::h264_analyse`). Off by
+    /// default; kept for what only they produce — sub-8x8 partitions,
+    /// which the level tests need to exercise the vector limits.
+    pub legacy_decisions: bool,
 }
 
 impl Default for Config {
@@ -616,6 +622,7 @@ impl Default for Config {
             preset: Preset::Medium,
             pyramid: false,
             tree_lookahead: 0,
+            legacy_decisions: false,
         }
     }
 }

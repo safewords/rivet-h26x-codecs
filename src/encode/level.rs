@@ -1879,6 +1879,9 @@ mod tests {
                 bframes: 1,
                 subparts: true,
                 rate: RateControl::ConstantQp(4),
+                // Sub-8x8 partitions are what the limits are about, and
+                // only the original decisions produce them.
+                legacy_decisions: true,
                 ..cfg(352, 288, fps)
             };
             let mut e = H264Encoder::new(c).unwrap();
