@@ -1723,6 +1723,7 @@ impl<S: Sample> Core<S> {
         pic.intra_satd_gate = tune.intra_satd_gate;
         pic.limit_refs = tune.limit_refs;
         pic.tu_split = tune.inter_tu_split;
+        pic.tu_split_max = tune.inter_tu_split_max;
         pic.slice_b = c.kind == Kind::B;
         if !c.reference && tune.nonref_fast {
             // A picture nothing references: its decisions shape only itself.
@@ -5848,7 +5849,7 @@ mod tests {
         // tree is actually taken in P and B pictures.
         use super::super::Preset;
         for preset in [Preset::Veryfast, Preset::Medium, Preset::Slow] {
-            for qp in [22u8, 34] {
+            for qp in [12u8, 34] {
                 let tag = format!("{preset:?} qp {qp}");
                 let mut c = Config {
                     gop: 12,
@@ -5865,7 +5866,7 @@ mod tests {
                 units.extend(e.flush().unwrap_or_else(|err| panic!("{tag}: {err}")));
                 let census = e.census();
                 assert!(
-                    qp > 22 || census.by_kind[1].split_tu + census.by_kind[2].split_tu > 0,
+                    qp > 12 || census.by_kind[1].split_tu + census.by_kind[2].split_tu > 0,
                     "{tag}: no inter CU split its transform tree"
                 );
                 let mut dec = crate::hevc::HevcDecoder::new();

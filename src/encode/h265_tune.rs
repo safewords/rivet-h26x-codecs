@@ -105,6 +105,8 @@ pub(crate) struct Tune {
     pub tmvp: bool,
     /// `h265_me::InterPicture::tu_split`.
     pub inter_tu_split: bool,
+    /// The largest inter CU (log2) the split is tried in.
+    pub inter_tu_split_max: u32,
 }
 
 impl Tune {
@@ -129,6 +131,7 @@ impl Tune {
         live_contexts: false,
         tmvp: false,
         inter_tu_split: false,
+        inter_tu_split_max: 5,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -164,6 +167,11 @@ impl Tune {
             // +2.48% (mobile +10.25% -> +5.96%), for a fifth more CPU.
             // Without the 8x8 CUs medium gained only -0.74%.
             inter_tu_split: true,
+            // 8x8 CUs only: most of the gain at a fraction of the CPU
+            // (medium -7.53% at 1.05x against -8.18% at 1.19x with 16x16
+            // and 32x32 too; slow +2.53% at 1.10x against +2.48% at 1.27x;
+            // veryfast -9.11% at 1.22x against -9.98% at 1.41x).
+            inter_tu_split_max: 3,
             ..Tune::NEUTRAL
         };
         match p {

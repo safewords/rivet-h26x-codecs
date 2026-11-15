@@ -651,6 +651,8 @@ pub struct InterPicture<S: Sample> {
     /// (`InterCuDecision::split_tu`), decided in SSD plus lambda times
     /// the tree's bits against the unsplit TU.
     pub tu_split: bool,
+    /// The largest CU, log2, the split is tried in.
+    pub tu_split_max: u32,
     /// Scratch for the split trial: the prediction, the unsplit
     /// reconstruction (luma then both chroma planes, packed) and the split
     /// shape's levels.
@@ -855,6 +857,7 @@ impl<S: Sample> InterPicture<S> {
             search_b: [None, None],
             tmvp: sps.temporal_mvp_enabled,
             tu_split: false,
+            tu_split_max: 5,
             tu_save: Vec::new(),
             tu_keep: Vec::new(),
             tu_alt: Box::default(),
@@ -2137,7 +2140,10 @@ impl<S: Sample> InterPicture<S> {
         out: &mut InterCuDecision,
     ) -> bool {
         out.split_tu = false;
-        let trial = self.tu_split && !ctx.bypass && (3..=5).contains(&log2_cu) && self.cat <= 1;
+        let trial = self.tu_split
+            && !ctx.bypass
+            && (3..=self.tu_split_max.min(5)).contains(&log2_cu)
+            && self.cat <= 1;
         if !trial {
             return self.code_residual_whole(
                 ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, out,
