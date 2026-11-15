@@ -246,9 +246,12 @@ pub struct Frame<S: Sample = u8> {
     pub cr: PaddedPlane<S>,
     /// Chroma format.
     pub chroma: ChromaFormat,
-    /// Luma bit depth (chroma has its own in the SPS; the two are equal in
-    /// every stream accepted).
+    /// Luma bit depth.
     pub bit_depth: u32,
+    /// Chroma bit depth (`bit_depth_chroma_minus8 + 8`; the High profiles
+    /// let it differ from luma's). A separate-colour-plane picture codes
+    /// every plane as luma, at `bit_depth`.
+    pub bit_depth_chroma: u32,
     /// Width in macroblocks.
     pub mb_width: usize,
     /// Height in macroblocks.
@@ -304,6 +307,7 @@ impl<S: Sample> Frame<S> {
             cr: none(),
             chroma: ChromaFormat::Yuv420,
             bit_depth: 8,
+            bit_depth_chroma: 8,
             mb_width: 0,
             mb_height: 0,
             motion: [Vec::new(), Vec::new()],
@@ -447,6 +451,7 @@ impl<S: Sample> Frame<S> {
             cr: PaddedPlane::new(cw, ch, cpad),
             chroma,
             bit_depth,
+            bit_depth_chroma: bit_depth,
             mb_width,
             mb_height,
             motion: [
@@ -687,7 +692,11 @@ impl<S: Sample> Frame<S> {
             width: width as u32,
             height: height as u32,
             bit_depth: self.bit_depth,
-            bit_depth_chroma: self.bit_depth,
+            bit_depth_chroma: if self.colour_planes.is_some() {
+                self.bit_depth
+            } else {
+                self.bit_depth_chroma
+            },
             chroma,
             planes,
             poc,

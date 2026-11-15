@@ -846,7 +846,11 @@ pub(crate) fn parse_mb_cavlc_parts<'a>(
                 2 => 256,
                 _ => 512,
             };
-        layer.pcm = (0..n).map(|_| r.bits(ctx.bit_depth) as u16).collect();
+        // 256 luma samples at BitDepthY, then the chroma at BitDepthC.
+        let bdc = dq.bit_depth_chroma.unwrap_or(ctx.bit_depth);
+        layer.pcm = (0..n)
+            .map(|i| r.bits(if i < 256 { ctx.bit_depth } else { bdc }) as u16)
+            .collect();
         if r.overrun() {
             return Err(Error::bitstream("I_PCM samples truncated"));
         }

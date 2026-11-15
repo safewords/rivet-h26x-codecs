@@ -208,6 +208,7 @@ impl<S: Sample> PictureDecoder<S> {
             cur_parity: parity,
             dsp: *dsp,
             bit_depth: sps.bit_depth_luma,
+            bit_depth_chroma: sps.chroma_bit_depth(),
         };
         if hdr.slice_type.is_b() && pps.weighted_bipred_idc == 2 {
             refs.build_implicit();
@@ -1198,16 +1199,10 @@ impl<S: Sample> H264DecoderImpl<S> {
     }
 
     fn check_supported(sps: &Sps) -> Result<()> {
-        if sps.bit_depth_luma != sps.bit_depth_chroma {
+        if sps.bit_depth_luma > 14 || sps.bit_depth_chroma > 14 {
             return Err(Error::unsupported(format!(
-                "H.264 different luma / chroma bit depths ({} / {})",
+                "H.264 bit depth {} / {}",
                 sps.bit_depth_luma, sps.bit_depth_chroma
-            )));
-        }
-        if sps.bit_depth_luma > 14 {
-            return Err(Error::unsupported(format!(
-                "H.264 bit depth {}",
-                sps.bit_depth_luma
             )));
         }
         Ok(())
@@ -1251,7 +1246,7 @@ impl<S: Sample> H264DecoderImpl<S> {
         mbw: usize,
         mbh: usize,
         chroma: ChromaFormat,
-        bit_depth: u32,
+        (bit_depth, bit_depth_chroma): (u32, u32),
         separate: bool,
     ) -> Arc<SharedFrame<S>> {
         // SAFETY: complete frames are read-only.
@@ -1261,14 +1256,17 @@ impl<S: Sample> H264DecoderImpl<S> {
                 && f.mb_height == mbh
                 && f.chroma == chroma
                 && f.bit_depth == bit_depth
+                && f.bit_depth_chroma == bit_depth_chroma
                 && f.colour_planes.is_some() == separate
         });
         if !ok {
             let mut g = Frame::new(mbw, mbh, chroma, bit_depth, separate);
+            g.bit_depth_chroma = bit_depth_chroma;
             let mid = S::from_i32(1 << (bit_depth - 1));
+            let mid_c = S::from_i32(1 << (bit_depth_chroma - 1));
             g.y.data.fill(mid);
-            g.cb.data.fill(mid);
-            g.cr.data.fill(mid);
+            g.cb.data.fill(mid_c);
+            g.cr.data.fill(mid_c);
             g.mb_intra.fill(true);
             if let Some(planes) = &mut g.colour_planes {
                 for f in planes.iter_mut() {
@@ -1358,7 +1356,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             if pps.cabac {
                 return Err(Error::unsupported("H.264 SP/SI slices with CABAC"));
             }
-            if sps.chroma_format_idc > 1 || sps.bit_depth_luma != 8 {
+            if sps.chroma_format_idc > 1 || sps.bit_depth_luma != 8 || sps.chroma_bit_depth() != 8 {
                 return Err(Error::unsupported(format!(
                     "H.264 SP/SI slices at chroma_format_idc {} / {}-bit",
                     sps.chroma_format_idc, sps.bit_depth_luma
@@ -1401,7 +1399,9 @@ impl<S: Sample> H264DecoderImpl<S> {
                 .clone()
                 .or_else(|| sps.scaling_lists.clone())
                 .unwrap_or_else(ScalingLists::flat);
-            self.dequant_cache = Some((sps.id, pps.id, Arc::new(Dequant::new(&lists))));
+            let mut dq = Dequant::new(&lists);
+            dq.bit_depth_chroma = Some(sps.chroma_bit_depth());
+            self.dequant_cache = Some((sps.id, pps.id, Arc::new(dq)));
         }
         let dequant = self.dequant_cache.as_ref().unwrap().2.clone();
 
@@ -1420,7 +1420,7 @@ impl<S: Sample> H264DecoderImpl<S> {
                 mbw,
                 mbh,
                 sps.frame_chroma(),
-                sps.bit_depth_luma,
+                (sps.bit_depth_luma, sps.chroma_bit_depth()),
                 sps.separate_colour_plane,
             );
             let entry = |dpb: &Dpb<S>, e: (usize, u8)| -> Option<RefEntry<S>> {
@@ -1536,7 +1536,7 @@ impl<S: Sample> H264DecoderImpl<S> {
                     mbw,
                     mbh,
                     sps.frame_chroma(),
-                    sps.bit_depth_luma,
+                    (sps.bit_depth_luma, sps.chroma_bit_depth()),
                     sps.separate_colour_plane,
                 );
                 if !sps.gaps_in_frame_num_allowed {
@@ -1583,6 +1583,7 @@ impl<S: Sample> H264DecoderImpl<S> {
                     sps.separate_colour_plane,
                 );
                 f.poc = poc;
+                f.bit_depth_chroma = sps.chroma_bit_depth();
                 f.field_borders = !sps.frame_mbs_only;
                 f.field_coded = field_pic;
                 f.mbaff = hdr.mbaff(sps);
@@ -1608,6 +1609,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             );
             f.field_coded = true;
             f.poc = poc;
+            f.bit_depth_chroma = sps.chroma_bit_depth();
             Some(f)
         } else {
             None
@@ -1859,7 +1861,7 @@ impl H264Decoder {
         if hdr.unit_type == 7 {
             let rbsp = unescape_rbsp(&nal[1..]);
             let sps = Sps::parse(&rbsp)?;
-            let want_u8 = sps.bit_depth_luma == 8 && sps.bit_depth_chroma == 8;
+            let want_u8 = sps.bit_depth_luma == 8 && sps.chroma_bit_depth() == 8;
             let matches = match &self.inner {
                 None => false,
                 Some(Inner::U8(_)) => want_u8,

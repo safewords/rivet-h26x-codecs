@@ -61,8 +61,10 @@ pub struct SliceRefs<'a, S: Sample = u8> {
     pub cur_parity: u8,
     /// The kernels.
     pub dsp: H264Dsp<S>,
-    /// Sample bit depth (weighted-prediction offsets scale with it).
+    /// Luma sample bit depth (weighted-prediction offsets scale with it).
     pub bit_depth: u32,
+    /// Chroma's, which scales the chroma offsets.
+    pub bit_depth_chroma: u32,
 }
 
 impl<'a, S: Sample> SliceRefs<'a, S> {
@@ -139,7 +141,13 @@ impl<'a, S: Sample> SliceRefs<'a, S> {
     /// ones from field POC distances).
     fn weighting(&self, r0: i8, r1: i8, field_mb: bool, mb_parity: u8) -> Weighting {
         if let Some(t) = self.explicit {
-            return explicit_weighting(t, self.bit_depth, r0, r1, field_mb);
+            return explicit_weighting_depths(
+                t,
+                [self.bit_depth, self.bit_depth_chroma],
+                r0,
+                r1,
+                field_mb,
+            );
         }
         if let Some(implicit) = self.implicit.as_ref()
             && r0 >= 0
@@ -242,6 +250,18 @@ pub(crate) fn explicit_weighting(
     r1: i8,
     field_mb: bool,
 ) -> Weighting {
+    explicit_weighting_depths(t, [bit_depth, bit_depth], r0, r1, field_mb)
+}
+
+/// [`explicit_weighting`] with the luma and chroma depths given apart:
+/// each component's offsets scale with its own (8-278 / 8-279).
+pub(crate) fn explicit_weighting_depths(
+    t: &PredWeightTable,
+    [bit_depth, bit_depth_chroma]: [u32; 2],
+    r0: i8,
+    r1: i8,
+    field_mb: bool,
+) -> Weighting {
     let mut w = [[1i32; 2]; 3];
     let mut o = [[0i32; 2]; 3];
     let log_wd = [
@@ -257,11 +277,12 @@ pub(crate) fn explicit_weighting(
         // Offsets are in 8-bit units in the syntax: `o << (BitDepth - 8)` (8-278).
         let e = &t.lists[list][r as usize];
         let sh = bit_depth - 8;
+        let sh_c = bit_depth_chroma - 8;
         w[0][list] = e.luma.0;
         o[0][list] = e.luma.1 << sh;
         for c in 0..2 {
             w[1 + c][list] = e.chroma[c].0;
-            o[1 + c][list] = e.chroma[c].1 << sh;
+            o[1 + c][list] = e.chroma[c].1 << sh_c;
         }
     }
     Weighting::Weighted { log_wd, w, o }
@@ -392,20 +413,22 @@ pub fn derive<S: Sample>(
     // QP'Y = QPY + QpBdOffsetY (and QP'C likewise); the deblocking filter
     // reads the unshifted values.
     let bd_off = 6 * (ctx.bit_depth as i32 - 8);
+    // QpBdOffsetC: the chroma QPs follow the chroma depth (8.5.8).
+    let bd_off_c = 6 * (cur.bit_depth_chroma as i32 - 8);
     // QP_Y as the parser (or the skip path) left it in the layer.
     let qp = layer.qp;
     let deblock_qp = if layer.kind == MbKind::IPcm { 0 } else { qp };
     let qpc_raw = [
-        chroma_qp(qp, qps.chroma_offset[0], bd_off),
-        chroma_qp(qp, qps.chroma_offset[1], bd_off),
+        chroma_qp(qp, qps.chroma_offset[0], bd_off_c),
+        chroma_qp(qp, qps.chroma_offset[1], bd_off_c),
     ];
     let deblock_qpc = [
-        chroma_qp(deblock_qp, qps.chroma_offset[0], bd_off),
-        chroma_qp(deblock_qp, qps.chroma_offset[1], bd_off),
+        chroma_qp(deblock_qp, qps.chroma_offset[0], bd_off_c),
+        chroma_qp(deblock_qp, qps.chroma_offset[1], bd_off_c),
     ];
     // From here on `qp` / `qpc` are the primed values the scaling uses.
     let qp = qp + bd_off;
-    let qpc = [qpc_raw[0] + bd_off, qpc_raw[1] + bd_off];
+    let qpc = [qpc_raw[0] + bd_off_c, qpc_raw[1] + bd_off_c];
 
     layer.qp_prime = qp;
     layer.qpc_prime = qpc;
@@ -577,6 +600,10 @@ pub fn reconstruct<S: Sample>(
     let step = geom.step;
     let bit_depth = cur.bit_depth;
     let max = (1i32 << bit_depth) - 1;
+    // Cb / Cr of a 4:4:4 picture are coded like luma but at their own depth.
+    let plane_bd = [bit_depth, cur.bit_depth_chroma, cur.bit_depth_chroma];
+    let plane_max = plane_bd.map(|d| (1i32 << d) - 1);
+    let max_c = plane_max[1];
     let dsp = &refs.dsp;
     let qp = layer.qp_prime;
     let qpc = layer.qpc_prime;
@@ -640,6 +667,7 @@ pub fn reconstruct<S: Sample>(
                     top_right: false,
                 };
                 for p in 0..planes {
+                    let (bit_depth, max) = (plane_bd[p], plane_max[p]);
                     let plane = plane_mut(cur, p);
                     let off = plane.offset(px as isize, py as isize);
                     let stride = plane.stride * step;
@@ -696,6 +724,7 @@ pub fn reconstruct<S: Sample>(
             }
             MbKind::I4x4 => {
                 for p in 0..planes {
+                    let (bit_depth, max) = (plane_bd[p], plane_max[p]);
                     let plane = plane_mut(cur, p);
                     let stride = plane.stride * step;
                     let off = plane.offset(px as isize, py as isize);
@@ -737,6 +766,7 @@ pub fn reconstruct<S: Sample>(
             }
             MbKind::I8x8 => {
                 for p in 0..planes {
+                    let (bit_depth, max) = (plane_bd[p], plane_max[p]);
                     let plane = plane_mut(cur, p);
                     let stride = plane.stride * step;
                     let off = plane.offset(px as isize, py as isize);
@@ -808,7 +838,7 @@ pub fn reconstruct<S: Sample>(
                     );
                 }
                 predict_chroma_planes(cur, info, ctx, nb, layer, geom)?;
-                sp_chroma(ctx, cur, layer, geom, qpc, max, true);
+                sp_chroma(ctx, cur, layer, geom, qpc, max_c, true);
             }
             _ => unreachable!(),
         }
@@ -833,11 +863,12 @@ pub fn reconstruct<S: Sample>(
                     max,
                 );
             }
-            sp_chroma(ctx, cur, layer, geom, qpc, max, ctx.sp_switch);
+            sp_chroma(ctx, cur, layer, geom, qpc, max_c, ctx.sp_switch);
             return Ok(());
         }
         // Residual.
         for p in 0..planes {
+            let max = plane_max[p];
             let plane = plane_mut(cur, p);
             let stride = plane.stride * step;
             let off = plane.offset(px as isize, py as isize);
@@ -1092,7 +1123,7 @@ fn predict_chroma_planes<S: Sample>(
         layer.chroma_mode,
         av,
         left_rows,
-        cur.bit_depth,
+        cur.bit_depth_chroma,
         mbh_c,
     )?;
     predict_chroma(
@@ -1102,7 +1133,7 @@ fn predict_chroma_planes<S: Sample>(
         layer.chroma_mode,
         av,
         left_rows,
-        cur.bit_depth,
+        cur.bit_depth_chroma,
         mbh_c,
     )?;
     Ok(true)
@@ -1120,7 +1151,7 @@ fn add_chroma_residual<S: Sample>(
     intra: bool,
     bypass: bool,
 ) {
-    let max = (1i32 << cur.bit_depth) - 1;
+    let max = (1i32 << cur.bit_depth_chroma) - 1;
     let c422 = cur.chroma == ChromaFormat::Yuv422;
     let (mbw_c, mbh_c) = if c422 { (8usize, 16usize) } else { (8, 8) };
     let px = geom.x;

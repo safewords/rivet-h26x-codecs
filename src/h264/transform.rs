@@ -14,6 +14,11 @@ pub struct Dequant {
     pub scale4: [[[i32; 16]; 6]; 6],
     /// 8x8: `[list][qp % 6][pos]`.
     pub scale8: [[[i32; 64]; 6]; 6],
+    /// `BitDepthC` when it differs from the slice's luma depth
+    /// ([`super::mb::SliceCtx::bit_depth`]): it sets `QpBdOffsetC`, the
+    /// offset of the chroma QPs these tables are indexed by, and the size
+    /// of a PCM chroma sample. `None` is "the luma depth".
+    pub bit_depth_chroma: Option<u32>,
 }
 
 impl Dequant {
@@ -42,7 +47,11 @@ impl Dequant {
                 }
             }
         }
-        Dequant { scale4, scale8 }
+        Dequant {
+            scale4,
+            scale8,
+            bit_depth_chroma: None,
+        }
     }
 }
 

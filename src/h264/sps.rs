@@ -164,6 +164,18 @@ pub struct Sps {
 }
 
 impl Sps {
+    /// `BitDepthC` as the decoding process uses it: the SPS's chroma depth
+    /// when there is chroma (ChromaArrayType != 0), else the luma depth —
+    /// a monochrome picture's `bit_depth_chroma_minus8` decides nothing
+    /// (7.4.2.1.1), and a separate colour plane is coded as luma.
+    pub fn chroma_bit_depth(&self) -> u32 {
+        if self.chroma_format_idc == 0 || self.separate_colour_plane {
+            self.bit_depth_luma
+        } else {
+            self.bit_depth_chroma
+        }
+    }
+
     /// The chroma format of the frame the decoder builds: monochrome when
     /// the picture is coded as separate colour planes (each plane is its
     /// own monochrome decode; the output picture is still 4:4:4).

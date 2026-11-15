@@ -194,6 +194,7 @@ pub fn predict_partition<S: Sample>(
     let c444 = cur.chroma == crate::picture::ChromaFormat::Yuv444;
     let (cw, ch) = (w / sw, h / sh);
     let max = (1i32 << cur.bit_depth) - 1;
+    let max_c = (1i32 << cur.bit_depth_chroma) - 1;
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
         let Some((rf, mv, rpar)) = r else { continue };
         let [pl, pcb, pcr] = &mut pred[list];
@@ -225,7 +226,7 @@ pub fn predict_partition<S: Sample>(
                 h + 5,
                 window,
                 pcb,
-                |o, s, st| k(o, s, st, w, h, max),
+                |o, s, st| k(o, s, st, w, h, max_c),
             );
             interp(
                 &SrcView::of(&rf.cr, rpar, fb),
@@ -235,7 +236,7 @@ pub fn predict_partition<S: Sample>(
                 h + 5,
                 window,
                 pcr,
-                |o, s, st| k(o, s, st, w, h, max),
+                |o, s, st| k(o, s, st, w, h, max_c),
             );
             continue;
         }
@@ -296,6 +297,7 @@ pub fn predict_partition<S: Sample>(
         if c > 0 && mono {
             break;
         }
+        let max = if c == 0 { max } else { max_c };
         let off = plane.offset(px as isize, py as isize);
         let stride = plane.stride * geom.step;
         let dst = &mut plane.data[off..];

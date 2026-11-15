@@ -583,6 +583,11 @@ pub fn deblock_mb_rows<S: Sample>(
     // multiplied by 2^(BitDepth - 8).
     let bd_shift = frame.bit_depth - 8;
     let max = (1i32 << frame.bit_depth) - 1;
+    // Chroma filters at BitDepthC (8.7.2.2 scales its thresholds and tC0
+    // by 2^(BitDepthC - 8)).
+    let bd_shift_c = frame.bit_depth_chroma - 8;
+    let max_c = (1i32 << frame.bit_depth_chroma) - 1;
+    let split = bd_shift_c != bd_shift;
     // A field picture: every macroblock is a field macroblock — intra
     // horizontal edges get bS 3 (only vertical ones 4), and vertical vector
     // differences count in field units.
@@ -603,6 +608,11 @@ pub fn deblock_mb_rows<S: Sample>(
     // the macroblocks cross into another one.
     let mut thr_slice = usize::MAX;
     let mut thr = ThrTable::new(&DeblockParams::default(), bd_shift);
+    let mut thr_chroma = if split {
+        Some(ThrTable::new(&DeblockParams::default(), bd_shift_c))
+    } else {
+        None
+    };
 
     for mby in r0..r1.min(mbh) {
         for mbx in 0..mbw {
@@ -617,6 +627,9 @@ pub fn deblock_mb_rows<S: Sample>(
             }
             if m.slice as usize != thr_slice {
                 thr = ThrTable::new(&par, bd_shift);
+                if split {
+                    thr_chroma = Some(ThrTable::new(&par, bd_shift_c));
+                }
                 thr_slice = m.slice as usize;
             }
             // Unavailable neighbours address the macroblock itself: their
@@ -776,8 +789,8 @@ pub fn deblock_mb_rows<S: Sample>(
                         internal_odd,
                         x0,
                         y0,
-                        &thr,
-                        max,
+                        thr_chroma.as_ref().unwrap_or(&thr),
+                        max_c,
                     );
                 }
             } else if c420 || c422 {
@@ -793,8 +806,8 @@ pub fn deblock_mb_rows<S: Sample>(
                     c422,
                     mbx * 8,
                     mby * mbh_c,
-                    &thr,
-                    max,
+                    thr_chroma.as_ref().unwrap_or(&thr),
+                    max_c,
                 );
             }
         }
@@ -909,6 +922,8 @@ fn deblock_mbaff_pairs<S: Sample>(
     let pairs_h = info.mb_height / 2;
     let bd_shift = frame.bit_depth - 8;
     let max = (1i32 << frame.bit_depth) - 1;
+    let bd_shift_c = frame.bit_depth_chroma - 8;
+    let max_c = (1i32 << frame.bit_depth_chroma) - 1;
     let chroma420 = frame.chroma == crate::picture::ChromaFormat::Yuv420;
     let chroma422 = frame.chroma == crate::picture::ChromaFormat::Yuv422;
     // 4:2:0 and 4:2:2 chroma; 4:4:4 MBAFF (luma-style chroma) is not
@@ -920,6 +935,13 @@ fn deblock_mbaff_pairs<S: Sample>(
     let mut cur_slice = usize::MAX;
     let mut par = DeblockParams::default();
     let mut thr = ThrTable::new(&par, bd_shift);
+    // Chroma's table, at BitDepthC (only built apart when the depths differ).
+    let split = bd_shift_c != bd_shift;
+    let mut thr_chroma = if split {
+        Some(ThrTable::new(&par, bd_shift_c))
+    } else {
+        None
+    };
     for pr in pr0..pr1.min(pairs_h) {
         for mbx in 0..mbw {
             let top_addr = (2 * pr) * mbw + mbx;
@@ -933,7 +955,11 @@ fn deblock_mbaff_pairs<S: Sample>(
                     cur_slice = m.slice as usize;
                     par = params[cur_slice];
                     thr = ThrTable::new(&par, bd_shift);
+                    if split {
+                        thr_chroma = Some(ThrTable::new(&par, bd_shift_c));
+                    }
                 }
+                let thr_c = thr_chroma.as_ref().unwrap_or(&thr);
                 if par.disable_idc == 1 {
                     continue;
                 }
@@ -1031,6 +1057,8 @@ fn deblock_mbaff_pairs<S: Sample>(
                             }
                         }
                         if do_chroma && any {
+                            // Chroma at its own depth: thresholds and clipping (8.7.2).
+                            let (thr, max) = (thr_c, max_c);
                             for comp in 0..2 {
                                 let t = thr.get(info.mbs[pa].qpc[comp] as i32, m.qpc[comp] as i32);
                                 let plane = if comp == 0 {
@@ -1122,6 +1150,8 @@ fn deblock_mbaff_pairs<S: Sample>(
                             );
                         }
                         if do_chroma {
+                            // Chroma at its own depth: thresholds and clipping (8.7.2).
+                            let (thr, max) = (thr_c, max_c);
                             // Chroma line k takes the bS of the luma line at
                             // its position in the same field: 2k for a field
                             // MB, and for a frame MB 2k on even lines (top
@@ -1240,6 +1270,8 @@ fn deblock_mbaff_pairs<S: Sample>(
                         );
                     }
                     if do_chroma && e == 2 {
+                        // Chroma at its own depth: thresholds and clipping (8.7.2).
+                        let (thr, max) = (thr_c, max_c);
                         for comp in 0..2 {
                             let t = thr.get(m.qpc[comp] as i32, m.qpc[comp] as i32);
                             let plane = if comp == 0 {
@@ -1280,8 +1312,20 @@ fn deblock_mbaff_pairs<S: Sample>(
                             );
                         }
                         top_edge_plain(
-                            dsp, frame, info, &thr, sa, pa, &bs, x0, y_p, xc0, yc_p, 1, do_chroma,
-                            max,
+                            dsp,
+                            frame,
+                            info,
+                            [&thr, thr_c],
+                            sa,
+                            pa,
+                            &bs,
+                            x0,
+                            y_p,
+                            xc0,
+                            yc_p,
+                            1,
+                            do_chroma,
+                            [max, max_c],
                         );
                     } else if !mf {
                         // Top frame MB below a pair.
@@ -1339,6 +1383,8 @@ fn deblock_mbaff_pairs<S: Sample>(
                                     );
                                 }
                                 if do_chroma {
+                                    // Chroma at its own depth: thresholds and clipping (8.7.2).
+                                    let (thr, max) = (thr_c, max_c);
                                     for comp in 0..2 {
                                         let t = thr
                                             .get(info.mbs[pa].qpc[comp] as i32, m.qpc[comp] as i32);
@@ -1396,8 +1442,20 @@ fn deblock_mbaff_pairs<S: Sample>(
                                 );
                             }
                             top_edge_plain(
-                                dsp, frame, info, &thr, sa, pa, &bs, x0, y_p, xc0, yc_p, 1,
-                                do_chroma, max,
+                                dsp,
+                                frame,
+                                info,
+                                [&thr, thr_c],
+                                sa,
+                                pa,
+                                &bs,
+                                x0,
+                                y_p,
+                                xc0,
+                                yc_p,
+                                1,
+                                do_chroma,
+                                [max, max_c],
                             );
                         }
                     } else {
@@ -1432,8 +1490,20 @@ fn deblock_mbaff_pairs<S: Sample>(
                             );
                         }
                         top_edge_plain(
-                            dsp, frame, info, &thr, sa, pa, &bs, x0, y_p, xc0, yc_p, 2, do_chroma,
-                            max,
+                            dsp,
+                            frame,
+                            info,
+                            [&thr, thr_c],
+                            sa,
+                            pa,
+                            &bs,
+                            x0,
+                            y_p,
+                            xc0,
+                            yc_p,
+                            2,
+                            do_chroma,
+                            [max, max_c],
                         );
                     }
                 }
@@ -1480,6 +1550,8 @@ fn deblock_mbaff_pairs<S: Sample>(
                         }
                     }
                     if chroma_edge {
+                        // Chroma at its own depth: thresholds and clipping (8.7.2).
+                        let (thr, max) = (thr_c, max_c);
                         // Chroma row of the edge: 4:2:0 only e = 2 (row 4), 4:2:2 e * 4.
                         let cy = if chroma422 { e * 4 } else { 4 };
                         for comp in 0..2 {
@@ -1581,7 +1653,7 @@ fn top_edge_plain<S: Sample>(
     dsp: &H264Dsp<S>,
     frame: &mut Frame<S>,
     info: &PicInfo,
-    thr: &ThrTable,
+    [thr, thr_c]: [&ThrTable; 2],
     sa: usize,
     pa: usize,
     bs: &[u8; 4],
@@ -1591,7 +1663,7 @@ fn top_edge_plain<S: Sample>(
     yc_p: usize,
     dy: usize,
     do_chroma: bool,
-    max: i32,
+    [max, max_c]: [i32; 2],
 ) {
     let bsw = u32::from_le_bytes(*bs);
     if bsw == 0 {
@@ -1616,6 +1688,8 @@ fn top_edge_plain<S: Sample>(
         );
     }
     if do_chroma {
+        // Chroma at its own depth: thresholds and clipping (8.7.2).
+        let (thr, max) = (thr_c, max_c);
         let cstride = frame.cb.stride;
         for comp in 0..2 {
             let t = thr.get(info.mbs[pa].qpc[comp] as i32, m.qpc[comp] as i32);

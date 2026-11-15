@@ -1379,11 +1379,12 @@ impl<'a> MbDequant<'a> {
         qp: i32,
     ) -> Option<Self> {
         let bd_off = 6 * (ctx.bit_depth as i32 - 8);
+        let bd_off_c = 6 * (dq.bit_depth_chroma.unwrap_or(ctx.bit_depth) as i32 - 8);
         // The primed QPs the scaling uses.
         let qps = [
             qp + bd_off,
-            chroma_qp(qp, chroma_offset[0], bd_off) + bd_off,
-            chroma_qp(qp, chroma_offset[1], bd_off) + bd_off,
+            chroma_qp(qp, chroma_offset[0], bd_off_c) + bd_off_c,
+            chroma_qp(qp, chroma_offset[1], bd_off_c) + bd_off_c,
         ];
         if ctx.transform_bypass && qps[0] == 0 {
             return None;
@@ -1456,7 +1457,8 @@ pub struct SliceCtx {
     pub chroma_format_idc: u32,
     /// Whether the slice is CABAC-coded (mvd bookkeeping is only for it).
     pub cabac: bool,
-    /// Sample bit depth (luma; chroma is the same in every stream accepted).
+    /// Luma sample bit depth (chroma's, when it differs, is
+    /// [`super::transform::Dequant::bit_depth_chroma`] and the frame's).
     pub bit_depth: u32,
     /// `qpprime_y_zero_transform_bypass_flag`: macroblocks at QP'Y 0 are
     /// lossless (no scaling or transform, 8.5.15's DPCM for H/V intra).
