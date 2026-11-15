@@ -82,6 +82,11 @@ pub(crate) struct AnalysisCfg {
     /// cost came within this factor of the best one's (1.0: the best
     /// 16x16 reference only).
     pub(crate) mixed_refs: f32,
+    /// Rounds of joint quarter-sample refinement of a B pair.
+    pub(crate) bi_refine: u8,
+    /// A partition's pair is refined only when it starts within this
+    /// factor of the partition's better single list (0: never).
+    pub(crate) bi_part_ratio: f32,
 }
 
 impl AnalysisCfg {
@@ -114,6 +119,8 @@ impl AnalysisCfg {
         rd: true,
         refs: 3,
         mixed_refs: 1.25,
+        bi_refine: 2,
+        bi_part_ratio: 0.0,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, one
@@ -148,6 +155,8 @@ impl AnalysisCfg {
         rd: true,
         refs: 1,
         mixed_refs: 1.0,
+        bi_refine: 1,
+        bi_part_ratio: 0.0,
     };
 
     /// The most thorough tier: the multi-hexagon search, more refinement,
@@ -180,6 +189,8 @@ impl AnalysisCfg {
         rd: true,
         refs: 4,
         mixed_refs: 1.5,
+        bi_refine: 2,
+        bi_part_ratio: 1.2,
     };
 
     /// The tier for a preset.
@@ -1851,13 +1862,56 @@ pub(crate) fn b_mb<S: Sample>(
         c16[l] = c;
     }
     let mvd16 = [sub(m16[0], pmv[0]), sub(m16[1], pmv[1])];
+    // A pair, refined jointly: each list's vector a quarter sample
+    // around, the other held, scored as the average they make.
+    // `limit`: a pair whose start already costs more is left as it is.
+    let bi_refine =
+        |r: (usize, usize, usize, usize), m: [Mv; 2], p: [Mv; 2], limit: u32| -> ([Mv; 2], u32) {
+            let mut mbi = m;
+            let mut bi_cost =
+                satd(r, PRED_BI, mbi) + costs.of(mbi[0], p[0]) + costs.of(mbi[1], p[1]);
+            let rounds = if bi_cost > limit { 0 } else { cfg.bi_refine };
+            for _ in 0..rounds {
+                let before = mbi;
+                for l in 0..2 {
+                    let c = mbi[l];
+                    for (dx, dy) in [
+                        (0, -1),
+                        (-1, 0),
+                        (1, 0),
+                        (0, 1),
+                        (-1, -1),
+                        (1, -1),
+                        (-1, 1),
+                        (1, 1),
+                    ] {
+                        let mut m = mbi;
+                        m[l] = Mv::new(c.x + dx, c.y + dy);
+                        let rc = costs.of(m[0], p[0]) + costs.of(m[1], p[1]);
+                        if rc >= bi_cost {
+                            continue;
+                        }
+                        let k = satd(r, PRED_BI, m) + rc;
+                        if k < bi_cost {
+                            bi_cost = k;
+                            mbi = m;
+                        }
+                    }
+                }
+                if mbi == before {
+                    break;
+                }
+            }
+            (mbi, bi_cost)
+        };
+    let (mbi, bi_cost) = bi_refine((0, 0, 16, 16), m16, pmv, u32::MAX);
+    let mvdbi = [sub(mbi[0], pmv[0]), sub(mbi[1], pmv[1])];
     let mut best16 = BCand::new(BMbKind::B16);
     let mut b16_est = f32::MAX;
     for dir in DIRS {
         let used = lists(dir);
         let est = if dir == PRED_BI {
-            satd((0, 0, 16, 16), dir, m16) as f32
-                + (costs.of(m16[0], pmv[0]) + costs.of(m16[1], pmv[1])) as f32
+            bi_cost as f32
         } else {
             let l = if used[0] { 0 } else { 1 };
             c16[l] as f32
@@ -1865,7 +1919,11 @@ pub(crate) fn b_mb<S: Sample>(
         if est < b16_est {
             b16_est = est;
             best16 = BCand::new(BMbKind::B16);
-            best16.fill((0, 0, 16, 16), dir, m16, mvd16);
+            if dir == PRED_BI {
+                best16.fill((0, 0, 16, 16), dir, mbi, mvdbi);
+            } else {
+                best16.fill((0, 0, 16, 16), dir, m16, mvd16);
+            }
             best16.est = est;
         }
     }
@@ -1903,22 +1961,21 @@ pub(crate) fn b_mb<S: Sample>(
                 m[l] = mv;
                 c[l] = cc;
             }
+            let (mb, cb) = bi_refine(r, m, p, (c[0].min(c[1]) as f32 * cfg.bi_part_ratio) as u32);
             for dir in DIRS {
                 let est = match dir {
                     PRED_L0 => c[0] as f32,
                     PRED_L1 => c[1] as f32,
-                    _ => {
-                        satd(r, dir, m) as f32
-                            + (costs.of(m[0], p[0]) + costs.of(m[1], p[1])) as f32
-                    }
+                    _ => cb as f32,
                 } + lam1 * if dir == PRED_BI { 5.0 } else { 3.0 };
                 if est < bestp.0 {
+                    let mm = if dir == PRED_BI { mb } else { m };
                     bestp = (
                         est,
                         SubMbShape::S8x8,
                         dir,
-                        m,
-                        [sub(m[0], p[0]), sub(m[1], p[1])],
+                        mm,
+                        [sub(mm[0], p[0]), sub(mm[1], p[1])],
                     );
                 }
             }
@@ -1959,19 +2016,23 @@ pub(crate) fn b_mb<S: Sample>(
                         cc[l] = k;
                     }
                     let mut bp = (f32::MAX, PRED_L0);
+                    let (mb, cb) = bi_refine(
+                        (x, y, w, h),
+                        m,
+                        p,
+                        (cc[0].min(cc[1]) as f32 * cfg.bi_part_ratio) as u32,
+                    );
                     for dir in DIRS {
                         let e = match dir {
                             PRED_L0 => cc[0] as f32,
                             PRED_L1 => cc[1] as f32,
-                            _ => {
-                                satd((x, y, w, h), dir, m) as f32
-                                    + (costs.of(m[0], p[0]) + costs.of(m[1], p[1])) as f32
-                            }
+                            _ => cb as f32,
                         };
                         if e < bp.0 {
                             bp = (e, dir);
                         }
                     }
+                    let m = if bp.1 == PRED_BI { mb } else { m };
                     c.est += bp.0;
                     c.fill((x, y, w, h), bp.1, m, [sub(m[0], p[0]), sub(m[1], p[1])]);
                     let used = lists(bp.1);
