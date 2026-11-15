@@ -24,7 +24,7 @@ use crate::dsp::h264_enc::{H264EncDsp, Quant};
 use crate::encode::aq;
 use crate::encode::h264_analyse::{AnalysisCfg, MbChoice, Nb, PicAn, SrcMb, b_mb, intra_mb, p_mb};
 use crate::encode::h264_deblock::{deblock_recon, nz_mask_of};
-use crate::encode::h264_hpel::{MeRef, build_hpel};
+use crate::encode::h264_hpel::{Hpel, MeRef, build_hpel};
 use crate::encode::h264_intra::{
     IntraCtx, MbAvail, MbDecision, MbKind, code_macroblock, code_macroblock_modes8,
 };
@@ -101,6 +101,11 @@ pub struct IntraTools<S: Sample> {
     /// the encoder (a B picture nothing predicts from may skip the
     /// trellis, [`AnalysisCfg::trellis_nonref`]).
     pub(crate) reference: bool,
+    /// The half-sample planes of the references searched lately, each
+    /// with the plane it was built from: a reference is searched by every
+    /// picture that predicts from it, and its planes are a function of its
+    /// samples alone ([`IntraTools::hpel_for`]).
+    hpel_cache: std::sync::Mutex<Vec<(Recon<S>, std::sync::Arc<Hpel<S>>)>>,
 }
 
 impl<S: Sample> IntraTools<S> {
@@ -132,7 +137,32 @@ impl<S: Sample> IntraTools<S> {
             cabac: false,
             la_mvs: None,
             reference: true,
+            hpel_cache: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The half-sample planes of `r`: built once per reference however
+    /// many pictures search it. A cached entry is reused only when the
+    /// plane it was built from is `r` sample for sample, so what comes
+    /// back is always exactly what [`build_hpel`] would build.
+    pub(crate) fn hpel_for(&self, r: &Recon<S>, max: i32) -> std::sync::Arc<Hpel<S>> {
+        /// Enough for every reference a picture searches (five list-0
+        /// references and the B pictures' two) with room for the next.
+        const KEEP: usize = 8;
+        let same = |a: &Recon<S>| {
+            a.stride == r.stride && a.width == r.width && a.height == r.height && a.data == r.data
+        };
+        let mut c = self.hpel_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = c.iter().position(|(src, _)| same(src)) {
+            let e = c.remove(i);
+            let h = e.1.clone();
+            c.insert(0, e);
+            return h;
+        }
+        let h = std::sync::Arc::new(build_hpel(r, max));
+        c.insert(0, (r.clone(), h.clone()));
+        c.truncate(KEEP);
+        h
     }
 
     /// The same tools deciding progressive pictures by `cfg`'s analysis.
@@ -937,9 +967,11 @@ pub(crate) fn code_p_picture<S: Sample>(
     let mut st = MbMotionState::new();
     let mut chain = QpChain::new(ctx.qp, g.bit_depth);
     let analysis = tools.analysis.filter(|_| !g.field_pic);
-    let hpel = analysis.map(|_| build_hpel(pref.search, ctx.max));
+    let hpel = analysis.map(|_| tools.hpel_for(pref.search, ctx.max));
     let hpel_more: Vec<_> = if analysis.is_some() {
-        more.iter().map(|r| build_hpel(&r[0], ctx.max)).collect()
+        more.iter()
+            .map(|r| tools.hpel_for(&r[0], ctx.max))
+            .collect()
     } else {
         Vec::new()
     };
@@ -1250,8 +1282,8 @@ pub(crate) fn code_b_picture<S: Sample>(
     let analysis = tools.analysis.filter(|_| !g.field_pic);
     let hpel = analysis.map(|_| {
         [
-            build_hpel(brefs.search[0], ctx.max),
-            build_hpel(brefs.search[1], ctx.max),
+            tools.hpel_for(brefs.search[0], ctx.max),
+            tools.hpel_for(brefs.search[1], ctx.max),
         ]
     });
     let mut an = analysis.map(|cfg| {
