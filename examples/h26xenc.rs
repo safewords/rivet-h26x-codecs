@@ -84,7 +84,7 @@ fn die(msg: &str) -> ! {
          \x20      [--fps N | N/D | decimal] [--cpb-ms N]\n\
          \x20      [--gop N] [--bframes N] [--cavlc] [--t8x8] [--subparts] [--sao]\n\
          \x20      [--aq STRENGTH] [--lookahead N] [--wpred] [--bweight default|implicit|explicit] [--refs N] [--cu-depth N] [--depth N] [--threads N]\n\
-         \x20      [--parts none|sym] (H.265)\n\
+         \x20      [--parts none|sym] [--preset veryfast|medium|slow] [--b-pyramid] [--no-b-pyramid] [--no-sao] (H.265)\n\
          \x20      [--interlace tff|bff [--field-coding field|paff|mbaff]] (H.264)\n\
          \x20      [--color PRIMARIES:TRANSFER:MATRIX (H.273 codes, e.g. 9:16:9 for HDR10)]\n\
          \x20      [--full-range] [--chroma-loc N (H.273 chroma_sample_loc_type 0..=5)]\n\
@@ -103,6 +103,21 @@ fn main() {
     let mut cfg = Config::default();
     let mut fmt = "420".to_string();
     let mut full_range = false;
+
+    // A tier sets the structural fields to its defaults first, so that any
+    // explicit flag below overrides it whatever the order on the line.
+    let codec_arg = args
+        .windows(2)
+        .rfind(|w| w[0] == "--codec")
+        .map(|w| w[1].clone());
+    if let Some(w) = args.windows(2).rfind(|w| w[0] == "--preset") {
+        let p = Preset::from_name(&w[1])
+            .unwrap_or_else(|| die("--preset wants veryfast, medium or slow"));
+        if codec_arg.as_deref() != Some("h265") {
+            die("--preset is H.265 only for now");
+        }
+        h26x::encode::h265_tune::apply_preset(&mut cfg, p);
+    }
 
     let mut i = 1;
     let val = |i: &mut usize, args: &Vec<String>, what: &str| -> String {
@@ -160,6 +175,13 @@ fn main() {
                 cfg.bframes = val(&mut i, &args, "--bframes")
                     .parse()
                     .unwrap_or_else(|_| die("--bframes"))
+            }
+            "--b-pyramid" => cfg.b_pyramid = true,
+            "--no-b-pyramid" => cfg.b_pyramid = false,
+            "--no-sao" => cfg.sao = false,
+            "--preset" => {
+                // Applied before this loop; see above.
+                val(&mut i, &args, "--preset");
             }
             "--depth" => {
                 cfg.bit_depth = val(&mut i, &args, "--depth")
@@ -345,6 +367,9 @@ fn main() {
     };
     if codec != "h264" && codec != "h265" {
         die("--codec must be h264 or h265");
+    }
+    if cfg.b_pyramid && codec != "h265" {
+        die("--b-pyramid is H.265 only for now");
     }
     if full_range {
         match cfg.colour.as_mut() {

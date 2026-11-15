@@ -96,10 +96,38 @@ pub mod h265_intra;
 pub mod h265_me;
 pub(crate) mod h265_sao;
 pub mod h265_syntax;
+pub mod h265_tune;
 pub(crate) mod h265_wp;
 pub mod hrd;
 pub mod level;
 pub(crate) mod rc;
+
+/// A speed tier: how much search an encoder spends per picture. Each is
+/// matched to the x265 preset of the same name (`--tune psnr`) — the tier
+/// is meant to reach that preset's compression in no more CPU time — and
+/// each codec reads it its own way (`h265_tune` for H.265). `None` in
+/// [`Config::preset`] keeps every tool at the value its own field says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    /// Matched to x265 `--preset veryfast`.
+    Veryfast,
+    /// Matched to x265 `--preset medium`.
+    Medium,
+    /// Matched to x265 `--preset slow`.
+    Slow,
+}
+
+impl Preset {
+    /// The tier by its x265 name.
+    pub fn from_name(s: &str) -> Option<Self> {
+        Some(match s {
+            "veryfast" => Self::Veryfast,
+            "medium" => Self::Medium,
+            "slow" => Self::Slow,
+            _ => return None,
+        })
+    }
+}
 
 /// How lossy, and by what means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,6 +571,11 @@ pub struct Config {
     /// -1.5% / -1.3% natural, 3840x2160 -0.8% / -0.3% synthetic and
     /// -1.4% / -1.2% natural. CPU 1.6-2.2x against `None`.
     pub inter_parts: InterParts,
+    /// The speed tier, when one was asked for. H.265 only for now; see
+    /// [`Preset`] and `h265_tune::apply_preset`, which also sets the
+    /// structural fields above (B pictures, references, SAO) to the
+    /// tier's defaults.
+    pub preset: Option<Preset>,
     /// H.264: how B slices weight their predictions, or `None` for the
     /// encoder's choice — [`BWeighting::Explicit`] under
     /// [`Config::weighted_pred`], [`BWeighting::Default`] otherwise.
@@ -618,6 +651,7 @@ impl Default for Config {
             interlace: None,
             field_coding: FieldCoding::Paff,
             inter_parts: InterParts::None,
+            preset: None,
             b_weighting: None,
             preset: Preset::Medium,
             pyramid: false,

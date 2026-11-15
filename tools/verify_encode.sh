@@ -735,6 +735,15 @@ hevc-refs3-ipb@cut|--codec h265 --qp 26 --gop 250 --bframes 2 --refs 3
 hevc-refs4-b3@motion|--codec h265 --qp 26 --gop 250 --bframes 3 --refs 4
 hevc-refs4-b3@fade|--codec h265 --qp 26 --gop 250 --bframes 3 --refs 4
 hevc-refs4-b3@cut|--codec h265 --qp 26 --gop 250 --bframes 3 --refs 4
+hevc-pyr-b3-refs4|--codec h265 --qp 26 --gop 250 --bframes 3 --refs 4 --b-pyramid
+hevc-pyr-b3-refs1|--codec h265 --qp 30 --gop 8 --bframes 3 --b-pyramid
+hevc-pyr-b7-sao|--codec h265 --qp 32 --gop 250 --bframes 7 --refs 2 --b-pyramid --sao
+hevc-pyr-b2-wp@fade|--codec h265 --qp 26 --gop 8 --bframes 2 --wpred --b-pyramid
+hevc-preset-medium|--codec h265 --qp 30 --gop 250 --preset medium
+hevc-preset-veryfast|--codec h265 --qp 30 --gop 250 --preset veryfast
+hevc-preset-slow|--codec h265 --qp 30 --gop 250 --preset slow
+hevc-preset-medium-g8-37|--codec h265 --qp 37 --gop 8 --preset medium
+hevc10-preset-medium@p10|--codec h265 --qp 30 --gop 250 --preset medium
 h264-ipb-g3b1|--codec h264 --qp 26 --gop 3 --bframes 1
 h264-ipb-g4b2|--codec h264 --qp 26 --gop 4 --bframes 2
 h264-refs3-ipb-g5b1|--codec h264 --qp 26 --gop 5 --bframes 1 --refs 3

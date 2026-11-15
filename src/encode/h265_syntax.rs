@@ -231,7 +231,8 @@ fn chroma_idc(c: ChromaFormat) -> u32 {
 /// forgiving, which is exactly why CROSS exists.
 pub(crate) fn dpb(cfg: &Config) -> (u32, u32) {
     let reorder = cfg.bframes;
-    (cfg.max_refs.max(1) + reorder, reorder)
+    let kept = crate::encode::h265::refs_kept(cfg) as u32;
+    (cfg.max_refs.max(1).max(kept - 1) + reorder, reorder)
 }
 
 /// `profile_tier_level`, shared by the VPS and SPS.

@@ -653,7 +653,11 @@ impl<S: Sample> Core<S> {
             cbr,
             pps_opts,
             census: Census::default(),
-            sched: Scheduler::new(cfg.gop, cfg.bframes),
+            sched: if cfg.b_pyramid {
+                Scheduler::with_pyramid(cfg.gop, cfg.bframes)
+            } else {
+                Scheduler::new(cfg.gop, cfg.bframes)
+            },
             rc,
             pps_qp,
             emitted: 0,
@@ -899,7 +903,12 @@ impl<S: Sample> Core<S> {
     fn pick_picture_qp(&mut self, c: &Coded, upcoming: &[Coded]) -> Result<u8> {
         Ok(match self.cfg.rate {
             RateControl::Lossless => 26,
-            RateControl::ConstantQp(q) => q.min(51),
+            // Under a tier the configured quantiser is a P picture's, and
+            // the others sit at the tier's offsets from it (`h265_tune`).
+            RateControl::ConstantQp(q) => {
+                let off = super::h265_tune::Tune::of(&self.cfg).qp_offset(c.kind, c.layer);
+                (i32::from(q) + off).clamp(0, 51) as u8
+            }
             RateControl::Bitrate { .. } => {
                 let kind = pic_kind(c.kind);
                 if self.cfg.lookahead == 0 {
@@ -1380,7 +1389,14 @@ impl<S: Sample> Core<S> {
             frame.extend_rows(0, frame.height);
             self.refs.push(frame);
             while self.refs.len() > self.refs_kept() {
-                self.refs.remove(0);
+                let oldest = self
+                    .refs
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, f)| f.poc)
+                    .map(|(i, _)| i)
+                    .expect("more references than kept, so at least one");
+                self.refs.remove(oldest);
             }
         }
         debug_assert_eq!(
@@ -1394,7 +1410,7 @@ impl<S: Sample> Core<S> {
     /// geometry above, or as many past pictures as `max_refs` lets a P
     /// picture choose between — whichever is more.
     fn refs_kept(&self) -> usize {
-        (self.cfg.max_refs as usize).max(2)
+        refs_kept(&self.cfg)
     }
 
     /// The picture order counts `retain_reference` will hold once `c` is
@@ -1408,8 +1424,21 @@ impl<S: Sample> Core<S> {
         if c.reference {
             pocs.push(c.poc);
         }
-        let drop = pocs.len().saturating_sub(self.refs_kept());
-        pocs.split_off(drop)
+        // The window drops the lowest POC first, as `retain_reference`
+        // does: under a pyramid the picture coded longest ago is not the
+        // one displayed longest ago, and it is the display-oldest that no
+        // later picture of the mini-GOP needs. Without a pyramid reference
+        // pictures are coded in display order and the two agree.
+        while pocs.len() > self.refs_kept() {
+            let i = pocs
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| **p)
+                .map(|(i, _)| i)
+                .expect("non-empty");
+            pocs.remove(i);
+        }
+        pocs
     }
 
     /// Code one inter picture — P or B: every CTU one coding unit, or a
@@ -1986,6 +2015,19 @@ impl<S: Sample> Core<S> {
 }
 
 /// The rate controller's kind for a scheduled picture.
+/// How many reference pictures the encoder holds: two for the B
+/// geometry, or as many past pictures as `max_refs` lets a P picture
+/// choose between, and under a B pyramid two anchors plus one picture of
+/// every reference layer — what the bottom of the hierarchy reads.
+pub(crate) fn refs_kept(cfg: &Config) -> usize {
+    let layers = if cfg.b_pyramid {
+        Scheduler::with_pyramid(cfg.gop, cfg.bframes).reference_b_layers() as usize
+    } else {
+        0
+    };
+    (cfg.max_refs as usize).max(2 + layers)
+}
+
 fn pic_kind(kind: Kind) -> PicKind {
     match kind {
         Kind::Idr | Kind::I => PicKind::Intra,
