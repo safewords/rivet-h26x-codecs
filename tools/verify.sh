@@ -1,8 +1,12 @@
 #!/bin/bash
 # verify.sh [--baseline FILE] [decoder] — everything that has to hold before a
-# change lands: every fixture against its recorded MD5, then all four
-# conformance suites (JVT AVCv1+FRExt, JVT professional profiles, JCT-VC
-# HEVC_v1, RExt).
+# change lands: every fixture against its recorded MD5, then every
+# conformance suite: the four ITU-T ones the decoders started from (JVT
+# AVCv1+FRExt, JVT professional profiles, JCT-VC HEVC_v1, RExt), the JCT-VC
+# SCC, MV-HEVC and SHVC suites (the last two on their base layer), and the
+# two generated for what no suite carries (h264_jm: slice data partitioning
+# and unequal bit depths from JM's encoder; hevc_scp: separate colour
+# planes) — see tools/README.md.
 #
 # --baseline FILE  also record "<suite> <status> <stream> <md5>" per stream to
 #                  FILE, and if FILE already exists, diff against it instead.
@@ -15,6 +19,10 @@
 #                  change, or a machine without conf/ fetched.
 #
 #   JOBS=n         streams in parallel per suite (default 6)
+#   VERIFY_SUITES="a b ..."  the suites to run (default: all nine). A suite
+#                  named here whose conf/ directory is missing FAILS — it
+#                  is not skipped, since an absent suite reports nothing.
+#   TAPPDECODER_SCC=path  HM's SCC build, the SCC suite's fallback reference
 #   H26X_WORK=dir  the scratch directory holding the fixtures and conf/
 #                  (default: this script's directory)
 #   GOLD=file      the golden list (default: golden.txt beside this script,
@@ -119,13 +127,21 @@ PRIV=../release/examples/h26xdec_verify_$TAG.exe
 cp "$DEC" "$PRIV" || exit 1
 trap 'rm -f "$PRIV"; rm -rf conf/*/out_$TAG' EXIT
 J=${JOBS:-6}
-for s in h264 h264_pp hevc hevc_rext; do
+SUITES_RUN=${VERIFY_SUITES:-"h264 h264_pp hevc hevc_rext hevc_scc hevc_mv hevc_shvc h264_jm hevc_scp"}
+for s in $SUITES_RUN; do
+  if [ ! -f "conf/$s/run_conf.sh" ]; then
+    echo "NOSTREAM    no suite at conf/$s (fetch or make it first; see tools/README.md)" > "conf_missing_$s.log"
+    continue
+  fi
   DEC=$(cd ../release/examples && pwd)/h26xdec_verify_$TAG.exe OUT=out_$TAG JOBS=$J \
     bash conf/$s/run_conf.sh > conf/$s/verify_$TAG.log 2>&1 &
 done
 wait
 rec=$(mktemp)
-for s in h264 h264_pp hevc hevc_rext; do
+for s in $SUITES_RUN; do
+  if [ -f "conf_missing_$s.log" ]; then
+    printf "%-10s %s\n" "$s" "MISSING"; cat "conf_missing_$s.log"; rm -f "conf_missing_$s.log"; fail=1; continue
+  fi
   printf "%-10s %s\n" "$s" "$(tail -1 conf/$s/verify_$TAG.log)"
   grep -E "^FAIL|^NOSTREAM" conf/$s/verify_$TAG.log
   grep -qE "fail=0" conf/$s/verify_$TAG.log || fail=1

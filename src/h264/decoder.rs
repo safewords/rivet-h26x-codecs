@@ -1346,26 +1346,32 @@ impl<S: Sample> H264DecoderImpl<S> {
                 Some(Box::new(out))
             }
         };
-        // SP / SI slices (8.6) are decoded as the Extended profile codes
-        // them: CAVLC, 4:2:0 (or 4:0:0), 8-bit, the 4x4 transform. Nothing
-        // outside that exists to be checked against, so it is refused by
-        // name rather than decoded on trust — a caller handed plausible
-        // wrong pixels has no way to find out, a refused stream can go to
-        // another decoder.
+        // SP / SI slices (8.6) exist in one profile, Extended (A.2.3), and
+        // are decoded as it codes them: CAVLC (entropy_coding_mode_flag 0),
+        // 4:2:0 and 8-bit (its SPS carries no chroma_format_idc or depth),
+        // the 4x4 transform (its PPS no transform_8x8_mode_flag). Every
+        // other profile allows only I, P and B slices (A.2.1, A.2.2, A.2.4
+        // to A.2.11), so an SP / SI slice outside that shape conforms to
+        // no profile at all: there is no decoding of it to check against,
+        // and it is refused by name rather than decoded on trust.
         if matches!(hdr.slice_type, SliceType::Sp | SliceType::Si) {
+            const NO_PROFILE: &str =
+                "(no profile allows it: SP / SI are Extended-profile only, A.2.3)";
             if pps.cabac {
-                return Err(Error::unsupported("H.264 SP/SI slices with CABAC"));
+                return Err(Error::unsupported(format!(
+                    "H.264 SP/SI slices with CABAC {NO_PROFILE}"
+                )));
             }
             if sps.chroma_format_idc > 1 || sps.bit_depth_luma != 8 || sps.chroma_bit_depth() != 8 {
                 return Err(Error::unsupported(format!(
-                    "H.264 SP/SI slices at chroma_format_idc {} / {}-bit",
+                    "H.264 SP/SI slices at chroma_format_idc {} / {}-bit {NO_PROFILE}",
                     sps.chroma_format_idc, sps.bit_depth_luma
                 )));
             }
             if pps.transform_8x8_mode {
-                return Err(Error::unsupported(
-                    "H.264 SP/SI slices with the 8x8 transform",
-                ));
+                return Err(Error::unsupported(format!(
+                    "H.264 SP/SI slices with the 8x8 transform {NO_PROFILE}"
+                )));
             }
         }
         Self::check_supported(&sps)?;
