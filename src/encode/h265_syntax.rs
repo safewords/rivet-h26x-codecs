@@ -587,7 +587,7 @@ pub fn write_sps(cfg: &Config, g: &Geometry, log2_max_poc_lsb: u32, cpb: Option<
     w.flag(false); // pcm_enabled_flag
     w.ue(0); // num_short_term_ref_pic_sets
     w.flag(false); // long_term_ref_pics_present_flag
-    w.flag(false); // sps_temporal_mvp_enabled_flag
+    w.flag(tmvp_enabled(cfg)); // sps_temporal_mvp_enabled_flag
     w.flag(false); // strong_intra_smoothing_enabled_flag
     w.flag(true); // vui_parameters_present_flag
     write_vui(
@@ -762,6 +762,28 @@ pub struct SliceHeader {
     /// syntax, and a P slice under a set flag must carry a table even when
     /// every weight in it is the default.
     pub pred_weights: Option<PredWeights>,
+    /// The slice's temporal motion vector prediction, or `None` when the
+    /// SPS leaves `sps_temporal_mvp_enabled_flag` clear and the reader
+    /// takes no `slice_temporal_mvp_enabled_flag` at all.
+    pub tmvp: Option<Tmvp>,
+}
+
+/// `slice_temporal_mvp_enabled_flag` and, when set, where the collocated
+/// picture is: `RefPicList1[0]` for a B slice whose `col_from_l0` is
+/// false, `RefPicList0[0]` otherwise (`collocated_ref_idx` is always 0).
+#[derive(Debug, Clone, Copy)]
+pub struct Tmvp {
+    /// `slice_temporal_mvp_enabled_flag`.
+    pub enabled: bool,
+    /// `collocated_from_l0_flag` (read for B slices only; a P slice's
+    /// collocated picture is in list 0 by definition).
+    pub col_from_l0: bool,
+}
+
+/// Whether this stream's SPS enables temporal motion vector prediction:
+/// the tier asks for it (`h265_tune::Tune::tmvp`).
+pub fn tmvp_enabled(cfg: &Config) -> bool {
+    super::h265_tune::Tune::of(cfg).tmvp
 }
 
 /// A slice's `pred_weight_table`, with what the writer needs to spell it
@@ -929,10 +951,12 @@ pub fn write_slice_header(
             w.flag(used); // used_by_curr_pic_s1_flag
             prev = d;
         }
-        // slice_temporal_mvp_enabled_flag is absent: the SPS disables
-        // temporal MVP, so the reader never reads the slice-level flag —
-        // which is also what makes the spatial candidate derivation the
-        // complete one rather than a subset of it.
+        // slice_temporal_mvp_enabled_flag, present exactly when the SPS
+        // enables temporal MVP (the last element of this branch: there are
+        // no long-term pictures to describe before it).
+        if let Some(t) = h.tmvp {
+            w.flag(t.enabled);
+        }
     }
     // slice_sao_luma_flag / slice_sao_chroma_flag, present exactly when
     // the SPS enables SAO — for every slice type, this block sitting
@@ -987,12 +1011,23 @@ pub fn write_slice_header(
         if h.kind == Kind::B {
             w.flag(false); // mvd_l1_zero_flag
         }
+        // The collocated picture, after cabac_init_flag (absent here):
+        // collocated_from_l0_flag for B, then collocated_ref_idx only when
+        // the list it names has more than one entry. Always index 0.
+        if let Some(t) = h.tmvp.filter(|t| t.enabled) {
+            let from_l0 = h.kind != Kind::B || t.col_from_l0;
+            if h.kind == Kind::B {
+                w.flag(from_l0); // collocated_from_l0_flag
+            }
+            if (if from_l0 { n0 } else { n1 }) > 1 {
+                w.ue(0); // collocated_ref_idx
+            }
+        }
         // cabac_init_present_flag is 0 in the PPS: no cabac_init_flag, and
         // both sides derive the P/B initialisation type from the slice
         // type alone.
         //
-        // collocated_from_l0_flag / collocated_ref_idx are absent because
-        // slice_temporal_mvp_enabled is off. The prediction weight table
+        // The collocated picture's syntax is above. The prediction weight table
         // is read exactly when the PPS sets `weighted_pred_flag` for a P
         // slice or `weighted_bipred_flag` for a B — the caller's `Option`
         // says which, as with SAO — and it sits here, before
@@ -1428,6 +1463,10 @@ mod tests {
                     kept_deltas: Vec::new(),
                     sao: None,
                     pred_weights: None,
+                    tmvp: tmvp_enabled(&cfg).then_some(Tmvp {
+                        enabled: true,
+                        col_from_l0: false,
+                    }),
                 };
                 write_slice_header(&h, 26, NAL_TRAIL_R, true, &mut w);
                 w.flag(true);
@@ -1648,6 +1687,10 @@ mod tests {
                 kept_deltas: kept.clone(),
                 sao: None,
                 pred_weights: None,
+                tmvp: tmvp_enabled(&cfg).then_some(Tmvp {
+                    enabled: true,
+                    col_from_l0: false,
+                }),
             };
             let mut w = BitWriter::with_capacity(64);
             w.bits(8, ((NAL_TRAIL_R as u32) & 0x3f) << 1);
@@ -1677,6 +1720,11 @@ mod tests {
                 "slice type"
             );
             assert_eq!(parsed.slice_qp, 30, "slice QP");
+            assert_eq!(
+                (parsed.temporal_mvp_enabled, parsed.collocated_from_l0),
+                (tmvp_enabled(&cfg), !tmvp_enabled(&cfg) || kind != Kind::B),
+                "temporal MVP and the collocated list"
+            );
             assert_eq!(
                 parsed.st_rps.neg, want_neg,
                 "past references for {kind:?} {deltas:?} kept {kept:?}"
@@ -1916,6 +1964,10 @@ mod tests {
                 kept_deltas: Vec::new(),
                 sao: None,
                 pred_weights: Some(pw),
+                tmvp: tmvp_enabled(&cfg).then_some(Tmvp {
+                    enabled: true,
+                    col_from_l0: false,
+                }),
             };
             let mut w = BitWriter::with_capacity(64);
             w.bits(8, ((NAL_TRAIL_R as u32) & 0x3f) << 1);

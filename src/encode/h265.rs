@@ -1261,6 +1261,11 @@ impl<S: Sample> Core<S> {
                 // An I slice carries no prediction weights whatever the
                 // PPS says.
                 pred_weights: None,
+                // An IDR's header takes no temporal MVP flag.
+                tmvp: syn::tmvp_enabled(&self.cfg).then_some(syn::Tmvp {
+                    enabled: false,
+                    col_from_l0: true,
+                }),
             },
             pps_qp,
             syn::NAL_IDR_N_LP,
@@ -1308,11 +1313,33 @@ impl<S: Sample> Core<S> {
         };
         let mut cus: Vec<TreeCu<CuDecision>> = Vec::with_capacity(wc * hc);
         let mut ctu_start = Vec::with_capacity(wc * hc + 1);
+        // Live pricing contexts, as `code_inter_picture` keeps them.
+        let mut live = tune.live_contexts.then(|| (cx.clone(), TreeCtx::new(&g)));
+        if let Some((lcx, _)) = &live {
+            set_live_contexts(Some(lcx));
+        }
         for cy in 0..hc {
             for cxu in 0..wc {
                 ctu_start.push(cus.len());
                 if max_depth > 0 {
                     cus.extend(pic.code_ctu_tree(&ictx, &want, max_depth, cxu, cy, &src));
+                    if let Some((lcx, ltc)) = live.as_mut() {
+                        let first = *ctu_start.last().unwrap_or(&0);
+                        let mut e = CabacEncoder::estimating();
+                        write_tree(
+                            &mut e,
+                            lcx,
+                            &cus[first..],
+                            (cxu << g.log2_ctb, cy << g.log2_ctb),
+                            g.log2_ctb,
+                            ltc,
+                            None,
+                            &mut |e, cx, cu, _, _, _| {
+                                write_cu_intra_i(e, cx, &cu.d, bypass, cat, None)
+                            },
+                        );
+                        set_live_contexts(Some(lcx));
+                    }
                     continue;
                 }
                 let (x0, y0) = (cxu << g.log2_ctb, cy << g.log2_ctb);
@@ -1332,6 +1359,7 @@ impl<S: Sample> Core<S> {
             }
         }
         ctu_start.push(cus.len());
+        set_live_contexts(None);
         if offsets.is_some() {
             let mut chain = QgChain::new(i32::from(qp), bit_depth, &g, log2_qg);
             settle_tree(&mut chain, &mut cus, &ctu_start, &g, &want);
@@ -1472,6 +1500,11 @@ impl<S: Sample> Core<S> {
         let want = self.refs_after(c);
         if c.reference {
             frame.poc = c.poc;
+            // An intra picture's motion grid is all intra to a decoder,
+            // which is what a later picture's temporal candidates read.
+            if c.kind.is_intra() {
+                frame.motion.fill(crate::hevc::frame::MotionInfo::INTRA);
+            }
             frame.extend_rows(0, frame.height);
             self.half.push((
                 c.poc,
@@ -1841,6 +1874,13 @@ impl<S: Sample> Core<S> {
                     bit_depth_luma: bit_depth,
                     bit_depth_chroma: bit_depth,
                 }),
+                // The collocated picture is the nearest reference the
+                // other side of the picture where there is one: a B
+                // picture's future anchor, a P picture's nearest past.
+                tmvp: syn::tmvp_enabled(&self.cfg).then_some(syn::Tmvp {
+                    enabled: true,
+                    col_from_l0: c.kind != Kind::B,
+                }),
             },
             pps_qp,
             syn::NAL_TRAIL_R,
@@ -1879,6 +1919,15 @@ impl<S: Sample> Core<S> {
             Some(r1) if c.kind == Kind::B => TreeRefs::B(past, r1),
             _ => TreeRefs::P(&l0),
         };
+        // Decisions price their bins at the contexts the picture has
+        // reached by the start of each CTU: every CTU decided is run
+        // through the writer, without its SAO syntax (whose contexts no
+        // decision reads), so the states match what serialisation will
+        // hold there.
+        let mut live = tune.live_contexts.then(|| (cx.clone(), TreeCtx::new(&g)));
+        if let Some((lcx, _)) = &live {
+            set_live_contexts(Some(lcx));
+        }
         let mut cus: Vec<TreeCu<PCuDecision>> = Vec::with_capacity(wc * hc);
         let mut ctu_start = Vec::with_capacity(wc * hc + 1);
         for cy in 0..hc {
@@ -1886,6 +1935,38 @@ impl<S: Sample> Core<S> {
                 ctu_start.push(cus.len());
                 if max_depth > 0 {
                     cus.extend(pic.code_ctu_tree(&mctx, &want, max_depth, refs, cxu, cy, &src));
+                    if let Some((lcx, ltc)) = live.as_mut() {
+                        let first = *ctu_start.last().unwrap_or(&0);
+                        let mut e = CabacEncoder::estimating();
+                        write_tree(
+                            &mut e,
+                            lcx,
+                            &cus[first..],
+                            (cxu << g.log2_ctb, cy << g.log2_ctb),
+                            g.log2_ctb,
+                            ltc,
+                            None,
+                            &mut |e, cx, cu, left, above, _| match &cu.d {
+                                PCuDecision::Inter(d) => write_cu_inter(
+                                    e,
+                                    cx,
+                                    d,
+                                    left,
+                                    above,
+                                    cat,
+                                    bypass,
+                                    None,
+                                    l0.len() as u32,
+                                    cu.depth,
+                                    c.kind == Kind::B,
+                                ),
+                                PCuDecision::Intra(d) => {
+                                    write_cu_intra_in_p(e, cx, d, left, above, cat, bypass, None)
+                                }
+                            },
+                        );
+                        set_live_contexts(Some(lcx));
+                    }
                     continue;
                 }
                 let (x0, y0) = (cxu << g.log2_ctb, cy << g.log2_ctb);
@@ -1924,6 +2005,7 @@ impl<S: Sample> Core<S> {
             }
         }
         ctu_start.push(cus.len());
+        set_live_contexts(None);
         if offsets.is_some() {
             let mut chain = QgChain::new(i32::from(qp), bit_depth, &g, log2_qg);
             settle_tree(&mut chain, &mut cus, &ctu_start, &g, &want);
@@ -3049,6 +3131,26 @@ pub(crate) fn intra_cu_bits(d: &CuDecision, cat: u32, qp: i32, pps_bypass: bool)
     e.fractional_bits() as f32
 }
 
+thread_local! {
+    /// The contexts the picture being decided has reached, when the
+    /// decisions price at live states (`set_live_contexts`).
+    static LIVE: std::cell::RefCell<Option<Box<Contexts>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Price every decision on this thread at `cx` from now on, or at each
+/// slice's initial contexts again (`None`).
+pub(crate) fn set_live_contexts(cx: Option<&Contexts>) {
+    LIVE.with_borrow_mut(|l| match (l.as_mut(), cx) {
+        (Some(b), Some(c)) => (**b).clone_from(c),
+        (_, c) => *l = c.map(|c| Box::new(c.clone())),
+    });
+}
+
+/// The live contexts, when the decisions price at them.
+pub(crate) fn live_contexts() -> Option<Contexts> {
+    LIVE.with_borrow(|l| l.as_deref().cloned())
+}
+
 /// The same for a unit of a P (`is_b` false) or B slice, inter or intra,
 /// with neutral skip contexts, `nref` active list-0 references and the
 /// unit at quadtree depth `depth`.
@@ -3059,6 +3161,9 @@ pub(crate) fn intra_cu_bits(d: &CuDecision, cat: u32, qp: i32, pps_bypass: bool)
 /// hundred thousand times a picture, and the initialisation is a formula
 /// per context.
 pub(crate) fn initial_contexts(init_type: usize, qp: i32) -> Contexts {
+    if let Some(cx) = live_contexts() {
+        return cx;
+    }
     thread_local! {
         static CACHE: std::cell::RefCell<Vec<Option<Box<Contexts>>>> =
             std::cell::RefCell::new(vec![None; 3 * 52]);

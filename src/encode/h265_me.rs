@@ -56,12 +56,17 @@
 //!   everything else. Note for anyone testing this: the two agree for
 //!   every `qPi` below 30, so a fixed-QP-26 stream cannot tell them apart.
 //!
-//! **TMVP is foreclosed by the bitstream, not skipped by this module.**
-//! `write_sps` writes `sps_temporal_mvp_enabled_flag` = 0, so the slice
-//! header never carries the slice-level flag and the decoder derives
-//! temporal MVP off. The `RefCtx` here says the same (`tmvp: false`,
-//! no collocated picture), which makes the spatial + zero candidate set
-//! the *complete* derivation for these streams, not a subset.
+//! **Temporal MVP follows the tier.** Under `h265_tune::Tune::tmvp` the
+//! SPS enables it and every inter slice sets
+//! `slice_temporal_mvp_enabled_flag`, naming `RefPicList1[0]` (a B
+//! picture's future anchor) or a P picture's `RefPicList0[0]` as the
+//! collocated picture; [`InterPicture::tmvp`] puts the same picture in the
+//! `RefCtx`, so the decoder's derivation adds the temporal candidate to
+//! both lists here exactly as it will there. Without it the SPS clears
+//! the flag and the spatial + zero candidate set is the *complete*
+//! derivation. The collocated picture's motion grid is the one this
+//! module filled when it was coded (an intra picture's is marked intra
+//! when it is kept, `Core::retain_reference`).
 //!
 //! # Prediction-unit partitions (2026-09-18)
 //!
@@ -104,17 +109,13 @@
 //! before deciding not to build them. The numbers are here so the next
 //! reader decides against a bigger corpus rather than re-deriving them.
 //!
-//! - **Temporal merge / AMVP candidates (TMVP).** The SPS disables it;
-//!   the decoder's derivation is complete and the motion grid the
-//!   collocated picture would need is already kept in `Frame`. What a
-//!   temporal candidate can buy is turning an AMVP unit into a merge
-//!   (its `mvd` and `mvp_l0_flag` for a `merge_idx`), so the ceiling is
-//!   bounded by the AMVP share: on the corpus's census at QP 26 that is
-//!   56 of 336 P CUs on the cut clip and 0–1 of 28–60 on every other,
-//!   about 12% corpus-wide and nearly all on one clip. At ten to twenty
-//!   bits per unit that is under half a percent of the cut stream and
-//!   nothing elsewhere, for `slice_temporal_mvp_enabled_flag`,
-//!   `collocated_ref_idx` and a second reader-derivation to mirror.
+//! - **Temporal merge / AMVP candidates (TMVP).** Costed here at under
+//!   half a percent from the AMVP share of a QP-26 census, and built
+//!   anyway on 2026-11-15 when x265's own ablation (black box) put it at
+//!   1-3%: it measured -1.1% BD-rate at medium against x265 (live
+//!   contexts already on), most on mobile (-1.9%) and park_joy (-0.8%).
+//!   The census undercounted it: the temporal candidate also turns merges
+//!   and skips that were second-best into the cheapest choice.
 //! - **WPP / tile-parallel coding.** A speed tool, not a compression
 //!   one, and the corpus cannot measure it: every clip is two CTB rows.
 //!   The ceiling is rows over two (entropy sync lets a row start when
@@ -612,8 +613,8 @@ pub struct InterPicture<S: Sample> {
     /// The reconstruction, decoder-identical by construction, with the
     /// per-4x4 motion grid filled exactly as `prediction_unit` fills it
     /// ("Store motion", src/hevc/ctu.rs) — `merge_candidate` / `amvp`
-    /// read neighbour motion from here, and the next picture's TMVP would
-    /// too if the SPS ever enables it.
+    /// read neighbour motion from here, and so does a later picture's
+    /// temporal candidate when this one is its collocated picture.
     pub recon: Frame<S>,
     /// log2 of the CTB size, 4 or 5. A coding unit is this size or, under
     /// the coding quadtree, smaller — down to the 8x8 minimum coding block;
@@ -630,6 +631,10 @@ pub struct InterPicture<S: Sample> {
     pub cat: u32,
     /// The current picture's POC (the motion grid stores POC differences).
     pub cur_poc: i32,
+    /// `slice_temporal_mvp_enabled_flag`: the SPS enables temporal MVP and
+    /// every inter slice this encoder writes then sets it, naming list 1's
+    /// first picture for a B slice and list 0's for a P one.
+    pub tmvp: bool,
     /// How deep [`InterPicture::code_ctu_intra`] may let an intra CU's
     /// transform tree split — the same knob as
     /// [`super::h265_intra::IntraPicture::split_depth`] and the same
@@ -820,6 +825,7 @@ impl<S: Sample> InterPicture<S> {
             wp: Vec::new(),
             wp_b: [[Weighting::Default; 3]; 3],
             search_b: [None, None],
+            tmvp: sps.temporal_mvp_enabled,
         }
     }
 
@@ -869,16 +875,16 @@ impl<S: Sample> InterPicture<S> {
 
     /// The reference-list context the decoder's candidate derivation
     /// takes, for a P slice whose `RefPicList0` holds `pocs0`, nearest
-    /// first. `tmvp` false and no collocated picture: the SPS this
-    /// stream carries disables temporal MVP (see the module header).
-    fn ref_ctx<'a>(&self, pocs0: &[i32]) -> RefCtx<'a, S> {
+    /// first, with `col` (the list's first picture) collocated when the
+    /// stream enables temporal MVP (see the module header).
+    fn ref_ctx<'a>(&self, pocs0: &[i32], col: &'a Frame<S>) -> RefCtx<'a, S> {
         RefCtx {
             pocs: [pocs0.to_vec(), Vec::new()],
             long_term: [vec![false; pocs0.len()], Vec::new()],
-            col: None,
+            col: self.tmvp.then_some(col),
             cur_poc: self.cur_poc,
             no_backward_pred: true,
-            tmvp: false,
+            tmvp: self.tmvp,
             max_merge_cand: MAX_MERGE_CAND,
             log2_par_mrg_level: 2,
             is_b: false,
@@ -898,20 +904,21 @@ impl<S: Sample> InterPicture<S> {
     /// hardcodes true because a P slice's single reference is always in
     /// the past. For a B between two anchors it comes out false, and it
     /// reaches `merge_candidate` through `RefCtx`.
-    fn ref_ctx_b<'a>(&self, poc0: i32, poc1: i32) -> RefCtx<'a, S> {
+    fn ref_ctx_b<'a>(&self, poc0: i32, poc1: i32, col: &'a Frame<S>) -> RefCtx<'a, S> {
         let no_backward_pred = [poc0, poc1].iter().all(|&p| p <= self.cur_poc);
         RefCtx {
             pocs: [vec![poc0], vec![poc1]],
             long_term: [vec![false], vec![false]],
-            col: None,
+            col: self.tmvp.then_some(col),
             cur_poc: self.cur_poc,
             no_backward_pred,
-            tmvp: false,
+            tmvp: self.tmvp,
             max_merge_cand: MAX_MERGE_CAND,
             log2_par_mrg_level: 2,
             is_b: true,
             num_ref_idx: [1, 1],
-            col_from_l0: true,
+            // The collocated picture is list 1's (the future anchor).
+            col_from_l0: false,
         }
     }
 
@@ -1078,7 +1085,7 @@ impl<S: Sample> InterPicture<S> {
         let whole = pu.w == pu.n_cb && pu.h == pu.n_cb;
         let nref = refs_l0.len() as u32;
         let pocs: Vec<i32> = refs_l0.iter().map(|f| f.poc).collect();
-        let refs = self.ref_ctx(&pocs);
+        let refs = self.ref_ctx(&pocs, refs_l0[0]);
         // The decoder's own candidate lists (see the module header). The
         // AMVP predictors depend on the reference index — the derivation
         // scales a neighbour's vector by the POC-distance ratio between
@@ -1447,7 +1454,7 @@ impl<S: Sample> InterPicture<S> {
         let (x0, y0) = (pu.x_pb as usize, pu.y_pb as usize);
         let wh = (pu.w as usize, pu.h as usize);
         let whole = pu.w == pu.n_cb && pu.h == pu.n_cb;
-        let refs = self.ref_ctx_b(ref0.poc, ref1.poc);
+        let refs = self.ref_ctx_b(ref0.poc, ref1.poc, ref1);
         let merge: Vec<Cand> = (0..MAX_MERGE_CAND)
             .map(|i| merge_candidate(&self.info, &self.recon, &refs, pu, i))
             .collect();

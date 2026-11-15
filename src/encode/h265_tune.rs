@@ -96,6 +96,13 @@ pub(crate) struct Tune {
     /// -3.31% to +2.58% and at 1.0 to -1.57%, where x265 loses 14-22% on
     /// the 720p clips without its own.
     pub cutree: f32,
+    /// Decisions price their bins at the contexts the picture has
+    /// reached (each CTU decided is run through the writer), rather than
+    /// at the slice's initial ones.
+    pub live_contexts: bool,
+    /// Temporal motion vector prediction (the SPS flag; every inter slice
+    /// then names its collocated picture).
+    pub tmvp: bool,
 }
 
 impl Tune {
@@ -117,6 +124,8 @@ impl Tune {
         nonref_fast: false,
         limit_refs: false,
         cutree: 2.0,
+        live_contexts: false,
+        tmvp: false,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -139,6 +148,12 @@ impl Tune {
             // clips 0.3-1.0 worse) and both -8.25%, at 1.3x the CPU for
             // RDOQ by interleaved one-thread runs: the slow tier's tool.
             sign_hiding: true,
+            // Measured 2026-11-15 (x265 parity, `--preset medium`):
+            // pricing at live contexts -3.35% -> -4.17% BD-rate, and
+            // temporal MVP on top -5.31% (veryfast -5.09% -> -6.97%, slow
+            // +5.96% -> +3.93% with RDOQ kept on the initial contexts).
+            live_contexts: true,
+            tmvp: true,
             ..Tune::NEUTRAL
         };
         match p {

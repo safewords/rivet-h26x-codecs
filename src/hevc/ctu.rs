@@ -3956,6 +3956,7 @@ mod write_round_trip {
             kept_deltas: Vec::new(),
             sao: sao_flags,
             pred_weights: None,
+            tmvp: None,
         };
         write_slice_header(&eh, 26, NAL_IDR_N_LP, false, &mut w);
         w.flag(true); // byte_alignment(): alignment_bit_equal_to_one
@@ -4457,6 +4458,9 @@ mod write_round_trip {
             chroma: ChromaFormat::Yuv420,
             bit_depth: 8,
             max_refs: 4,
+            // The untiered SPS: no temporal MVP, which the hand-written
+            // headers below do not spell.
+            legacy_decisions: true,
             ..Config::default()
         };
         let g = EncGeometry::new(&cfg);
@@ -4615,6 +4619,9 @@ mod write_round_trip {
             chroma: ChromaFormat::Yuv420,
             bit_depth: 8,
             max_refs: 4,
+            // The untiered SPS: no temporal MVP, which the hand-written
+            // headers below do not spell.
+            legacy_decisions: true,
             ..Config::default()
         };
         let g = EncGeometry::new(&cfg);
@@ -4964,6 +4971,9 @@ mod write_round_trip {
             chroma: ChromaFormat::Yuv420,
             bit_depth: 8,
             max_refs: 4,
+            // The untiered SPS: no temporal MVP, which the hand-written
+            // headers below do not spell.
+            legacy_decisions: true,
             ..Config::default()
         };
         let g = EncGeometry::new(&cfg);
@@ -5051,6 +5061,9 @@ mod write_round_trip {
                 chroma: ChromaFormat::Yuv420,
                 bit_depth: 8,
                 max_refs: 4,
+                // The untiered SPS: no temporal MVP, which the hand-written
+                // headers below do not spell.
+                legacy_decisions: true,
                 ..Config::default()
             };
             let g = EncGeometry::new(&cfg);
