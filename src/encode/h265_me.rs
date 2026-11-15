@@ -260,7 +260,7 @@ use crate::hevc::ctx::Contexts;
 use crate::hevc::frame::{Frame, MotionInfo, Mv, Plane16, fill_motion};
 use crate::hevc::inter::{McScratch, Weighting, predict_block};
 use crate::hevc::intra::IntraScratch;
-use crate::hevc::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate, merge_candidates};
+use crate::hevc::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidates};
 use crate::hevc::pic::{Geometry, PicInfo};
 use crate::hevc::pps::Pps;
 use crate::hevc::residual::{ScalingSource, scale_coefficients};
@@ -2939,12 +2939,14 @@ impl<S: Sample> InterPicture<S> {
             let j_n = ssd_n as f64 + lam * f64::from(bits_n);
             if j_n < j_i.min(j) {
                 self.recycle(coded);
+                self.saves.extend([mid, saved]);
                 return (nxn, ssd_n, bits_n);
             }
             self.restore(mid, x0, y0, n);
         }
         if j_i < j {
             self.recycle(coded);
+            self.saves.push(saved);
             return (intra, ssd_i, bits_i);
         }
         self.restore(saved, x0, y0, n);
@@ -3032,6 +3034,7 @@ impl<S: Sample> InterPicture<S> {
             let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
             if (ssd_a as f64) + lam * f64::from(bits_a) < (ssd as f64) + lam * f64::from(bits) {
                 self.recycle(coded);
+                self.saves.push(saved);
                 return (alt, ssd_a, bits_a);
             }
         }
@@ -3175,6 +3178,7 @@ impl<S: Sample> InterPicture<S> {
                         < (ssd as f64) + lam * f64::from(bits)
                     {
                         self.recycle(coded);
+                        self.saves.push(saved);
                         return (alt, ssd_a, bits_a);
                     }
                 }
@@ -3204,6 +3208,7 @@ impl<S: Sample> InterPicture<S> {
             let lam = ssd_lambda(ctx.qp, ctx.bit_depth);
             if ssd_n as f64 + lam * f64::from(bits_n) < ssd as f64 + lam * f64::from(bits) {
                 self.recycle(coded);
+                self.saves.push(saved);
                 return (nxn, ssd_n, bits_n);
             }
             self.restore(saved, x0, y0, n);
@@ -4391,6 +4396,7 @@ fn code_residual_inter_n<S: Sample, const N: usize>(
 mod tests {
     use super::*;
     use crate::dsp::Cpu;
+    use crate::hevc::mvpred::merge_candidate;
     use crate::dsp::distortion::DistortionDsp;
     use crate::dsp::hevc::HevcDsp;
     use crate::dsp::hevc_enc::HevcEncDsp;

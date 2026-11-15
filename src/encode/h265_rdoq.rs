@@ -118,28 +118,37 @@ fn remaining_bits(rice: u32, v: u32) -> f64 {
     }
 }
 
-/// Bits of one coordinate `v` of the last-position syntax, its prefix
-/// contexts at `base`.
-fn last_axis_bits(cx: &Contexts, c_idx: usize, log2: u32, v: u32, base: usize) -> f64 {
+/// `last_sig_coeff_{x,y}_prefix` of a coordinate `v`.
+#[inline]
+fn last_prefix(v: u32) -> u32 {
+    if v <= 3 {
+        return v;
+    }
+    let msb = 31 - v.leading_zeros();
+    2 * msb + ((v - (1 << msb) >= (1 << (msb - 1))) as u32)
+}
+
+/// Bits of one coordinate of the last-position syntax, by its prefix
+/// ([`last_prefix`]): the prefix's bins at the contexts from `base`, and
+/// its suffix.
+fn last_axis_bits(cx: &Contexts, c_idx: usize, log2: u32, base: usize) -> [f64; 10] {
     let (off, shift) = last_sig_ctx(c_idx, log2);
     let c_max = (log2 << 1) - 1;
-    let p = if v <= 3 {
-        v
-    } else {
-        let msb = 31 - v.leading_zeros();
-        2 * msb + ((v - (1 << msb) >= (1 << (msb - 1))) as u32)
-    };
-    let mut bits = 0f64;
-    for i in 0..p {
-        bits += f64::from(state_bits(cx.c[base + (off + (i >> shift)) as usize], 1));
+    let mut t = [0f64; 10];
+    let mut run = 0f64;
+    for p in 0..=c_max {
+        let ctx = cx.c[base + (off + (p >> shift)) as usize];
+        let mut bits = run;
+        if p < c_max {
+            bits += f64::from(state_bits(ctx, 0));
+        }
+        if p > 3 {
+            bits += f64::from((p >> 1) - 1);
+        }
+        t[p as usize] = bits;
+        run += f64::from(state_bits(ctx, 1));
     }
-    if p < c_max {
-        bits += f64::from(state_bits(cx.c[base + (off + (p >> shift)) as usize], 0));
-    }
-    if p > 3 {
-        bits += f64::from((p >> 1) - 1);
-    }
-    bits
+    t
 }
 
 /// The greater-than-one and Rice state the writer carries through a
@@ -413,24 +422,18 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
         run += p.coded;
     }
     // The last-position syntax prices x and y apart: a table of each.
-    let mut last_x = [0f64; 32];
-    let mut last_y = [0f64; 32];
-    for v in 0..n as u32 {
-        last_x[v as usize] = last_axis_bits(
-            b.cx,
-            b.c_idx,
-            b.log2,
-            v,
-            LAST_SIGNIFICANT_COEFF_X_PREFIX_OFFSET,
-        );
-        last_y[v as usize] = last_axis_bits(
-            b.cx,
-            b.c_idx,
-            b.log2,
-            v,
-            LAST_SIGNIFICANT_COEFF_Y_PREFIX_OFFSET,
-        );
-    }
+    let last_x = last_axis_bits(
+        b.cx,
+        b.c_idx,
+        b.log2,
+        LAST_SIGNIFICANT_COEFF_X_PREFIX_OFFSET,
+    );
+    let last_y = last_axis_bits(
+        b.cx,
+        b.c_idx,
+        b.log2,
+        LAST_SIGNIFICANT_COEFF_Y_PREFIX_OFFSET,
+    );
     let mut after = 0f64;
     let mut best_last = last;
     let mut best_cost = f64::INFINITY;
@@ -443,8 +446,10 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             } else {
                 (xc as u32, yc as u32)
             };
-            let cost =
-                p.before + p.as_last + after + lambda * (last_x[lx as usize] + last_y[ly as usize]);
+            let cost = p.before
+                + p.as_last
+                + after
+                + lambda * (last_x[last_prefix(lx) as usize] + last_y[last_prefix(ly) as usize]);
             if cost < best_cost {
                 best_cost = cost;
                 best_last = k;
