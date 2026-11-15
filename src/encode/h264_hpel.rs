@@ -168,7 +168,8 @@ impl<'a, S: Sample> MeRef<'a, S> {
 }
 
 /// `(a + b + 1) >> 1` over a `w` by `h` block.
-/// [`avg_into`]'s 8-bit rows at a width known when compiled.
+/// [`avg_into`]'s 8-bit rows at a width known when compiled: the bounds
+/// checked once for the whole block, then each row one vector average.
 #[inline(always)]
 fn avg_rows_u8<const W: usize>(
     out: &mut [u8],
@@ -179,12 +180,22 @@ fn avg_rows_u8<const W: usize>(
     bs: usize,
     h: usize,
 ) {
+    if h == 0 {
+        return;
+    }
+    assert!(
+        a.len() >= (h - 1) * as_ + W && b.len() >= (h - 1) * bs + W && out.len() >= (h - 1) * os + W
+    );
     for y in 0..h {
-        let ra: &[u8; W] = a[y * as_..y * as_ + W].try_into().expect("row");
-        let rb: &[u8; W] = b[y * bs..y * bs + W].try_into().expect("row");
-        let ro: &mut [u8; W] = (&mut out[y * os..y * os + W]).try_into().expect("row");
-        for x in 0..W {
-            ro[x] = ((ra[x] as u16 + rb[x] as u16 + 1) >> 1) as u8;
+        // SAFETY: the assertion above covers row `y`'s `W` samples of all
+        // three blocks.
+        unsafe {
+            let ra = &*(a.as_ptr().add(y * as_) as *const [u8; W]);
+            let rb = &*(b.as_ptr().add(y * bs) as *const [u8; W]);
+            let ro = &mut *(out.as_mut_ptr().add(y * os) as *mut [u8; W]);
+            for x in 0..W {
+                ro[x] = ((ra[x] as u16 + rb[x] as u16 + 1) >> 1) as u8;
+            }
         }
     }
 }
