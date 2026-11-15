@@ -3098,13 +3098,19 @@ impl<S: Sample> Core<S> {
     /// The constant-quantiser offsets from the configured quantiser of
     /// `[I, P, B, B reference]` pictures. Anchors are coded finer than the
     /// pictures that predict from them, and B pictures nothing references
-    /// coarser still. With the lookahead's propagation on, the intra
-    /// picture's extra refinement is the propagation's to decide, macroblock
-    /// by macroblock, and its frame offset goes. Measured on the parity
-    /// corpus (x264 medium, 30 frames, 5 clips) against neighbours of each.
+    /// coarser still. With the lookahead's propagation on, most of the
+    /// intra picture's extra refinement is the propagation's to decide,
+    /// macroblock by macroblock, and its frame offset shrinks. Measured on
+    /// the parity corpus (30 frames, 5 clips, BD-rate Y against x264 at
+    /// the same tier) against neighbours of each: `[-2, 0, 2, 1]` against
+    /// the earlier `[0, 0, 3, 1]` is -1.4 % (medium), -1.6 % (veryfast),
+    /// -1.3 % (slow) for about 3 % more time (finer B pictures carry more
+    /// coefficients); `[-1, 0, 2, 1]` -1.3 % (medium), `[-3, 0, 2, 1]`
+    /// -1.2 %, `[-2, 0, 3, 1]` -0.5 %; a B offset of 1 a further -0.3 % for
+    /// another 3 % of time.
     fn qp_offsets(&self) -> [i32; 4] {
         if self.la.is_some() {
-            [0, 0, 3, 1]
+            [-2, 0, 2, 1]
         } else {
             [-3, 0, 2, 1]
         }
