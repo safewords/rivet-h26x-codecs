@@ -175,6 +175,8 @@ struct PoolState {
 /// caller-side back-pressure); [`Pool::spawn`] never blocks (for workers).
 pub struct Pool {
     state: Arc<(Mutex<PoolState>, Condvar, Condvar)>,
+    /// The std threads, joined on drop; none when a
+    /// [`Platform`](crate::platform::Platform) starts the workers.
     workers: Vec<JoinHandle<()>>,
     capacity: usize,
     threads: usize,
@@ -186,6 +188,32 @@ pub struct Pool {
 
 /// Whether a registered wait is satisfied now.
 pub type WaitCheck = Box<dyn Fn() -> bool + Send + Sync>;
+
+/// The body of one pool worker: take jobs in FIFO order until the pool
+/// shuts down.
+fn worker_loop(st: &(Mutex<PoolState>, Condvar, Condvar)) {
+    let (m, job_cv, done_cv) = st;
+    loop {
+        let job = {
+            let mut g = m.lock().unwrap();
+            loop {
+                if let Some(j) = g.queue.pop_front() {
+                    break Some(j);
+                }
+                if g.shutdown {
+                    break None;
+                }
+                g = job_cv.wait(g).unwrap();
+            }
+        };
+        let Some(job) = job else { return };
+        // A panicking job must not take the pool down.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        let mut g = m.lock().unwrap();
+        g.active -= 1;
+        done_cv.notify_all();
+    }
+}
 
 impl Pool {
     /// `threads` workers; `capacity` jobs may be outstanding (`usize::MAX`
@@ -203,33 +231,19 @@ impl Pool {
         let mut workers = Vec::with_capacity(threads);
         for i in 0..threads.max(1) {
             let st = state.clone();
-            let h = std::thread::Builder::new()
-                .name(format!("h26x-worker-{i}"))
-                .spawn(move || {
-                    let (m, job_cv, done_cv) = &*st;
-                    loop {
-                        let job = {
-                            let mut g = m.lock().unwrap();
-                            loop {
-                                if let Some(j) = g.queue.pop_front() {
-                                    break Some(j);
-                                }
-                                if g.shutdown {
-                                    break None;
-                                }
-                                g = job_cv.wait(g).unwrap();
-                            }
-                        };
-                        let Some(job) = job else { return };
-                        // A panicking job must not take the pool down.
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-                        let mut g = m.lock().unwrap();
-                        g.active -= 1;
-                        done_cv.notify_all();
-                    }
-                })
-                .expect("spawn h26x worker");
-            workers.push(h);
+            let body = move || worker_loop(&st);
+            match crate::platform::get() {
+                // The embedder's thread (a Web Worker on wasm): not joined;
+                // the body returns when the pool shuts down.
+                Some(p) => (p.spawn)(Box::new(body)),
+                None => {
+                    let h = std::thread::Builder::new()
+                        .name(format!("h26x-worker-{i}"))
+                        .spawn(body)
+                        .expect("spawn h26x worker");
+                    workers.push(h);
+                }
+            }
         }
         Arc::new(Pool {
             state,

@@ -422,6 +422,17 @@ machine (`H26X_THREADS`, default every core, up to 32):
   the next row is spawned as soon as this one is two CTBs in. Dependent slice
   segments resume their predecessor's CABAC state.
 
+**Threads on WebAssembly.** `wasm32-unknown-unknown` has neither
+`std::thread` nor a clock, even when it is built with atomics and shared
+memory and threads do exist (each a Web Worker running another instance of
+the module on the same memory, which only JavaScript can start). An embedder
+that can start them installs a [`platform::Platform`](src/platform.rs) — a
+function that runs a thread body, and a millisecond clock — with
+`h26x::platform::install`, and from then on every pool asks it for its
+workers and the decoders read its clock. Native builds never install one and
+are unchanged; without one, a decoder on wasm runs with one thread.
+[wasm-h26x](https://github.com/safewords/wasm-h26x) is that embedder.
+
 The pixel kernels — interpolation, weighting, inverse transforms, residual add,
 SAO for H.265; the sixteen quarter-sample positions, chroma bilinear, averaging
 and weighting for H.264 — sit behind a function table filled at run time from

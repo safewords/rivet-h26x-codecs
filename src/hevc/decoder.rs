@@ -236,7 +236,7 @@ impl<S: Sample> PicShared<S> {
         #[cfg(not(test))]
         let spin = true;
         // Spin briefly: the producer is usually one CTB away.
-        let start = std::time::Instant::now();
+        let start = crate::platform::Stamp::now();
         if spin {
             loop {
                 for _ in 0..64 {
@@ -315,7 +315,7 @@ impl<S: Sample> PicShared<S> {
         // Held for a moment before it is believed: a task between being
         // counted and being queued, or between finishing and its successor
         // starting, looks like nothing running.
-        let mut stuck_since: Option<std::time::Instant> = None;
+        let mut stuck_since: Option<crate::platform::Stamp> = None;
         let satisfied = loop {
             if pic.satisfied(&on) {
                 break true;
@@ -336,7 +336,7 @@ impl<S: Sample> PicShared<S> {
                 break false;
             }
             if nothing_runs && !pool.any_wait_satisfiable() {
-                let since = *stuck_since.get_or_insert_with(std::time::Instant::now);
+                let since = *stuck_since.get_or_insert_with(crate::platform::Stamp::now);
                 if since.elapsed() > std::time::Duration::from_millis(200) {
                     pic.lost.store(true, Ordering::Release);
                     break false;
@@ -1569,7 +1569,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
             let n = prev_seg.substreams.len().min(prev_seg.starts.len());
             if prev_seg.spawned.load(Ordering::Acquire) < n {
                 let mut g = prev_pic.lock.lock().unwrap();
-                let mut stuck_since: Option<std::time::Instant> = None;
+                let mut stuck_since: Option<crate::platform::Stamp> = None;
                 while prev_seg.spawned.load(Ordering::Acquire) < n {
                     // If its rows can no longer be spawned (lost data), stop
                     // waiting once the picture is finished.
@@ -1591,7 +1591,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
                         (all_blocked || p.blocked() >= p.threads()) && !p.any_wait_satisfiable()
                     });
                     if nothing_runs {
-                        let since = *stuck_since.get_or_insert_with(std::time::Instant::now);
+                        let since = *stuck_since.get_or_insert_with(crate::platform::Stamp::now);
                         if since.elapsed() > std::time::Duration::from_millis(200) {
                             break;
                         }

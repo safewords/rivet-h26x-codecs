@@ -68,6 +68,7 @@ pub mod h264;
 pub mod hevc;
 pub mod nal;
 pub mod picture;
+pub mod platform;
 pub(crate) mod sample;
 pub(crate) mod threading;
 
