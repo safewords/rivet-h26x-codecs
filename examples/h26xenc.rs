@@ -192,7 +192,8 @@ fn main() {
                 cfg.preset = preset;
                 cfg.bframes = 3;
                 cfg.transform_8x8 = true;
-                cfg.subparts = true;
+                // The fastest tier searches 16x16 partitions only.
+                cfg.subparts = preset != Preset::Veryfast;
                 cfg.pyramid = true;
                 cfg.tree_lookahead = tree;
             }

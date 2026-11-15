@@ -776,6 +776,9 @@ h264-preset-medium40|--codec h264 --qp 40 --gop 8 --preset medium
 h264-pyramid-b2|--codec h264 --qp 26 --gop 9 --bframes 2 --pyramid --t8x8
 h264-tree-ip|--codec h264 --qp 28 --gop 8 --tree 6
 h264-10-preset-medium@p10|--codec h264 --qp 26 --gop 8 --preset medium
+h264-preset-veryfast|--codec h264 --qp 26 --gop 8 --preset veryfast
+h264-preset-slow|--codec h264 --qp 26 --gop 8 --preset slow
+h264-preset-slow-cavlc|--codec h264 --qp 34 --gop 12 --preset slow --cavlc
 h264-aq-t8x8-subparts-ipb|--codec h264 --qp 26 --gop 8 --bframes 2 --t8x8 --subparts --aq 1.0
 h264-abr-aq-64k|--codec h264 --bitrate 64000 --gop 8 --aq 1.0
 h264-10-aq-ip@p10|--codec h264 --qp 26 --gop 8 --aq 1.0
