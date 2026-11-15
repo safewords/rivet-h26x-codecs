@@ -655,6 +655,11 @@ pub struct SliceHeader {
     /// bottom field's POC less the top's, +1 top field first and −1
     /// bottom field first.
     pub delta_poc_bottom: i32,
+    /// A P slice's `ref_pic_list_modification` of list 0: move the
+    /// short-term picture `CurrPicNum - (n + 1)` to index 0
+    /// (`modification_of_pic_nums_idc` 0, `abs_diff_pic_num_minus1` n).
+    /// `None` keeps the default order.
+    pub l0_mod: Option<u32>,
 }
 
 /// `slice_type` for an I, P or B slice, in the "all slices of this picture
@@ -698,7 +703,16 @@ pub fn write_slice_header(h: &SliceHeader, pps_qp: u8, w: &mut BitWriter) {
     if h.kind == Kind::P || h.kind == Kind::B {
         w.flag(false); // num_ref_idx_active_override_flag
         // ref_pic_list_modification
-        w.flag(false);
+        match h.l0_mod {
+            Some(n) => {
+                debug_assert_eq!(h.kind, Kind::P, "only P slices reorder");
+                w.flag(true);
+                w.ue(0); // modification_of_pic_nums_idc: subtract
+                w.ue(n); // abs_diff_pic_num_minus1
+                w.ue(3); // end of the list's modifications
+            }
+            None => w.flag(false),
+        }
         if h.kind == Kind::B {
             w.flag(false);
         }
@@ -1347,6 +1361,7 @@ mod tests {
                                 interlaced: true,
                                 bottom_field,
                                 delta_poc_bottom: delta,
+                                l0_mod: None,
                             },
                             26,
                             &mut w,
@@ -1438,6 +1453,7 @@ mod tests {
                         interlaced: false,
                         bottom_field: None,
                         delta_poc_bottom: 0,
+                        l0_mod: None,
                     },
                     26,
                     &mut w,
@@ -1857,6 +1873,7 @@ mod tests {
                             interlaced: false,
                             bottom_field: None,
                             delta_poc_bottom: 0,
+                            l0_mod: None,
                         },
                         26,
                         &mut w,
@@ -2037,6 +2054,7 @@ mod tests {
                             interlaced: false,
                             bottom_field: None,
                             delta_poc_bottom: 0,
+                            l0_mod: None,
                         },
                         26,
                         &mut w,

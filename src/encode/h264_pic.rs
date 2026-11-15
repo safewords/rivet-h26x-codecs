@@ -86,6 +86,11 @@ pub struct IntraTools<S: Sample> {
     /// how hard it works, for progressive frame pictures; `None` keeps the
     /// established decisions everywhere.
     pub(crate) analysis: Option<AnalysisCfg>,
+    /// The quantiser offset of every macroblock of the picture about to be
+    /// coded, from the lookahead's reference propagation
+    /// ([`crate::encode::h264_lookahead`]); set per picture by the encoder,
+    /// `None` for none.
+    pub(crate) mb_offsets: Option<Vec<i32>>,
 }
 
 impl<S: Sample> IntraTools<S> {
@@ -113,6 +118,7 @@ impl<S: Sample> IntraTools<S> {
             aq_strength: 0.0,
             motion: crate::encode::level::MotionLimits::NONE,
             analysis: None,
+            mb_offsets: None,
         }
     }
 
@@ -583,7 +589,7 @@ impl<'a, S: Sample> PicCoding<'a, S> {
         // Measured over the source at coded size, edge replication and
         // all — the H.265 side takes its CTB offsets the same way — since
         // the replicated samples are what the edge macroblocks code.
-        let offsets = (tools.aq_strength > 0.0).then(|| {
+        let aq = (tools.aq_strength > 0.0).then(|| {
             aq::ctb_offsets(
                 &src_y,
                 luma_stride,
@@ -594,6 +600,18 @@ impl<'a, S: Sample> PicCoding<'a, S> {
                 tools.aq_strength,
             )
         });
+        // The lookahead's propagation offsets ride on top of adaptive
+        // quantisation's, for progressive pictures.
+        let tree = tools
+            .mb_offsets
+            .as_ref()
+            .filter(|o| !g.field_pic && o.len() == mbs_wide * mbs_high);
+        let offsets = match (aq, tree) {
+            (Some(a), Some(t)) => Some(a.iter().zip(t).map(|(a, t)| a + t).collect()),
+            (Some(a), None) => Some(a),
+            (None, Some(t)) => Some(t.clone()),
+            (None, None) => None,
+        };
         PicCoding {
             ctx,
             mbs_wide,

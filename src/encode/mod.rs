@@ -85,6 +85,7 @@ pub mod h264_cavlc_mb;
 pub mod h264_deblock;
 pub(crate) mod h264_hpel;
 pub mod h264_intra;
+pub(crate) mod h264_lookahead;
 pub mod h264_me;
 pub mod h264_pic;
 pub mod h264_syntax;

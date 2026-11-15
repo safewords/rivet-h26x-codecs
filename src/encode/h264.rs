@@ -125,7 +125,7 @@ struct Core<S: Sample> {
     /// spatial direct derivation reads as colocated motion, at whatever
     /// granularity 8.4.1.2.1 asks for — which is why it is stored whole
     /// rather than summarised.
-    refs: Vec<(i32, Vec<syn::Recon<S>>, super::h264_pic::PicMotion)>,
+    refs: Vec<(i32, Vec<syn::Recon<S>>, super::h264_pic::PicMotion, u32)>,
     /// `frame_num`, which counts *reference* pictures and wraps.
     frame_num: u32,
     idr_pic_id: u32,
@@ -168,6 +168,15 @@ struct Core<S: Sample> {
     /// coding: `None` for a progressive stream, whose every path above is
     /// what it was before interlacing existed.
     fields: Option<Fields<S>>,
+    /// The lookahead ([`super::h264_lookahead`]) for progressive streams
+    /// whose preset asks for one.
+    la: Option<super::h264_lookahead::Lookahead<S>>,
+    /// Pictures taken but not yet offered to the scheduler — the
+    /// lookahead's window.
+    la_queued: usize,
+    /// Display indices of the reference pictures coded, newest last (a
+    /// few), for the lookahead's reference structure.
+    la_refs: Vec<u64>,
 }
 
 /// What an interlaced encoder keeps between frames: the decoder's own
@@ -874,8 +883,16 @@ impl<S: Sample> Core<S> {
             if cfg.bit_depth > 8 { 2 } else { 1 },
             "the face picks the width"
         );
-        let sched = Scheduler::new(cfg.gop, cfg.bframes);
+        let pyramid = cfg.pyramid && cfg.interlace.is_none() && cfg.bframes >= 2;
+        let sched = Scheduler::new(cfg.gop, cfg.bframes).with_pyramid(pyramid);
         let mut cfg = cfg;
+        // Under a pyramid the sliding window holds, when a B picture after
+        // the B reference is decoded, the past anchor, the B reference, the
+        // future anchor — and the previous run's B reference, which the
+        // window has not yet pushed out: four marked.
+        if pyramid {
+            cfg.max_refs = cfg.max_refs.max(4);
+        }
         // A stream with B pictures keeps two marked references — the two
         // anchors a B predicts between. Declaring one in the SPS would let
         // the sliding window unmark the past anchor the moment the future
@@ -900,7 +917,11 @@ impl<S: Sample> Core<S> {
         }
         let tools =
             super::h264_pic::IntraTools::new(cfg.transform_8x8, cfg.subparts, cfg.bit_depth)
-                .with_aq(cfg.aq_strength);
+                .with_aq(cfg.aq_strength)
+                .with_analysis(
+                    (std::env::var_os("H26X_OLD_DECISIONS").is_none())
+                        .then_some(super::h264_analyse::AnalysisCfg::MEDIUM),
+                );
         // The buffer to declare, snapped to what the syntax can carry —
         // the same rules, and the same refusals, as the H.265 side.
         let cpb = match (cfg.cpb_ms, cfg.rate) {
@@ -1004,7 +1025,21 @@ impl<S: Sample> Core<S> {
                 })
             }
         };
+        let la = (fields.is_none() && cfg.tree_lookahead > 0).then(|| {
+            super::h264_lookahead::Lookahead::new(
+                cfg.tree_lookahead as usize,
+                std::env::var("H26X_TREE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0),
+                geom.mbs_wide as usize,
+                geom.mbs_high as usize,
+            )
+        });
         Ok(Self {
+            la,
+            la_queued: 0,
+            la_refs: Vec::new(),
             fields,
             rc,
             emitted: 0,
@@ -1046,24 +1081,73 @@ impl<S: Sample> Core<S> {
         // the samples up by display index.
         let display = self.next_display;
         self.next_display += 1;
+        if let Some(la) = self.la.as_mut() {
+            let (w, h) = (self.cfg.width as usize, self.cfg.height as usize);
+            la.add(display, &samples[..w * h], w, h);
+        }
         self.held.insert(display, samples);
-        let ready = self.sched.push();
-        self.code(ready)
+        // With a lookahead the scheduler sees each picture `depth` pictures
+        // late, so that a picture is coded with the window after it known.
+        let depth = self.la.as_ref().map_or(0, |l| l.depth);
+        self.la_queued += 1;
+        let mut out = Vec::new();
+        while self.la_queued > depth {
+            self.la_queued -= 1;
+            let ready = self.sched.push();
+            out.extend(self.code(ready)?);
+        }
+        Ok(out)
     }
 
     /// See [`H264Encoder::flush`].
     fn flush(&mut self) -> Result<Vec<Access>> {
+        let mut out = Vec::new();
+        while self.la_queued > 0 {
+            self.la_queued -= 1;
+            let ready = self.sched.push();
+            out.extend(self.code(ready)?);
+        }
         let ready = self.sched.flush();
-        self.code(ready)
+        out.extend(self.code(ready)?);
+        Ok(out)
     }
 
     fn code(&mut self, ready: Vec<Coded>) -> Result<Vec<Access>> {
         let mut out = Vec::with_capacity(ready.len());
-        for c in ready {
+        let future = if self.la.is_some() {
+            self.sched.preview(self.la_queued as u64)
+        } else {
+            Vec::new()
+        };
+        for (i, &c) in ready.iter().enumerate() {
             let src = self.held.remove(&c.display).ok_or_else(|| {
                 Error::bitstream("H.264 encode: scheduler released an absent picture")
             })?;
+            self.tools.mb_offsets = None;
+            if c.kind == Kind::Idr {
+                self.la_refs.clear();
+            }
+            if c.reference {
+                if let Some(la) = self.la.as_mut() {
+                    let later: Vec<Coded> = ready[i + 1..]
+                        .iter()
+                        .chain(future.iter())
+                        .copied()
+                        .collect();
+                    self.tools.mb_offsets = la.offsets(c, &self.la_refs, &later);
+                }
+            }
             let mut access = self.code_picture(c, &src)?;
+            self.tools.mb_offsets = None;
+            if c.reference {
+                self.la_refs.push(c.display);
+                if self.la_refs.len() > 4 {
+                    self.la_refs.remove(0);
+                }
+                if let Some(la) = self.la.as_mut() {
+                    la.drop_before(*self.la_refs.iter().min().expect("just pushed"));
+                }
+            }
             let filler = self.stuff(&mut access);
             // The ledger closes here, at the one place every picture of
             // every kind passes through, counting the whole access unit —
@@ -1202,6 +1286,12 @@ impl<S: Sample> Core<S> {
                     .expect("a bitrate configuration builds a controller")
                     .pick_qp(kind)
             }
+            _ if c.kind == Kind::B && c.reference => {
+                // A B reference sits between its anchor and the B
+                // pictures that predict from it.
+                let q = self.picture_qp(Kind::P) as i32;
+                (q + self.qp_offsets()[3]).clamp(0, 51) as u8
+            }
             _ => self.picture_qp(c.kind),
         }
     }
@@ -1274,16 +1364,17 @@ impl<S: Sample> Core<S> {
             self.refs.clear();
         }
         if c.reference {
+            let pic_frame_num = self.frame_num;
             self.frame_num = (self.frame_num + 1) & ((1 << LOG2_MAX_FRAME_NUM) - 1);
             let mut recon = a.recon;
             // Replicate the borders motion compensation reads — once, here,
             // so every stored reference is search-ready and the P path never
             // has to wonder whether a plane's border is stale.
             crate::encode::h264_me::prepare_reference(&mut recon);
-            self.refs.push((c.poc, recon, a.motion));
+            self.refs.push((c.poc, recon, a.motion, pic_frame_num));
             // The DPB the SPS declares. Dropping the oldest keeps the encoder
             // inside what it told the decoder to allocate.
-            let cap = (self.cfg.max_refs.max(1) as usize) + 1;
+            let cap = self.cfg.max_refs.max(1) as usize;
             while self.refs.len() > cap {
                 self.refs.remove(0);
             }
@@ -1631,6 +1722,19 @@ impl<S: Sample> Core<S> {
         }
 
         let cabac = self.cfg.entropy == Entropy::Cabac;
+        // A P picture's default list 0 starts at the most recently decoded
+        // reference (descending PicNum, 8.2.4.2.1). Under a B pyramid that
+        // is the B reference, not the nearest earlier anchor the picture
+        // predicts from — so the anchor is moved to index 0.
+        let l0_mod = match (c.kind, past) {
+            (Kind::P, Some(p)) if p + 1 != self.refs.len() => {
+                let max = 1u32 << LOG2_MAX_FRAME_NUM;
+                let diff = (frame_num + max - self.refs[p].3) % max;
+                debug_assert!(diff >= 1);
+                Some(diff - 1)
+            }
+            _ => None,
+        };
         let mut w = BitWriter::with_capacity(self.frame_bytes + 256);
         syn::write_slice_header(
             &syn::SliceHeader {
@@ -1656,6 +1760,7 @@ impl<S: Sample> Core<S> {
                 interlaced: false,
                 bottom_field: None,
                 delta_poc_bottom: 0,
+                l0_mod,
             },
             self.pps_qp,
             &mut w,
@@ -1982,6 +2087,7 @@ impl<S: Sample> Core<S> {
                 interlaced: true,
                 bottom_field: Some(parity == 1),
                 delta_poc_bottom: 0,
+                l0_mod: None,
             };
             // The header as the decoder reads it: written alone, closed, and
             // parsed by the production slice header parser.
@@ -2322,6 +2428,7 @@ impl<S: Sample> Core<S> {
             interlaced: true,
             bottom_field: None,
             delta_poc_bottom: delta,
+            l0_mod: None,
         };
         let hdr = f.read_back(&header, self.pps_qp, nal_type, nal_ref_idc)?;
         if hdr.is_idr() || model.dpb.pics.is_empty() {
@@ -2911,15 +3018,15 @@ impl<S: Sample> Core<S> {
             .refs
             .iter()
             .enumerate()
-            .filter(|(_, (p, _, _))| *p < poc)
-            .max_by_key(|(_, (p, _, _))| *p)
+            .filter(|(_, (p, _, _, _))| *p < poc)
+            .max_by_key(|(_, (p, _, _, _))| *p)
             .map(|(i, _)| i);
         let future = self
             .refs
             .iter()
             .enumerate()
-            .filter(|(_, (p, _, _))| *p > poc)
-            .min_by_key(|(_, (p, _, _))| *p)
+            .filter(|(_, (p, _, _, _))| *p > poc)
+            .min_by_key(|(_, (p, _, _, _))| *p)
             .map(|(i, _)| i);
         (past, future)
     }
@@ -2934,6 +3041,27 @@ impl<S: Sample> Core<S> {
         Some((rc.achieved_bps(self.cfg.frame_rate_f64()), target))
     }
 
+    /// The constant-quantiser offsets from the configured quantiser of
+    /// `[I, P, B, B reference]` pictures. Anchors are coded finer than the
+    /// pictures that predict from them, and B pictures nothing references
+    /// coarser still. With the lookahead's propagation on, the intra
+    /// picture's extra refinement is the propagation's to decide, macroblock
+    /// by macroblock, and its frame offset goes. Measured on the parity
+    /// corpus (x264 medium, 30 frames, 5 clips) against neighbours of each.
+    fn qp_offsets(&self) -> [i32; 4] {
+        if let Ok(v) = std::env::var("H26X_QPOFF") {
+            let o: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            if o.len() == 4 {
+                return [o[0], o[1], o[2], o[3]];
+            }
+        }
+        if self.la.is_some() {
+            [0, 0, 3, 1]
+        } else {
+            [-3, 0, 2, 1]
+        }
+    }
+
     /// See [`H264Encoder::picture_qp`].
     fn picture_qp(&self, kind: Kind) -> u8 {
         match self.cfg.rate {
@@ -2946,14 +3074,14 @@ impl<S: Sample> Core<S> {
             // stream, picture by picture.
             RateControl::Bitrate { .. } => 26,
             RateControl::Lossless => 0,
-            RateControl::ConstantQp(q) => match kind {
-                // The usual offsets: anchors are coded better than the
-                // pictures that reference them, and B pictures that nothing
-                // references can afford to be worse.
-                Kind::Idr | Kind::I => q.saturating_sub(3),
-                Kind::P => q,
-                Kind::B => q.saturating_add(2).min(51),
-            },
+            RateControl::ConstantQp(q) => {
+                let k = self.qp_offsets()[match kind {
+                    Kind::Idr | Kind::I => 0,
+                    Kind::P => 1,
+                    Kind::B => 2,
+                }];
+                (q as i32 + k).clamp(0, 51) as u8
+            }
         }
     }
 }

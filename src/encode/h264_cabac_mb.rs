@@ -532,7 +532,7 @@ pub fn write_intra_picture_cabac<S: Sample>(
         let left = (mb_x > 0).then(|| &coded[idx - 1]);
         let above = (mb_y > 0).then(|| &coded[idx - mbw]);
         if trial {
-            let mut ce = CabacEncoder::counting();
+            let mut ce = CabacEncoder::estimating();
             let mut st2 = st.clone();
             let _ = intra_mb_cabac(&mut ce, &mut st2, dec, left, above, cfi, t8x8, g);
             return ce.fractional_bits();
@@ -583,7 +583,7 @@ pub fn write_p_picture_cabac<S: Sample>(
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
             let above = (mb_y > 0).then(|| &coded[idx - mbw]);
             if trial {
-                let mut ce = CabacEncoder::counting();
+                let mut ce = CabacEncoder::estimating();
                 let mut st2 = st.clone();
                 let _ = p_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g);
                 return ce.fractional_bits();
@@ -640,7 +640,7 @@ pub fn write_b_picture_cabac<S: Sample>(
             let left = (mb_x > 0).then(|| &coded[idx - 1]);
             let above = (mb_y > 0).then(|| &coded[idx - mbw]);
             if trial {
-                let mut ce = CabacEncoder::counting();
+                let mut ce = CabacEncoder::estimating();
                 let mut st2 = st.clone();
                 let _ = b_mb_cabac(&mut ce, &mut st2, &mb, left, above, cfi, t8x8, g);
                 return ce.fractional_bits();
