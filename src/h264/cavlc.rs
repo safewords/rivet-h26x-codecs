@@ -761,8 +761,33 @@ pub fn part_index_of(x: usize, y: usize) -> usize {
 /// `transform_size_8x8_flag`, `mb_qp_delta` and the residual. `mb_type_raw`
 /// is the already-read `mb_type` (the caller reads it because in P/B slices
 /// it follows the skip run).
+// The decoder reads through `parse_mb_cavlc_parts`; this unpartitioned
+// form is what the encoder's round-trip tests call.
+#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 pub fn parse_mb_cavlc(
     r: &mut BitReader,
+    ctx: &SliceCtx,
+    info: &PicInfo,
+    nb: &MbNeighbours,
+    mb_type_raw: u32,
+    layer: &mut MbLayer,
+    dq: &super::transform::Dequant,
+    qps: &mut super::recon::QpState,
+) -> Result<()> {
+    parse_mb_cavlc_parts(r, None, ctx, info, nb, mb_type_raw, layer, dq, qps)
+}
+
+/// [`parse_mb_cavlc`] for a slice whose data is partitioned (7.3.2.9,
+/// 8.2.3): `r` reads partition A (category 2 — everything but the
+/// residual), and `parts` partitions B and C, from which the residual of an
+/// intra (I / SI: category 3, the PCM samples among it) and of an inter
+/// (P / B: category 4) macroblock are read. `None` reads everything from
+/// `r`, as an unpartitioned slice is.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_mb_cavlc_parts<'a>(
+    r: &mut BitReader<'a>,
+    mut parts: Option<&mut [BitReader<'a>; 2]>,
     ctx: &SliceCtx,
     info: &PicInfo,
     nb: &MbNeighbours,
@@ -808,6 +833,11 @@ pub fn parse_mb_cavlc(
     }
 
     if layer.kind == MbKind::IPcm {
+        // pcm_alignment_zero_bit and the samples are category 3.
+        let r: &mut BitReader = match parts.as_deref_mut() {
+            Some(p) => &mut p[0],
+            None => r,
+        };
         r.align();
         let n = 256
             + match ctx.chroma_format_idc {
@@ -1009,7 +1039,20 @@ pub fn parse_mb_cavlc(
         layer.qp = super::mb::next_qp(qps.prev_qp, layer.qp_delta, ctx.bit_depth);
         qps.prev_qp = layer.qp;
         let mbdq = MbDequant::for_mb(dq, ctx, qps.chroma_offset, layer.kind, layer.qp);
-        parse_residual_cavlc(r, ctx, nb, layer, mbdq.as_ref())?;
+        // residual(): category 3 for I and SI macroblocks, 4 for P and B.
+        let intra = layer.kind.is_intra();
+        let res: &mut BitReader = match parts.as_deref_mut() {
+            Some(p) => &mut p[if intra { 0 } else { 1 }],
+            None => &mut *r,
+        };
+        parse_residual_cavlc(res, ctx, nb, layer, mbdq.as_ref())?;
+        if res.overrun() {
+            return Err(Error::bitstream(if parts.is_some() {
+                "slice data partition B / C truncated or missing"
+            } else {
+                "slice data truncated in macroblock"
+            }));
+        }
     } else {
         layer.qp = qps.prev_qp;
     }

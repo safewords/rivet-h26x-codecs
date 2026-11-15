@@ -19,7 +19,7 @@ use crate::{Error, Result};
 use super::cabac_mb::{
     CabacState, decode_end_of_slice, decode_mb_field, decode_mb_skip, parse_mb_cabac,
 };
-use super::cavlc::parse_mb_cavlc;
+use super::cavlc::parse_mb_cavlc_parts;
 use super::deblock::{DeblockParams, deblock_mb_rows};
 #[allow(unused_imports)]
 use super::dpb::MISSING_REF;
@@ -52,6 +52,19 @@ struct SliceJob<S: Sample> {
     /// The picture's slice-group map when the PPS has more than one slice
     /// group (FMO): the slice walks `next` instead of `addr + 1`.
     fmo: Option<Arc<SliceGroupMap>>,
+    /// A partitioned slice (7.3.2.9): partitions B and C, each its RBSP
+    /// and the bit where its slice data starts; absent when the slice had
+    /// none of that category. `rbsp` is then partition A.
+    partitions: Option<Box<[Option<(Vec<u8>, u64)>; 2]>>,
+}
+
+/// A slice data partition A waiting for the B and C partitions that may
+/// follow it (each immediately: 7.4.1.2.3).
+struct PendingPartitions {
+    nal: H264NalHeader,
+    a: Vec<u8>,
+    /// Partitions B and C as they arrived (RBSPs, NAL header byte included).
+    bc: [Option<Vec<u8>>; 2],
 }
 
 /// The state of one picture's decoding: lives on the worker (or inline).
@@ -109,6 +122,7 @@ impl<S: Sample> PictureDecoder<S> {
             col,
             x264_old_444,
             fmo,
+            partitions,
         } = job;
         // SAFETY: this PictureDecoder is the picture's only writer; other
         // threads read only rows below the published progress. The Arc does
@@ -466,6 +480,19 @@ impl<S: Sample> PictureDecoder<S> {
         } else {
             let mut r = BitReader::new(&rbsp);
             r.skip(hdr.data_bit_offset as u32);
+            // Partitions B and C (a missing one reads as empty: its
+            // category had nothing to carry, 8.2.3).
+            fn reader(q: &Option<(Vec<u8>, u64)>) -> BitReader<'_> {
+                match q {
+                    Some((d, at)) => {
+                        let mut r = BitReader::new(d);
+                        r.skip(*at as u32);
+                        r
+                    }
+                    None => BitReader::new(&[]),
+                }
+            }
+            let mut parts = partitions.as_ref().map(|p| [reader(&p[0]), reader(&p[1])]);
             // MBAFF: whether the coded macroblock's pair flag was already
             // read (at the skipped top macroblock before it).
             let mut field_read = false;
@@ -528,7 +555,17 @@ impl<S: Sample> PictureDecoder<S> {
                 neighbours!(nb, info, sa, pair_field);
                 let t = r.ue();
                 layer.field = pair_field;
-                parse_mb_cavlc(&mut r, &ctx, info, &nb, t, &mut layer, dq, &mut qps)?;
+                parse_mb_cavlc_parts(
+                    &mut r,
+                    parts.as_mut(),
+                    &ctx,
+                    info,
+                    &nb,
+                    t,
+                    &mut layer,
+                    dq,
+                    &mut qps,
+                )?;
                 derive(&ctx, &qps, cur, info, &nb, &mut layer, &refs, &mut dscratch)?;
                 reconstruct(&ctx, dq, cur, info, &nb, &layer, &refs, &mut rscratch)?;
                 mb_done!();
@@ -836,6 +873,8 @@ pub(crate) struct H264DecoderImpl<S: Sample> {
     open_field: Option<OpenField<S>>,
     /// Output buffers, recycled through the pictures handed out.
     output_pool: crate::picture::OutputPool,
+    /// A partitioned slice still collecting its partitions.
+    partitions: Option<PendingPartitions>,
 }
 
 impl<S: Sample> H264DecoderImpl<S> {
@@ -868,6 +907,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             dsp: H264Dsp::new(crate::dsp::Cpu::detect_honouring_env()),
             output_pool: crate::picture::OutputPool::default(),
             fmo_cache: None,
+            partitions: None,
         }
     }
 
@@ -953,10 +993,27 @@ impl<S: Sample> H264DecoderImpl<S> {
         let Some(hdr) = H264NalHeader::parse(nal) else {
             return Ok(());
         };
+        // Slice data partitioning (8.2.3): partitions B and C follow their
+        // partition A immediately, so anything else ends the slice.
+        if let Some(p) = &mut self.partitions {
+            if let 3 | 4 = hdr.unit_type {
+                let k = hdr.unit_type as usize - 3;
+                if p.bc[k].is_none() && (k == 1 || p.bc[1].is_none()) {
+                    p.bc[k] = Some(unescape_rbsp(nal));
+                } else {
+                    self.warnings.fetch_add(1, Ordering::Relaxed);
+                }
+                if k == 1 {
+                    self.decode_partitioned()?;
+                }
+                return Ok(());
+            }
+            self.decode_partitioned()?;
+        }
         match hdr.unit_type {
             1 | 5 => {
                 let rbsp = unescape_rbsp(nal);
-                self.decode_slice(hdr, rbsp)
+                self.decode_slice(hdr, rbsp, None)
             }
             7 => {
                 let rbsp = unescape_rbsp(&nal[1..]);
@@ -999,9 +1056,20 @@ impl<S: Sample> H264DecoderImpl<S> {
                 }
                 Ok(())
             }
-            2..=4 => Err(Error::unsupported(
-                "H.264 slice data partitioning (nal_unit_type 2..4)",
-            )),
+            2 => {
+                self.partitions = Some(PendingPartitions {
+                    nal: hdr,
+                    a: unescape_rbsp(nal),
+                    bc: [None, None],
+                });
+                Ok(())
+            }
+            3 | 4 => {
+                // A partition B or C without its partition A (which was
+                // lost, or was a redundant slice's): nothing to attach to.
+                self.warnings.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
             20 | 21 => Ok(()),
             _ => Ok(()),
         }
@@ -1056,8 +1124,17 @@ impl<S: Sample> H264DecoderImpl<S> {
         }
     }
 
+    /// Decode the partitioned slice collected so far.
+    fn decode_partitioned(&mut self) -> Result<()> {
+        let Some(p) = self.partitions.take() else {
+            return Ok(());
+        };
+        self.decode_slice(p.nal, p.a, Some(p.bc))
+    }
+
     /// End of stream: finish the open picture and drain the reorder buffer.
     pub fn flush(&mut self) -> Result<()> {
+        self.decode_partitioned()?;
         if self.cur.is_some() {
             self.finish_picture()?;
         }
@@ -1206,10 +1283,17 @@ impl<S: Sample> H264DecoderImpl<S> {
         self.grey.clone().unwrap()
     }
 
-    fn decode_slice(&mut self, nal: H264NalHeader, rbsp: Vec<u8>) -> Result<()> {
+    /// Decode one slice: an ordinary one (`bc` None), or partition A with
+    /// whatever partitions B and C arrived (`bc`).
+    fn decode_slice(
+        &mut self,
+        nal: H264NalHeader,
+        rbsp: Vec<u8>,
+        bc: Option<[Option<Vec<u8>>; 2]>,
+    ) -> Result<()> {
         let sps_tab = &self.sps;
         let pps_tab = &self.pps;
-        let (hdr, pps, sps) = SliceHeader::parse(
+        let (mut hdr, pps, sps) = SliceHeader::parse(
             &rbsp,
             nal,
             &|id| {
@@ -1224,6 +1308,46 @@ impl<S: Sample> H264DecoderImpl<S> {
         if hdr.redundant_pic_cnt > 0 {
             return Ok(());
         }
+        // Partition A: slice_id after the header, then its slice data;
+        // B and C: their own slice_id, colour_plane_id and
+        // redundant_pic_cnt, then theirs (7.3.2.9).
+        let partitions = match bc {
+            None => None,
+            Some(bc) => {
+                if pps.cabac {
+                    return Err(Error::bitstream(
+                        "slice data partitioning with CABAC (entropy_coding_mode_flag 1)",
+                    ));
+                }
+                let mut r = BitReader::new(&rbsp);
+                r.skip(hdr.data_bit_offset as u32);
+                let slice_id = r.ue();
+                hdr.data_bit_offset = r.position();
+                let mut out: [Option<(Vec<u8>, u64)>; 2] = [None, None];
+                for (o, part) in out.iter_mut().zip(bc) {
+                    let Some(part) = part else { continue };
+                    let mut r = BitReader::new(&part);
+                    r.bits(8); // the NAL header
+                    let id = r.ue();
+                    let plane = if sps.separate_colour_plane {
+                        r.bits(2)
+                    } else {
+                        0
+                    };
+                    if pps.redundant_pic_cnt_present {
+                        r.ue();
+                    }
+                    if id != slice_id || plane != hdr.colour_plane_id || r.overrun() {
+                        // Not this slice's: its partition A was lost.
+                        self.warnings.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let at = r.position();
+                    *o = Some((part, at));
+                }
+                Some(Box::new(out))
+            }
+        };
         // SP / SI slices (8.6) are decoded as the Extended profile codes
         // them: CAVLC, 4:2:0 (or 4:0:0), 8-bit, the 4x4 transform. Nothing
         // outside that exists to be checked against, so it is refused by
@@ -1353,6 +1477,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             col,
             x264_old_444,
             fmo,
+            partitions,
         };
         if let Some(tx) = &cur.tx {
             let _ = tx.send(job);
