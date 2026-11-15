@@ -567,12 +567,18 @@ impl<'a> CabacWriter<'a> {
     /// writer. The first bit to leave the window is the implicit leading
     /// one the standard's `firstBitFlag` drops, so the first byte waits
     /// for nine.
-    #[inline]
+    #[inline(always)]
     fn fast_settle(&mut self) {
-        let need = 8 + self.first as u32;
-        if self.queued < need {
-            return;
+        if self.queued >= 8 + self.first as u32 {
+            self.fast_out();
         }
+    }
+
+    /// [`CabacWriter::fast_settle`]'s byte, out of line: one bin in
+    /// several gets here.
+    #[inline(never)]
+    fn fast_out(&mut self) {
+        let need = 8 + self.first as u32;
         let shift = 10 + self.queued - need;
         let v = self.low >> shift;
         self.low &= (1 << shift) - 1;
@@ -614,7 +620,7 @@ impl<'a> CabacWriter<'a> {
     }
 
     /// [`CabacWriter`]'s renormalisation: one shift, then whole bytes out.
-    #[inline]
+    #[inline(always)]
     fn fast_renorm(&mut self) {
         if self.range < 256 {
             let s = self.range.leading_zeros() - 23;
