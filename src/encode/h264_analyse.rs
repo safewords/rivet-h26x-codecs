@@ -31,8 +31,8 @@ use crate::encode::h264_intra::{
 };
 use crate::encode::h264_me::{
     BDecision, BMbKind, BRefs, InterDecision, InterMbKind, MbMotionState, PRef,
-    code_inter_mb_residual, code_inter_mb_residual_parts, predict_inter_rect, rect_satd_under,
-    spatial_direct,
+    code_inter_mb_residual, code_inter_mb_residual_parts, inter_residual_is_empty,
+    predict_inter_rect, rect_satd_under, spatial_direct,
 };
 use crate::encode::h264_pic::{BMb, Colocated, PMb};
 use crate::encode::h264_syntax::Recon;
@@ -1101,27 +1101,39 @@ pub(crate) fn p_mb<S: Sample>(
         let o = rec[0].offset(px as isize, py as isize);
         let sad = (ctx.dist.sad)(sy, src.ys, &rec[0].data[o..], rec[0].stride, 16, 16);
         if sad < early_skip_sad(ctx.qp) {
-            let r = code_inter_mb_residual(
-                ctx,
-                rec,
-                mb_x,
-                mb_y,
-                src.y,
-                src.ys,
-                src.c,
-                src.cs,
-                false,
-                Some(false),
-            );
-            if r.cbp_luma == 0
-                && r.cbp_chroma == 0
-                && (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32)
-                    < early_skip_ssd(ctx.qp, cfg.skip_ssd)
-            {
+            // Skip when the prediction's residual quantises to nothing and
+            // its error (the reconstruction then being the prediction) is
+            // under the ceiling: the error first, it is one SSD.
+            let low =
+                (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32) < early_skip_ssd(ctx.qp, cfg.skip_ssd);
+            let empty = low
+                && match inter_residual_is_empty(ctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs)
+                {
+                    Some(e) => e,
+                    None => {
+                        let r = code_inter_mb_residual(
+                            ctx,
+                            rec,
+                            mb_x,
+                            mb_y,
+                            src.y,
+                            src.ys,
+                            src.c,
+                            src.cs,
+                            false,
+                            Some(false),
+                        );
+                        let e = r.cbp_luma == 0 && r.cbp_chroma == 0;
+                        if !e {
+                            predict(rec, 0, 0, 16, 16, skip_mv);
+                        }
+                        e
+                    }
+                };
+            if empty {
                 st.commit_part(0, 0, 16, 16, [Some(skip_mv), None]);
                 return MbChoice::Inter(skip_dec);
             }
-            predict(rec, 0, 0, 16, 16, skip_mv);
         }
     }
     let skip_ssd = ssd_mb(ctx, rec, src, mb_x, mb_y);
@@ -1800,26 +1812,37 @@ pub(crate) fn b_mb<S: Sample>(
         let o = rec[0].offset(px as isize, py as isize);
         let sad = (ctx.dist.sad)(sy, src.ys, &rec[0].data[o..], rec[0].stride, 16, 16);
         if sad < early_skip_sad(ctx.qp) {
-            let r = code_inter_mb_residual(
-                ctx,
-                rec,
-                mb_x,
-                mb_y,
-                src.y,
-                src.ys,
-                src.c,
-                src.cs,
-                false,
-                Some(false),
-            );
-            if r.cbp_luma == 0
-                && r.cbp_chroma == 0
-                && (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32)
-                    < early_skip_ssd(ctx.qp, cfg.skip_ssd)
-            {
+            // As for P_Skip: the error first, then whether anything
+            // survives quantisation.
+            let low =
+                (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32) < early_skip_ssd(ctx.qp, cfg.skip_ssd);
+            let empty = low
+                && match inter_residual_is_empty(ctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs)
+                {
+                    Some(e) => e,
+                    None => {
+                        let r = code_inter_mb_residual(
+                            ctx,
+                            rec,
+                            mb_x,
+                            mb_y,
+                            src.y,
+                            src.ys,
+                            src.c,
+                            src.cs,
+                            false,
+                            Some(false),
+                        );
+                        let e = r.cbp_luma == 0 && r.cbp_chroma == 0;
+                        if !e {
+                            predict_cand(rec, st, &direct);
+                        }
+                        e
+                    }
+                };
+            if empty {
                 return MbChoice::Inter(skip_dec);
             }
-            predict_cand(rec, st, &direct);
         }
     }
     let skip_ssd = ssd_mb(ctx, rec, src, mb_x, mb_y);

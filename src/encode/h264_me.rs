@@ -1457,6 +1457,124 @@ pub(crate) fn code_inter_mb_residual<S: Sample>(
     )
 }
 
+/// Whether [`code_inter_mb_residual`] at the 4x4 transform would code
+/// nothing for the prediction standing in `rec` — every luma and chroma
+/// level zero, so `CodedBlockPattern` 0 — found without reconstructing
+/// and stopping at the first level that survives. `None` where the
+/// question is not this function's (4:4:4, or a trellis quantising),
+/// and the caller codes the residual to see.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn inter_residual_is_empty<S: Sample>(
+    ctx: &MeCtx<S>,
+    rec: &[Recon<S>],
+    mb_x: usize,
+    mb_y: usize,
+    src_luma: &[S],
+    luma_stride: usize,
+    src_chroma: [&[S]; 2],
+    chroma_stride: usize,
+) -> Option<bool> {
+    if ctx.c444 || ctx.trellis.is_some() {
+        return None;
+    }
+    let (px, py) = (mb_x * 16, mb_y * 16);
+    let quant = |plane: &Recon<S>,
+                 off: usize,
+                 src: &[S],
+                 ss: usize,
+                 list: usize,
+                 qp: i32|
+     -> ([i16; 16], i32) {
+        let mut residual = [0i16; 16];
+        crate::encode::h264_intra::diff_block::<S, 4>(
+            src,
+            ss,
+            &plane.data[off..],
+            plane.stride,
+            &mut residual,
+        );
+        let mut coeffs = [0i32; 16];
+        (ctx.enc.fdct4)(&residual, &mut coeffs);
+        let qbits = qbits4(qp);
+        let mut levels = [0i16; 16];
+        (ctx.enc.quant4)(
+            &coeffs,
+            &mut levels,
+            &ctx.quant.mf4[list][(qp % 6) as usize],
+            qbits,
+            quant_offset(qbits, false),
+        );
+        (levels, coeffs[0])
+    };
+    let off = rec[0].offset(px as isize, py as isize);
+    let soff = py * luma_stride + px;
+    for blk in 0..16 {
+        let (bx, by) = (blk % 4, blk / 4);
+        let (lv, _) = quant(
+            &rec[0],
+            off + by * 4 * rec[0].stride + bx * 4,
+            &src_luma[soff + by * 4 * luma_stride + bx * 4..],
+            luma_stride,
+            3,
+            ctx.qp_prime,
+        );
+        if lv.iter().any(|&v| v != 0) {
+            return Some(false);
+        }
+    }
+    let h = ctx.chroma_h;
+    if h == 0 {
+        return Some(true);
+    }
+    let (cx, cy) = (mb_x * 8, mb_y * h);
+    let coff = cy * chroma_stride + cx;
+    let blocks = h / 4 * 2;
+    for comp in 0..2 {
+        let plane = &rec[comp + 1];
+        let off = plane.offset(cx as isize, cy as isize);
+        let qp = ctx.qpc_prime[comp];
+        let list = 4 + comp;
+        let mut dcs = [0i32; 8];
+        for blk in 0..blocks {
+            let (bx, by) = (blk % 2, blk / 2);
+            let (lv, dc) = quant(
+                plane,
+                off + by * 4 * plane.stride + bx * 4,
+                &src_chroma[comp][coff + by * 4 * chroma_stride + bx * 4..],
+                chroma_stride,
+                list,
+                qp,
+            );
+            if lv[1..].iter().any(|&v| v != 0) {
+                return Some(false);
+            }
+            dcs[blk] = dc;
+        }
+        // The DC levels, quantised as the coder quantises them.
+        let m = (qp % 6) as usize;
+        let qbits = qbits4(qp) + 1;
+        let offset = quant_offset(qbits, false) as i64;
+        let (d, mf): (&[i32], i64) = if blocks == 4 {
+            let mut d = [dcs[0], dcs[1], dcs[2], dcs[3]];
+            (ctx.enc.hadamard2x2)(&mut d);
+            dcs[..4].copy_from_slice(&d);
+            (&dcs[..4], ctx.quant.mf4[list][m][0] as i64)
+        } else {
+            (ctx.enc.hadamard2x4)(&mut dcs);
+            (
+                &dcs[..],
+                ctx.quant.mf4[list][((qp + 3) % 6) as usize][0] as i64,
+            )
+        };
+        if d.iter()
+            .any(|&v| ((v.unsigned_abs() as i64 * mf + offset) >> qbits) != 0)
+        {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
 /// [`code_inter_mb_residual`], with the 4:2:x chroma left alone when
 /// `chroma` is false — for trying a second luma transform over a chroma
 /// residual already coded and reconstructed in place (whose fields the
