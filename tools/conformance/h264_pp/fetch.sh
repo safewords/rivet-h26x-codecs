@@ -7,7 +7,7 @@ base=https://www.itu.int/wftp3/av-arch/jvt-site/draft_conformance/professional_p
 # directory listing, which is what it was made from in the first place.
 if [ ! -s list.txt ]; then
   curl -s -A 'Mozilla/5.0' --max-time 120 "$base/" | grep -io 'HREF="[^"]*"' | sed 's/HREF="//;s/"//' | sed 's#.*/##' \
-    | grep -iE '\.(zip|bit|bin|264|jsv|jvt|avc|26l)$' | sort -u > list.txt
+    | grep -iE '\.(zip|bits?|bin|264|jsv|jvt|avc|26l)$' | sort -u > list.txt
 fi
 mkdir -p zips streams
 while read -r z; do
