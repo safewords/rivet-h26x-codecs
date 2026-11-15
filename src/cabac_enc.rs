@@ -214,16 +214,13 @@ enum Out<'a> {
     /// Run no arithmetic at all: advance the contexts and charge each bin
     /// its [`STATE_COST`] — see [`CabacEncoder::estimating`].
     Estimate,
-    /// Write the same bits as [`Out::Bits`], a byte at a time: see
-    /// [`CabacEncoder::new_fast`].
-    Fast(&'a mut BitWriter),
 }
 
 impl Out<'_> {
     #[inline]
     fn bit(&mut self, v: u32) {
         match self {
-            Out::Bits(w) | Out::Fast(w) => w.bit(v),
+            Out::Bits(w) => w.bit(v),
             Out::Count(n) => *n += 1,
             Out::Estimate => {}
         }
@@ -231,7 +228,7 @@ impl Out<'_> {
     #[inline]
     fn bits(&mut self, n: u32, v: u32) {
         match self {
-            Out::Bits(w) | Out::Fast(w) => w.bits(n, v),
+            Out::Bits(w) => w.bits(n, v),
             Out::Count(c) => *c += n as u64,
             Out::Estimate => {}
         }
@@ -239,7 +236,7 @@ impl Out<'_> {
     #[inline]
     fn position(&self) -> u64 {
         match self {
-            Out::Bits(w) | Out::Fast(w) => w.position(),
+            Out::Bits(w) => w.position(),
             Out::Count(n) => *n,
             Out::Estimate => 0,
         }
@@ -271,13 +268,6 @@ pub struct CabacEncoder<'a> {
     /// `firstBitFlag`: the first `PutBit` produces no output, because the
     /// leading bit of the interval is implicit.
     first: bool,
-    /// [`Out::Fast`] only: the byte that a carry may still increment
-    /// (`-1`: none yet), ...
-    pend: i32,
-    /// ... the `0xff` bytes after it, which a carry turns to `0x00` ...
-    ffs: u32,
-    /// ... and how many bits `low` holds above its ten-bit window.
-    queued: u32,
 }
 
 impl<'a> CabacEncoder<'a> {
@@ -292,133 +282,7 @@ impl<'a> CabacEncoder<'a> {
             range: 510,
             outstanding: 0,
             first: true,
-            pend: -1,
-            ffs: 0,
-            queued: 0,
         }
-    }
-
-    /// [`CabacEncoder::new`], writing the identical bits by a faster
-    /// route: rather than the standard's bit-at-a-time `PutBit` with its
-    /// outstanding-bits counter, `low` keeps the bits that leave its
-    /// ten-bit window above it and hands them to the writer a byte at a
-    /// time, a carry out of the window incrementing the one byte that can
-    /// still take it (and turning the `0xff` bytes after it to `0x00`) —
-    /// the same codeword, since the outstanding bits are exactly the run a
-    /// carry would flip. [`CabacEncoder::position`] lags by the bits held
-    /// back, so this is for writers that only ever finish the slice.
-    pub fn new_fast(w: &'a mut BitWriter) -> Self {
-        debug_assert!(w.byte_aligned(), "CABAC data starts on a byte boundary");
-        Self {
-            w: Out::Fast(w),
-            frac: 0.0,
-            low: 0,
-            range: 510,
-            outstanding: 0,
-            first: true,
-            pend: -1,
-            ffs: 0,
-            queued: 0,
-        }
-    }
-
-    /// [`Out::Fast`]: move whole bytes from above the window to the
-    /// writer. The first bit to leave the window is the implicit leading
-    /// one the standard's `firstBitFlag` drops, so the first byte waits
-    /// for nine.
-    #[inline]
-    fn fast_settle(&mut self) {
-        let need = 8 + self.first as u32;
-        if self.queued < need {
-            return;
-        }
-        let shift = 10 + self.queued - need;
-        let v = self.low >> shift;
-        self.low &= (1 << shift) - 1;
-        self.queued -= need;
-        let (carry, byte) = if self.first {
-            self.first = false;
-            debug_assert!(v < 0x100, "a carry past the codeword's first bit");
-            (0, v & 0xff)
-        } else {
-            (v >> 8, v & 0xff)
-        };
-        self.fast_byte(carry, byte);
-    }
-
-    #[inline]
-    fn fast_byte(&mut self, carry: u32, byte: u32) {
-        let Out::Fast(w) = &mut self.w else {
-            unreachable!()
-        };
-        if carry != 0 {
-            debug_assert!(self.pend >= 0, "a carry with no byte to take it");
-            w.bits(8, (self.pend as u32 + 1) & 0xff);
-            for _ in 0..self.ffs {
-                w.bits(8, 0);
-            }
-            self.pend = -1;
-            self.ffs = 0;
-        }
-        if byte == 0xff {
-            self.ffs += 1;
-        } else {
-            if self.pend >= 0 {
-                w.bits(8, self.pend as u32);
-            }
-            for _ in 0..self.ffs {
-                w.bits(8, 0xff);
-            }
-            self.pend = byte as i32;
-            self.ffs = 0;
-        }
-    }
-
-    /// [`Out::Fast`]'s renormalisation: one shift, then whole bytes out.
-    #[inline]
-    fn fast_renorm(&mut self) {
-        if self.range < 256 {
-            let s = self.range.leading_zeros() - 23;
-            self.range <<= s;
-            self.low <<= s;
-            self.queued += s;
-            self.fast_settle();
-        }
-    }
-
-    /// [`Out::Fast`]'s `EncodeFlush`: the window's top three bits, the
-    /// last forced to one, join the queue, and everything left goes out.
-    fn fast_flush(&mut self) {
-        self.range = 2;
-        self.fast_renorm();
-        self.low |= 0x80;
-        self.low <<= 3;
-        self.queued += 3;
-        self.fast_settle();
-        self.fast_settle();
-        // Nothing can carry any more: the pending byte and its run go out
-        // as they stand, then the bits short of a byte.
-        let mut rest = self.queued;
-        let mut v = self.low >> 10;
-        if self.first {
-            // Never reached a byte: drop the leading bit here.
-            debug_assert!(rest >= 1);
-            rest -= 1;
-            v &= (1 << rest) - 1;
-            self.first = false;
-        }
-        // A carry out of the last bits still reaches the pending byte.
-        self.fast_byte(v >> rest, 0);
-        // `fast_byte` queued a zero byte as pending; drop it.
-        self.pend = -1;
-        let Out::Fast(w) = &mut self.w else {
-            unreachable!()
-        };
-        if rest > 0 {
-            w.bits(rest, v & ((1 << rest) - 1));
-        }
-        self.queued = 0;
-        self.low = 0;
     }
 
     /// An encoder that counts the bits it would write and produces none.
@@ -448,9 +312,6 @@ impl<'a> CabacEncoder<'a> {
             range: 510,
             outstanding: 0,
             first: true,
-            pend: -1,
-            ffs: 0,
-            queued: 0,
         }
     }
 
@@ -472,9 +333,6 @@ impl<'a> CabacEncoder<'a> {
             range: 510,
             outstanding: 0,
             first: true,
-            pend: -1,
-            ffs: 0,
-            queued: 0,
         }
     }
 
@@ -528,19 +386,6 @@ impl<'a> CabacEncoder<'a> {
         let p = (state >> 1) as usize;
         let mps = (state & 1) as u32;
         let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
-        if let Out::Fast(_) = self.w {
-            self.range -= lps;
-            if bin != mps {
-                self.low += self.range;
-                self.range = lps;
-                let flipped = if p == 0 { mps ^ 1 } else { mps };
-                *ctx = (NEXT_STATE_LPS[p] << 1) | flipped as u8;
-            } else {
-                *ctx = (NEXT_STATE_MPS[p] << 1) | mps as u8;
-            }
-            self.fast_renorm();
-            return;
-        }
         let before = self.range;
         self.range -= lps;
         if bin != mps {
@@ -572,15 +417,6 @@ impl<'a> CabacEncoder<'a> {
         // A bypass bin halves the interval by construction: one bit, exactly.
         self.frac += 1.0;
         if let Out::Estimate = self.w {
-            return;
-        }
-        if let Out::Fast(_) = self.w {
-            self.low <<= 1;
-            if bin != 0 {
-                self.low += self.range;
-            }
-            self.queued += 1;
-            self.fast_settle();
             return;
         }
         self.low <<= 1;
@@ -615,16 +451,6 @@ impl<'a> CabacEncoder<'a> {
             // A terminate bin of 0 is nearly free (2 / range of the
             // interval goes); 1 ends the codeword, about seven bits.
             self.frac += if bin != 0 { 7.0 } else { 0.01 };
-            return;
-        }
-        if let Out::Fast(_) = self.w {
-            self.range -= 2;
-            if bin != 0 {
-                self.low += self.range;
-                self.fast_flush();
-            } else {
-                self.fast_renorm();
-            }
             return;
         }
         let before = self.range;
@@ -693,6 +519,180 @@ impl<'a> CabacEncoder<'a> {
     /// to within the flush's few bits, which the round trip asserts.
     pub fn fractional_bits(&self) -> f64 {
         self.frac
+    }
+}
+
+/// [`CabacEncoder::new`]'s bits by a faster route, for the slice writers
+/// that only ever finish a slice: rather than the standard's
+/// bit-at-a-time `PutBit` with its outstanding-bits counter, `low` keeps
+/// the bits that leave its ten-bit window above it and hands them to the
+/// writer a byte at a time, a carry out of the window incrementing the one
+/// byte that can still take it (and turning the `0xff` bytes after it to
+/// `0x00`) — the same codeword, since the outstanding bits are exactly the
+/// run a carry would flip. The module's round trip holds the two to the
+/// same bytes.
+pub(crate) struct CabacWriter<'a> {
+    w: &'a mut BitWriter,
+    /// `codILow`, with [`CabacWriter::queued`] bits above its window.
+    low: u32,
+    /// `codIRange`.
+    range: u32,
+    /// The first bit to leave the window is the implicit one
+    /// `firstBitFlag` drops.
+    first: bool,
+    /// The byte that a carry may still increment (`-1`: none yet), ...
+    pend: i32,
+    /// ... the `0xff` bytes after it, which a carry turns to `0x00` ...
+    ffs: u32,
+    /// ... and how many bits `low` holds above its ten-bit window.
+    queued: u32,
+}
+
+impl<'a> CabacWriter<'a> {
+    /// Start writing into `w`, byte aligned as for [`CabacEncoder::new`].
+    pub(crate) fn new(w: &'a mut BitWriter) -> Self {
+        debug_assert!(w.byte_aligned(), "CABAC data starts on a byte boundary");
+        Self {
+            w,
+            low: 0,
+            range: 510,
+            first: true,
+            pend: -1,
+            ffs: 0,
+            queued: 0,
+        }
+    }
+
+    /// [`CabacWriter`]: move whole bytes from above the window to the
+    /// writer. The first bit to leave the window is the implicit leading
+    /// one the standard's `firstBitFlag` drops, so the first byte waits
+    /// for nine.
+    #[inline]
+    fn fast_settle(&mut self) {
+        let need = 8 + self.first as u32;
+        if self.queued < need {
+            return;
+        }
+        let shift = 10 + self.queued - need;
+        let v = self.low >> shift;
+        self.low &= (1 << shift) - 1;
+        self.queued -= need;
+        let (carry, byte) = if self.first {
+            self.first = false;
+            debug_assert!(v < 0x100, "a carry past the codeword's first bit");
+            (0, v & 0xff)
+        } else {
+            (v >> 8, v & 0xff)
+        };
+        self.fast_byte(carry, byte);
+    }
+
+    #[inline]
+    fn fast_byte(&mut self, carry: u32, byte: u32) {
+        let w = &mut *self.w;
+        if carry != 0 {
+            debug_assert!(self.pend >= 0, "a carry with no byte to take it");
+            w.bits(8, (self.pend as u32 + 1) & 0xff);
+            for _ in 0..self.ffs {
+                w.bits(8, 0);
+            }
+            self.pend = -1;
+            self.ffs = 0;
+        }
+        if byte == 0xff {
+            self.ffs += 1;
+        } else {
+            if self.pend >= 0 {
+                w.bits(8, self.pend as u32);
+            }
+            for _ in 0..self.ffs {
+                w.bits(8, 0xff);
+            }
+            self.pend = byte as i32;
+            self.ffs = 0;
+        }
+    }
+
+    /// [`CabacWriter`]'s renormalisation: one shift, then whole bytes out.
+    #[inline]
+    fn fast_renorm(&mut self) {
+        if self.range < 256 {
+            let s = self.range.leading_zeros() - 23;
+            self.range <<= s;
+            self.low <<= s;
+            self.queued += s;
+            self.fast_settle();
+        }
+    }
+
+    /// [`CabacWriter`]'s `EncodeFlush`: the window's top three bits, the
+    /// last forced to one, join the queue, and everything left goes out.
+    fn fast_flush(&mut self) {
+        self.range = 2;
+        self.fast_renorm();
+        self.low |= 0x80;
+        self.low <<= 3;
+        self.queued += 3;
+        self.fast_settle();
+        self.fast_settle();
+        // Nothing can carry any more: the pending byte and its run go out
+        // as they stand, then the bits short of a byte.
+        let mut rest = self.queued;
+        let mut v = self.low >> 10;
+        if self.first {
+            // Never reached a byte: drop the leading bit here.
+            debug_assert!(rest >= 1);
+            rest -= 1;
+            v &= (1 << rest) - 1;
+            self.first = false;
+        }
+        // A carry out of the last bits still reaches the pending byte.
+        self.fast_byte(v >> rest, 0);
+        // `fast_byte` queued a zero byte as pending; drop it.
+        self.pend = -1;
+        let w = &mut *self.w;
+        if rest > 0 {
+            w.bits(rest, v & ((1 << rest) - 1));
+        }
+        self.queued = 0;
+        self.low = 0;
+    }
+}
+
+impl BinEnc for CabacWriter<'_> {
+    #[inline(always)]
+    fn encode_decision(&mut self, ctx: &mut Ctx, bin: u32) {
+        let state = *ctx;
+        let p = (state >> 1) as usize;
+        let mps = (state & 1) as u32;
+        let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
+        self.range -= lps;
+        if bin != mps {
+            self.low += self.range;
+            self.range = lps;
+        }
+        *ctx = EST_NEXT[((state as usize) << 1 | bin as usize) & 255];
+        self.fast_renorm();
+    }
+
+    #[inline(always)]
+    fn encode_bypass(&mut self, bin: u32) {
+        self.low <<= 1;
+        if bin != 0 {
+            self.low += self.range;
+        }
+        self.queued += 1;
+        self.fast_settle();
+    }
+
+    fn encode_terminate(&mut self, bin: u32) {
+        self.range -= 2;
+        if bin != 0 {
+            self.low += self.range;
+            self.fast_flush();
+        } else {
+            self.fast_renorm();
+        }
     }
 }
 
@@ -792,7 +792,11 @@ mod tests {
         let a = (0.01875f64 / 0.5).powf(1.0 / 63.0);
         for (s, e) in STATE_COST.iter().enumerate() {
             let p = 0.5 * a.powi(s as i32);
-            assert_eq!(e[0].to_bits(), ((-(1.0 - p).log2()) as f32).to_bits(), "state {s}");
+            assert_eq!(
+                e[0].to_bits(),
+                ((-(1.0 - p).log2()) as f32).to_bits(),
+                "state {s}"
+            );
             assert_eq!(e[1].to_bits(), ((-p.log2()) as f32).to_bits(), "state {s}");
         }
         for c in 0..128u8 {
@@ -889,29 +893,29 @@ mod tests {
             let mut cb = contexts();
             {
                 let mut a = CabacEncoder::new(&mut want);
-                let mut f = CabacEncoder::new_fast(&mut got);
+                let mut f = CabacWriter::new(&mut got);
                 for op in ops {
                     match *op {
                         Op::Decision(i, b) => {
                             a.encode_decision(&mut ca[i], b);
-                            f.encode_decision(&mut cb[i], b);
+                            BinEnc::encode_decision(&mut f, &mut cb[i], b);
                         }
                         Op::Bypass(b) => {
                             a.encode_bypass(b);
-                            f.encode_bypass(b);
+                            BinEnc::encode_bypass(&mut f, b);
                         }
                         Op::BypassBits(n, v) => {
                             a.encode_bypass_bits(n, v);
-                            f.encode_bypass_bits(n, v);
+                            BinEnc::encode_bypass_bits(&mut f, n, v);
                         }
                         Op::Terminate => {
                             a.encode_terminate(0);
-                            f.encode_terminate(0);
+                            BinEnc::encode_terminate(&mut f, 0);
                         }
                     }
                 }
                 a.encode_terminate(1);
-                f.encode_terminate(1);
+                BinEnc::encode_terminate(&mut f, 1);
             }
             assert_eq!(want.position(), got.position(), "fast writer's length");
             want.align_zero();

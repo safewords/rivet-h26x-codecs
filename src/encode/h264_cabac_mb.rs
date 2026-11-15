@@ -592,7 +592,7 @@ pub fn write_intra_picture_cabac<S: Sample>(
     let t8x8 = tools.transform_8x8;
     w.align_one(); // cabac_alignment_one_bit
     let mut st = CabacState::new(SliceType::I, 0, qp as i32);
-    let mut e = CabacEncoder::new_fast(w);
+    let mut e = crate::cabac_enc::CabacWriter::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
     let live = std::cell::RefCell::new(st.ctx);
     let fmbs = code_intra_picture(
@@ -647,7 +647,7 @@ pub fn write_p_picture_cabac<S: Sample>(
     let t8x8 = tools.transform_8x8;
     w.align_one();
     let mut st = CabacState::new(SliceType::P, 0, qp as i32);
-    let mut e = CabacEncoder::new_fast(w);
+    let mut e = crate::cabac_enc::CabacWriter::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
     let live = std::cell::RefCell::new(st.ctx);
     let fmbs = code_p_picture(
@@ -707,7 +707,7 @@ pub fn write_b_picture_cabac<S: Sample>(
     let t8x8 = tools.transform_8x8;
     w.align_one();
     let mut st = CabacState::new(SliceType::B, 0, qp as i32);
-    let mut e = CabacEncoder::new_fast(w);
+    let mut e = crate::cabac_enc::CabacWriter::new(w);
     let mut coded: Vec<Coded> = Vec::with_capacity(total);
     let live = std::cell::RefCell::new(st.ctx);
     let fmbs = code_b_picture(

@@ -1473,7 +1473,10 @@ pub(crate) fn p_mb<S: Sample>(
         predict(rec, 0, 0, 16, 16, skip_mv);
         return best;
     }
-    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd), &mut best) {
+    if let (Some(t), MbChoice::Inter(dec)) = (
+        an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd),
+        &mut best,
+    ) {
         // The winner's residual again, by the trellis, from its prediction.
         best_pred.restore(ctx, rec, mb_x, mb_y);
         let tctx = IntraCtx {
@@ -2138,7 +2141,10 @@ pub(crate) fn b_mb<S: Sample>(
         predict_cand(rec, st, &direct);
         return best;
     }
-    if let (Some(t), MbChoice::Inter(dec)) = (an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd), &mut best) {
+    if let (Some(t), MbChoice::Inter(dec)) = (
+        an.trellis().filter(|_| !ctx.c444 && !cfg.trellis_rd),
+        &mut best,
+    ) {
         best_pred.restore(ctx, rec, mb_x, mb_y);
         let tctx = IntraCtx {
             trellis: Some(t),
