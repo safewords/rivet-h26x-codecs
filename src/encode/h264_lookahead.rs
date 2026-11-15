@@ -101,6 +101,24 @@ impl<S: Sample> Lookahead<S> {
         self.pics.insert(display, LaPic { low, intra });
     }
 
+    /// Full-resolution, quarter-sample vectors per macroblock per list of
+    /// picture `d` against references `r0` (and `r1` for a B picture),
+    /// from the half-resolution search — candidates for the real one. The
+    /// estimate is made now if it has not been.
+    pub(crate) fn vectors(
+        &mut self,
+        d: u64,
+        r0: u64,
+        r1: Option<u64>,
+    ) -> Option<Vec<[crate::h264::frame::Mv; 2]>> {
+        if !self.estimate(d, r0, r1) {
+            return None;
+        }
+        let est = &self.costs[&(d, r0, r1.unwrap_or(u64::MAX))];
+        let q = |(x, y): (i16, i16)| crate::h264::frame::Mv::new(x * 8, y * 8);
+        Some(est.iter().map(|b| [q(b.mv[0]), q(b.mv[1])]).collect())
+    }
+
     /// Forget every picture before `display` (and the estimates naming
     /// them).
     pub(crate) fn drop_before(&mut self, display: u64) {

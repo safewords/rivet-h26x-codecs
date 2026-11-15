@@ -425,6 +425,9 @@ pub(crate) fn reconstruct_8x8<S: Sample>(
     list8: usize,
     qp: i32,
 ) {
+    if levels.iter().all(|&l| l == 0) {
+        return;
+    }
     let scale = &ctx.dequant.scale8[list8][(qp % 6) as usize];
     let shift = (qp / 6) as u32;
     let mut coefs = [0i32; 64];

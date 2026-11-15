@@ -93,6 +93,10 @@ pub struct IntraTools<S: Sample> {
     pub(crate) mb_offsets: Option<Vec<i32>>,
     /// The stream is CABAC: what the trellis prices bins for.
     pub(crate) cabac: bool,
+    /// The lookahead's vectors for the picture about to be coded, per
+    /// macroblock per list, as search candidates; set per picture by the
+    /// encoder.
+    pub(crate) la_mvs: Option<Vec<[Mv; 2]>>,
 }
 
 impl<S: Sample> IntraTools<S> {
@@ -122,6 +126,7 @@ impl<S: Sample> IntraTools<S> {
             analysis: None,
             mb_offsets: None,
             cabac: false,
+            la_mvs: None,
         }
     }
 
@@ -679,10 +684,17 @@ fn nb_cands(
     mb_x: usize,
     mb_y: usize,
     mbs_wide: usize,
+    la: Option<&Vec<[Mv; 2]>>,
 ) -> ([[Mv; 4]; 2], [usize; 2]) {
     let mut out = [[Mv::ZERO; 4]; 2];
     let mut n = [0usize; 2];
     let addr = mb_y * mbs_wide + mb_x;
+    if let Some(v) = la.and_then(|v| v.get(addr)) {
+        for l in 0..2 {
+            out[l][0] = v[l];
+            n[l] = 1;
+        }
+    }
     let near = [
         (mb_x > 0, addr.wrapping_sub(1), 3usize),
         (mb_y > 0, addr.wrapping_sub(mbs_wide), 12),
@@ -698,7 +710,7 @@ fn nb_cands(
                 continue;
             }
             let m = pm.frame.motion[l][a * 16 + blk];
-            if m.ref_idx >= 0 && !out[l][..n[l]].contains(&m.mv) {
+            if m.ref_idx >= 0 && n[l] < 4 && !out[l][..n[l]].contains(&m.mv) {
                 out[l][n[l]] = m.mv;
                 n[l] += 1;
             }
@@ -957,7 +969,13 @@ pub(crate) fn code_p_picture<S: Sample>(
                 if let Some(l) = live {
                     an.refresh_trellis(&l.borrow());
                 }
-                let (cands, ncands) = nb_cands(&pm, mb_x, mb_y, mbs_wide);
+                let (cands, ncands) = nb_cands(
+                    &pm,
+                    mb_x,
+                    mb_y,
+                    mbs_wide,
+                    tools.la_mvs.as_ref().filter(|_| !g.field_pic),
+                );
                 let nb = Nb {
                     avail: MbAvail {
                         left: mb_x > 0,
@@ -1252,7 +1270,13 @@ pub(crate) fn code_b_picture<S: Sample>(
                 if let Some(l) = live {
                     an.refresh_trellis(&l.borrow());
                 }
-                let (cands, ncands) = nb_cands(&pm, mb_x, mb_y, mbs_wide);
+                let (cands, ncands) = nb_cands(
+                    &pm,
+                    mb_x,
+                    mb_y,
+                    mbs_wide,
+                    tools.la_mvs.as_ref().filter(|_| !g.field_pic),
+                );
                 let nb = Nb {
                     avail: MbAvail {
                         left: mb_x > 0,

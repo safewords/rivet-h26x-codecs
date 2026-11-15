@@ -920,7 +920,7 @@ impl<S: Sample> Core<S> {
                 .with_aq(cfg.aq_strength)
                 .with_analysis(
                     (std::env::var_os("H26X_OLD_DECISIONS").is_none())
-                        .then_some(super::h264_analyse::AnalysisCfg::MEDIUM),
+                        .then_some(super::h264_analyse::AnalysisCfg::MEDIUM.tuned()),
                     cfg.entropy == Entropy::Cabac,
                 );
         // The buffer to declare, snapped to what the syntax can carry —
@@ -1138,8 +1138,31 @@ impl<S: Sample> Core<S> {
                     self.tools.mb_offsets = la.offsets(c, &self.la_refs, &later);
                 }
             }
+            // The lookahead's vectors against the references this picture
+            // will predict from, as search candidates.
+            self.tools.la_mvs = None;
+            if let Some(la) = self.la.as_mut() {
+                let l0 = self
+                    .la_refs
+                    .iter()
+                    .copied()
+                    .filter(|&d| d < c.display)
+                    .max();
+                let l1 = self
+                    .la_refs
+                    .iter()
+                    .copied()
+                    .filter(|&d| d > c.display)
+                    .min();
+                self.tools.la_mvs = match (c.kind, l0, l1) {
+                    (Kind::P, Some(r0), _) => la.vectors(c.display, r0, None),
+                    (Kind::B, Some(r0), Some(r1)) => la.vectors(c.display, r0, Some(r1)),
+                    _ => None,
+                };
+            }
             let mut access = self.code_picture(c, &src)?;
             self.tools.mb_offsets = None;
+            self.tools.la_mvs = None;
             if c.reference {
                 self.la_refs.push(c.display);
                 if self.la_refs.len() > 4 {

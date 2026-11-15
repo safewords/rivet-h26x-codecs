@@ -31,7 +31,8 @@ use crate::encode::h264_intra::{
 };
 use crate::encode::h264_me::{
     BDecision, BMbKind, BRefs, InterDecision, InterMbKind, MbMotionState, PRef,
-    code_inter_mb_residual, predict_inter_rect, rect_satd_under, spatial_direct,
+    code_inter_mb_residual, code_inter_mb_residual_parts, predict_inter_rect, rect_satd_under,
+    spatial_direct,
 };
 use crate::encode::h264_pic::{BMb, Colocated, PMb};
 use crate::encode::h264_syntax::Recon;
@@ -71,6 +72,24 @@ pub(crate) struct AnalysisCfg {
 }
 
 impl AnalysisCfg {
+    /// TEMPORARY tuning hook.
+    pub(crate) fn tuned(mut self) -> Self {
+        if let Ok(v) = std::env::var("H26X_AN") {
+            let f: Vec<f32> = v.split(',').map(|x| x.parse().unwrap()).collect();
+            self.me.hpel_iters = f[0] as u8;
+            self.me.qpel_iters = f[1] as u8;
+            self.me_sub.hpel_iters = f[2] as u8;
+            self.me_sub.qpel_iters = f[3] as u8;
+            self.rd_ratio = f[4];
+            self.intra_ratio = f[5];
+            self.me.range = f[6] as i32;
+            if f.len() > 7 {
+                self.me.umh = f[7] != 0.0;
+            }
+        }
+        self
+    }
+
     /// The tier closest to x264's `medium`.
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
@@ -1080,11 +1099,19 @@ pub(crate) fn p_mb<S: Sample>(
             && (cand.kind != InterMbKind::P8x8 || cand.sub_shape.iter().all(|s| s.count() == 1));
         let tries: &[bool] = if allow8 { &[false, true] } else { &[false] };
         pred_pix.save(ctx, rec, mb_x, mb_y);
+        let mut first: Option<([[i16; 16]; 2], [[[i16; 16]; 16]; 2], [[u8; 16]; 2], u8)> = None;
         for (k, &t8) in tries.iter().enumerate() {
             if k > 0 {
-                pred_pix.restore(ctx, rec, mb_x, mb_y);
+                if ctx.c444 {
+                    pred_pix.restore(ctx, rec, mb_x, mb_y);
+                } else if first.is_none() {
+                    break;
+                } else {
+                    // The second transform: luma again, the chroma kept.
+                    pred_pix.restore_luma(rec, mb_x, mb_y);
+                }
             }
-            let r = code_inter_mb_residual(
+            let mut r = code_inter_mb_residual_parts(
                 ctx,
                 rec,
                 mb_x,
@@ -1095,7 +1122,20 @@ pub(crate) fn p_mb<S: Sample>(
                 src.cs,
                 allow8,
                 Some(t8),
+                k == 0 || ctx.c444,
             );
+            if k > 0 && !ctx.c444 {
+                if let Some((dc, ac, nz, cbp)) = first {
+                    (r.chroma_dc, r.chroma_ac, r.nz_chroma, r.cbp_chroma) = (dc, ac, nz, cbp);
+                }
+            } else if k == 0 {
+                first = Some((r.chroma_dc, r.chroma_ac, r.nz_chroma, r.cbp_chroma));
+                if allow8 && r.cbp_luma == 0 && !ctx.c444 {
+                    // Nothing survived the 4x4 transform; the 8x8 one
+                    // would code (almost always) the same nothing.
+                    first = None;
+                }
+            }
             if t8 && r.cbp_luma == 0 {
                 continue; // the same macroblock as the 4x4 one
             }
@@ -1337,8 +1377,16 @@ pub(crate) fn b_mb<S: Sample>(
         let used = lists(dir);
         let wt = refs.weighting_for(used);
         let s = &sy[y * src.ys + x..];
-        if matches!(wt, Weighting::Default) {
-            let (ax, ay) = ((px + x) as i32, (py + y) as i32);
+        // The planes hold every vector a search can reach from this block;
+        // a derived one (direct's) may lie outside, and goes through the
+        // decoder's clamped kernels instead.
+        let (ax, ay) = ((px + x) as i32, (py + y) as i32);
+        let inside = |l: usize| {
+            let (lx, hx, ly, hy) = search_bounds(refs.search[l], ax, ay, w, h, i32::MAX);
+            let (mx, my) = (mv[l].x as i32 >> 2, mv[l].y as i32 >> 2);
+            !used[l] || (mx >= lx && mx < hx && my >= ly && my < hy)
+        };
+        if matches!(wt, Weighting::Default) && inside(0) && inside(1) {
             let mut b0 = [S::default(); 256];
             let mut b1 = [S::default(); 256];
             if used[0] && used[1] {
@@ -1639,11 +1687,18 @@ pub(crate) fn b_mb<S: Sample>(
         let allow8 = ctx.t8x8 && d0.no_sub_mb_part_less_than_8x8();
         let tries: &[bool] = if allow8 { &[false, true] } else { &[false] };
         pred_pix.save(ctx, rec, mb_x, mb_y);
+        let mut first: Option<([[i16; 16]; 2], [[[i16; 16]; 16]; 2], [[u8; 16]; 2], u8)> = None;
         for (k, &t8) in tries.iter().enumerate() {
             if k > 0 {
-                pred_pix.restore(ctx, rec, mb_x, mb_y);
+                if ctx.c444 {
+                    pred_pix.restore(ctx, rec, mb_x, mb_y);
+                } else if first.is_none() {
+                    break;
+                } else {
+                    pred_pix.restore_luma(rec, mb_x, mb_y);
+                }
             }
-            let r = code_inter_mb_residual(
+            let mut r = code_inter_mb_residual_parts(
                 ctx,
                 rec,
                 mb_x,
@@ -1654,7 +1709,18 @@ pub(crate) fn b_mb<S: Sample>(
                 src.cs,
                 allow8,
                 Some(t8),
+                k == 0 || ctx.c444,
             );
+            if k > 0 && !ctx.c444 {
+                if let Some((dc, ac, nz, cbp)) = first {
+                    (r.chroma_dc, r.chroma_ac, r.nz_chroma, r.cbp_chroma) = (dc, ac, nz, cbp);
+                }
+            } else if k == 0 {
+                first = Some((r.chroma_dc, r.chroma_ac, r.nz_chroma, r.cbp_chroma));
+                if allow8 && r.cbp_luma == 0 && !ctx.c444 {
+                    first = None;
+                }
+            }
             if t8 && r.cbp_luma == 0 {
                 continue;
             }

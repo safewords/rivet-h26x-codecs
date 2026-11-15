@@ -938,6 +938,10 @@ fn add_residual_4x4<S: Sample>(
     qp: i32,
     dc: Option<i32>,
 ) {
+    // Nothing to add: the inverse transform of zeros is zero.
+    if dc.unwrap_or(0) == 0 && levels.iter().all(|&l| l == 0) {
+        return;
+    }
     let m = (qp % 6) as usize;
     let scale = &ctx.dequant.scale4[list][m];
     let q6 = qp / 6;
@@ -1413,6 +1417,40 @@ pub(crate) fn code_inter_mb_residual<S: Sample>(
     allow_8x8: bool,
     force: Option<bool>,
 ) -> InterResidual {
+    code_inter_mb_residual_parts(
+        ctx,
+        rec,
+        mb_x,
+        mb_y,
+        src_luma,
+        luma_stride,
+        src_chroma,
+        chroma_stride,
+        allow_8x8,
+        force,
+        true,
+    )
+}
+
+/// [`code_inter_mb_residual`], with the 4:2:x chroma left alone when
+/// `chroma` is false — for trying a second luma transform over a chroma
+/// residual already coded and reconstructed in place (whose fields the
+/// caller keeps). 4:4:4 chroma is luma-like and follows the transform
+/// size, so it is always coded.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn code_inter_mb_residual_parts<S: Sample>(
+    ctx: &MeCtx<S>,
+    rec: &mut [Recon<S>],
+    mb_x: usize,
+    mb_y: usize,
+    src_luma: &[S],
+    luma_stride: usize,
+    src_chroma: [&[S]; 2],
+    chroma_stride: usize,
+    allow_8x8: bool,
+    force: Option<bool>,
+    chroma: bool,
+) -> InterResidual {
     let (px, py) = (mb_x * 16, mb_y * 16);
     let soff = py * luma_stride + px;
     let mut out = InterResidual {
@@ -1508,7 +1546,7 @@ pub(crate) fn code_inter_mb_residual<S: Sample>(
     }
 
     let h = ctx.chroma_h;
-    if h == 0 {
+    if h == 0 || (!chroma && !ctx.c444) {
         return out.gate_transform_size();
     }
     if ctx.c444 {
