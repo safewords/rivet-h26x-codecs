@@ -50,22 +50,22 @@ const CTX_IDX_MAP_4X4: [u8; 15] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8];
 
 /// Per scan: the `(xP, yP)` of the sixteen positions of a 4x4 sub-block, and
 /// the position-dependent part of `sigCtx` (9.3.4.2.5) for each `prevCsbf`.
-struct SubBlockTables {
+pub(crate) struct SubBlockTables {
     /// `[scan_idx][n] = (xP, yP)`.
-    pos: [[(u8, u8); 16]; 3],
+    pub(crate) pos: [[(u8, u8); 16]; 3],
     /// `[scan_idx][prev_csbf][n]` = 0, 1 or 2.
     sig: [[[u8; 16]; 4]; 3],
     /// Inverse 4x4 scan: `[scan_idx][yP * 4 + xP]` = scan position.
-    inv4: [[u8; 16]; 3],
+    pub(crate) inv4: [[u8; 16]; 3],
     /// `ctxIdxMap` of a 4x4 block by scan position: `[scan_idx][n]`. Scan
     /// position 15 is always the last significant coefficient of the block,
     /// so it has no entry and is never asked for.
     ctx4: [[u8; 16]; 3],
     /// Inverse sub-block scan: `[scan_idx][log2_sb][yS * w + xS]` = index.
-    inv_sb: [[[u8; 64]; 4]; 3],
+    pub(crate) inv_sb: [[[u8; 64]; 4]; 3],
 }
 
-fn sub_block_tables() -> &'static SubBlockTables {
+pub(crate) fn sub_block_tables() -> &'static SubBlockTables {
     static T: std::sync::OnceLock<SubBlockTables> = std::sync::OnceLock::new();
     T.get_or_init(|| {
         let mut t = SubBlockTables {
@@ -138,7 +138,7 @@ fn sub_block_tables() -> &'static SubBlockTables {
 /// One copy of the formula, read by [`parse_residual`] and
 /// [`write_residual`] both, so the two directions cannot disagree about it.
 #[inline]
-fn last_sig_ctx(c_idx: usize, log2: u32) -> (u32, u32) {
+pub(crate) fn last_sig_ctx(c_idx: usize, log2: u32) -> (u32, u32) {
     if c_idx == 0 {
         (3 * (log2 - 2) + ((log2 - 1) >> 2), (log2 + 1) >> 2)
     } else {
@@ -161,7 +161,7 @@ fn last_sig_ctx(c_idx: usize, log2: u32) -> (u32, u32) {
 /// tables and drifting.
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn sig_ctx_of(
+pub(crate) fn sig_ctx_of(
     tabs: &SubBlockTables,
     scan_idx: u32,
     log2: u32,
@@ -756,10 +756,6 @@ pub(crate) fn write_residual(
         "transform_skip_flag writing is not supported (PPS keeps it off)"
     );
     debug_assert!(
-        !p.sign_hiding,
-        "sign data hiding is not supported (PPS keeps it off)"
-    );
-    debug_assert!(
         !p.explicit_rdpcm && !p.persistent_rice && !p.ts_context,
         "range-extension residual tools are not supported"
     );
@@ -1009,11 +1005,28 @@ pub(crate) fn write_residual(
         }
         // Signs: one bypass run, MSB = first in reverse scan order. No sign
         // hiding (asserted above), so every significant coefficient has one.
+        // Sign data hiding (7.4.9.11): with the PPS flag set, a sub-block
+        // whose first and last significant scan positions lie more than
+        // three apart carries no sign for its first (lowest-frequency)
+        // coefficient — the parity of the sub-block's level sum says it,
+        // and the encoder must have arranged that parity. (The reader's
+        // `rdpcm.is_none()` holds for every block this writer spells: no
+        // transform skip, and RDPCM needs it or a bypassed block.)
+        let sign_hidden =
+            p.sign_hiding && !p.bypass && sig_pos[0] as i32 - sig_pos[n_sig - 1] as i32 > 3;
+        debug_assert!(
+            !sign_hidden || {
+                let sum: i32 = (0..n_sig).map(abs_of).sum();
+                (sum % 2 == 1) == (coeffs[coord(xs, ys, sig_pos[n_sig - 1] as usize)] < 0)
+            },
+            "a hidden sign disagrees with its sub-block's parity"
+        );
+        let n_signs = n_sig - sign_hidden as usize;
         let mut signs = 0u32;
-        for k in 0..n_sig {
+        for k in 0..n_signs {
             signs = (signs << 1) | (coeffs[coord(xs, ys, sig_pos[k] as usize)] < 0) as u32;
         }
-        e.encode_bypass_bits(n_sig as u32, signs);
+        e.encode_bypass_bits(n_signs as u32, signs);
         // Remaining levels: coded exactly where the flags saturated. The
         // base level the reader will have reconstructed from the flags is 1,
         // plus the greater1 flag, plus the greater2 flag at its one index —
