@@ -92,10 +92,17 @@ pub(crate) struct AnalysisCfg {
     /// A partition's pair is refined only when it starts within this
     /// factor of the partition's better single list (0: never).
     pub(crate) bi_part_ratio: f32,
+    /// B partitions below 16x16 are searched only when mixing the 16x16
+    /// candidates per 8x8 quadrant, unsearched, comes within this factor
+    /// of the best 16x16 or direct estimate (0: always searched).
+    pub(crate) b_part_gate: f32,
 }
 
 impl AnalysisCfg {
-    /// The tier closest to x264's `medium`.
+    /// The tier closest to x264's `medium`. Quantising every coded
+    /// candidate by the trellis (-0.96 % BD-rate) and analysing intra up to
+    /// 1.5x the best inter estimate (-0.45 %) cost 23 % more instructions,
+    /// the B partition gate takes back 5 % of it.
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -116,17 +123,18 @@ impl AnalysisCfg {
         early_skip: true,
         skip_ssd: 0.02,
         i4x4: true,
-        intra_ratio: 1.2,
+        intra_ratio: 1.5,
         rd_ratio: 1.1,
         rd_max: 2,
         trellis: true,
-        trellis_rd: false,
+        trellis_rd: true,
         trellis_nonref: true,
         rd: true,
         refs: 3,
         mixed_refs: 1.25,
         bi_refine: 2,
         bi_part_ratio: 0.0,
+        b_part_gate: 1.02,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, one
@@ -164,16 +172,19 @@ impl AnalysisCfg {
         mixed_refs: 1.0,
         bi_refine: 1,
         bi_part_ratio: 0.0,
+        b_part_gate: 0.0,
     };
 
-    /// The most thorough tier: the multi-hexagon search, more refinement,
-    /// more candidates priced.
+    /// The most thorough tier: more references, refinement and candidates
+    /// priced. (The multi-hexagon search it had bought -0.27 % BD-rate for
+    /// 17 % of its instructions; without it, and with intra analysed up to
+    /// 2.0x the best inter estimate, it is +0.05 % for 12 % fewer.)
     pub(crate) const SLOW: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 24,
             hpel_iters: 2,
             qpel_iters: 2,
-            umh: true,
+            umh: false,
             qpel_diamond: false,
             dia: false,
         },
@@ -188,7 +199,7 @@ impl AnalysisCfg {
         early_skip: true,
         skip_ssd: 0.01,
         i4x4: true,
-        intra_ratio: 1.5,
+        intra_ratio: 2.0,
         rd_ratio: 1.25,
         rd_max: 3,
         trellis: true,
@@ -199,6 +210,7 @@ impl AnalysisCfg {
         mixed_refs: 1.5,
         bi_refine: 2,
         bi_part_ratio: 1.2,
+        b_part_gate: 1.02,
     };
 
     /// The tier for a preset.
@@ -1974,7 +1986,25 @@ pub(crate) fn b_mb<S: Sample>(
     }
     let mut shapes: [Option<BCand>; 4] = [Some(direct), Some(best16), None, None];
 
-    if ctx.subparts {
+    // Partitions pay where the macroblock's quadrants want different
+    // predictions. Mixing the 16x16 candidates per quadrant, unsearched,
+    // says cheaply whether they do: when the mix does not come within
+    // `b_part_gate` of the best whole-macroblock estimate, the searches
+    // are skipped (medium at 1.02: 5 % fewer instructions for +0.01 %
+    // BD-rate; 1.0: 9 % for +0.15 %).
+    let parts_worth = cfg.b_part_gate == 0.0 || {
+        let mut q = lam1 * 6.0;
+        for part in 0..4 {
+            let r = ((part & 1) * 8, (part >> 1) * 8, 8, 8);
+            let a = satd(r, PRED_L0, m16) as f32 + lam1 * 3.0;
+            let b = satd(r, PRED_L1, m16) as f32 + lam1 * 3.0;
+            let c = satd(r, PRED_BI, mbi) as f32 + lam1 * 5.0;
+            let d = satd(r, ddir, dmv[part]) as f32 + lam1;
+            q += a.min(b).min(c).min(d);
+        }
+        q < cfg.b_part_gate * b16_est.min(direct.est)
+    };
+    if ctx.subparts && parts_worth {
         // B_8x8: per 8x8, direct or one direction at 8x8.
         st.reset_mb();
         let mut t = BCand::new(BMbKind::B8x8);
