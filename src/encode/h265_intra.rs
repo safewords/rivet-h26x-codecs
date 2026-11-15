@@ -2015,6 +2015,10 @@ fn code_residual<S: Sample>(
         }
     };
 
+    if nz == 0 {
+        // Every level is zero: the decoder adds nothing to the prediction.
+        return 0;
+    }
     // Reconstruct through the decoder's own dequantisation and inverse
     // transform, so the plane holds what a decoder will hold.
     work[..n * n].copy_from_slice(&levels[..n * n]);

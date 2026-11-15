@@ -3943,6 +3943,10 @@ fn code_residual_inter<S: Sample>(
         }
     };
 
+    if nz == 0 {
+        // Every level is zero: the decoder adds nothing to the prediction.
+        return 0;
+    }
     work[..n * n].copy_from_slice(&levels[..n * n]);
     scale_coefficients(
         &mut work,

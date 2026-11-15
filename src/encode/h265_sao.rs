@@ -507,10 +507,16 @@ impl<S: Sample> Comp<'_, S> {
             }
         }
         for y in self.y0..self.y0 + self.h {
-            for x in self.x0..self.x0 + self.w {
-                if interior && (ix0..ix1).contains(&x) && (iy0..iy1).contains(&y) {
-                    continue;
-                }
+            // On an interior row only the columns either side of the
+            // interior remain; the kernel took the rest.
+            let skip = if interior && (iy0..iy1).contains(&y) {
+                ix0..ix1
+            } else {
+                0..0
+            };
+            for x in (self.x0..skip.start.max(self.x0))
+                .chain(skip.end.max(self.x0).min(self.x0 + self.w)..self.x0 + self.w)
+            {
                 let (xa, ya) = (x as i32 + hp[0], y as i32 + vp[0]);
                 let (xb, yb) = (x as i32 + hp[1], y as i32 + vp[1]);
                 if !usable(x, y, xa, ya) || !usable(x, y, xb, yb) {
