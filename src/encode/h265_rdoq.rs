@@ -118,32 +118,26 @@ fn remaining_bits(rice: u32, v: u32) -> f64 {
     }
 }
 
-/// Bits of the last-position syntax for scan-domain position (`lx`, `ly`).
-fn last_pos_bits(cx: &Contexts, c_idx: usize, log2: u32, lx: u32, ly: u32) -> f64 {
+/// Bits of one coordinate `v` of the last-position syntax, its prefix
+/// contexts at `base`.
+fn last_axis_bits(cx: &Contexts, c_idx: usize, log2: u32, v: u32, base: usize) -> f64 {
     let (off, shift) = last_sig_ctx(c_idx, log2);
     let c_max = (log2 << 1) - 1;
-    let prefix_of = |v: u32| -> u32 {
-        if v <= 3 {
-            return v;
-        }
+    let p = if v <= 3 {
+        v
+    } else {
         let msb = 31 - v.leading_zeros();
         2 * msb + ((v - (1 << msb) >= (1 << (msb - 1))) as u32)
     };
     let mut bits = 0f64;
-    for (v, base) in [
-        (lx, LAST_SIGNIFICANT_COEFF_X_PREFIX_OFFSET),
-        (ly, LAST_SIGNIFICANT_COEFF_Y_PREFIX_OFFSET),
-    ] {
-        let p = prefix_of(v);
-        for i in 0..p {
-            bits += f64::from(state_bits(cx.c[base + (off + (i >> shift)) as usize], 1));
-        }
-        if p < c_max {
-            bits += f64::from(state_bits(cx.c[base + (off + (p >> shift)) as usize], 0));
-        }
-        if p > 3 {
-            bits += f64::from((p >> 1) - 1);
-        }
+    for i in 0..p {
+        bits += f64::from(state_bits(cx.c[base + (off + (i >> shift)) as usize], 1));
+    }
+    if p < c_max {
+        bits += f64::from(state_bits(cx.c[base + (off + (p >> shift)) as usize], 0));
+    }
+    if p > 3 {
+        bits += f64::from((p >> 1) - 1);
     }
     bits
 }
@@ -286,9 +280,9 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     // The sub-blocks the rounded levels code, for the significance
     // contexts' neighbour pattern.
     let mut csbf = [0u8; 64];
-    for (k, p) in pos.iter().enumerate().take(last + 1) {
-        if (p.scaled + (step >> 1)) >> qbits > 0 {
-            let (xs, ys) = scan_pos(b.scan_idx, log2_sb, k / 16);
+    for (sb, chunk) in pos[..=last].chunks(16).enumerate() {
+        if chunk.iter().any(|p| (p.scaled + (step >> 1)) >> qbits > 0) {
+            let (xs, ys) = scan_pos(b.scan_idx, log2_sb, sb);
             csbf[ys * sb_w + xs] = 1;
         }
     }
@@ -418,22 +412,39 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
         p.before = run;
         run += p.coded;
     }
+    // The last-position syntax prices x and y apart: a table of each.
+    let mut last_x = [0f64; 32];
+    let mut last_y = [0f64; 32];
+    for v in 0..n as u32 {
+        last_x[v as usize] = last_axis_bits(
+            b.cx,
+            b.c_idx,
+            b.log2,
+            v,
+            LAST_SIGNIFICANT_COEFF_X_PREFIX_OFFSET,
+        );
+        last_y[v as usize] = last_axis_bits(
+            b.cx,
+            b.c_idx,
+            b.log2,
+            v,
+            LAST_SIGNIFICANT_COEFF_Y_PREFIX_OFFSET,
+        );
+    }
     let mut after = 0f64;
     let mut best_last = last;
     let mut best_cost = f64::INFINITY;
     for k in (0..=last).rev() {
         let p = &pos[k];
         if p.level > 0 {
-            let (xc, yc) = (p.idx % n, p.idx / n);
+            let (xc, yc) = (p.idx & (n - 1), p.idx >> b.log2);
             let (lx, ly) = if b.scan_idx == 2 {
                 (yc as u32, xc as u32)
             } else {
                 (xc as u32, yc as u32)
             };
-            let cost = p.before
-                + p.as_last
-                + after
-                + lambda * last_pos_bits(b.cx, b.c_idx, b.log2, lx, ly);
+            let cost =
+                p.before + p.as_last + after + lambda * (last_x[lx as usize] + last_y[ly as usize]);
             if cost < best_cost {
                 best_cost = cost;
                 best_last = k;
@@ -448,8 +459,8 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             nz += 1;
         }
     }
-    if b.sign_hiding && nz > 0 {
-        nz = hide_signs(b, coeffs, levels);
+    if b.sign_hiding && nz > 1 {
+        nz = hide_signs_at(b, coeffs, levels, nz, best_last);
     }
     nz
 }
@@ -502,17 +513,23 @@ pub(crate) fn hide_signs(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u
     if nz < 2 {
         return nz;
     }
-    let log2_sb = b.log2 - 2;
-    let n_sb = 1usize << (2 * log2_sb);
+    let n_sb = 1usize << (2 * (b.log2 - 2));
+    let idx = raster_of(b.scan_idx, b.log2);
+    // The block's last significant position, which no move may empty.
+    let Some(last_k) = (0..n_sb * 16).rev().find(|&k| levels[idx[k] as usize] != 0) else {
+        return 0;
+    };
+    hide_signs_at(b, coeffs, levels, nz, last_k)
+}
+
+/// [`hide_signs`] for levels whose nonzero count `nz` (at least 2) and
+/// last significant scan position `last_k` the caller knows.
+fn hide_signs_at(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], nz: u32, last_k: usize) -> u32 {
     let scale = i64::from(crate::dsp::hevc_enc::quant_scale((b.qp % 6) as usize));
     let qbits = crate::dsp::hevc_enc::qbits(b.qp, b.log2, b.bit_depth);
     let step = 1i64 << qbits;
     let idx = raster_of(b.scan_idx, b.log2);
     let at = |k: usize| idx[k] as usize;
-    // The block's last significant position, which no move may empty.
-    let Some(last_k) = (0..n_sb * 16).rev().find(|&k| levels[at(k)] != 0) else {
-        return 0;
-    };
     let mut nz = nz;
     for sb in 0..=last_k / 16 {
         let base = sb * 16;
