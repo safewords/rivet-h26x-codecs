@@ -3,7 +3,9 @@
 //! What is implemented: the Baseline, Main, High, High 10, High 4:2:2 and
 //! High 4:4:4 (Predictive and Intra, CAVLC 4:4:4 Intra) profiles — frame
 //! pictures, field pictures (PAFF) and MBAFF, 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4
-//! at 8–14 bits, separate colour planes, lossless transform bypass; CAVLC
+//! at 8–14 bits with equal or unequal luma / chroma depths, separate colour
+//! planes, lossless transform bypass; slice data partitioning (partitions
+//! A / B / C, the Extended profile's); CAVLC
 //! and CABAC entropy coding, I/P/B slices, every macroblock and
 //! sub-macroblock type including P_Skip, B_Skip and the spatial and temporal
 //! direct modes, multiple reference frames and fields with reordering,
@@ -15,13 +17,15 @@
 //! gaps, POC types 0/1/2, cropping, and the deblocking filter.
 //!
 //! What is refused with [`Error::Unsupported`](crate::Error::Unsupported)
-//! (a caller with another decoder should hand the stream over): data
-//! partitioning, SP/SI slices outside the Extended profile's shape (CABAC,
-//! 4:2:2 / 4:4:4, more than 8 bits, the 8x8 transform), unequal luma /
-//! chroma bit depths and bit depths above 14.
+//! (a caller with another decoder should hand the stream over): SP/SI
+//! slices outside the Extended profile's shape (CABAC, 4:2:2 / 4:4:4, more
+//! than 8 bits, the 8x8 transform) — combinations no profile allows, since
+//! SP / SI exist in the Extended profile alone (A.2.3) — and bit depths
+//! above 14.
 //!
 //! Module map: `sps` / `pps` / `slice` parse the parameter sets and slice
-//! header; `fmo` maps macroblocks to slice groups; `cavlc` and `cabac_mb`
+//! header (a partitioned slice's B and C partitions are collected by
+//! `decoder` and read by `cavlc`); `fmo` maps macroblocks to slice groups; `cavlc` and `cabac_mb`
 //! parse a macroblock into an `mb::MbLayer`; `recon` turns it into samples
 //! (through `intra`, `inter`, `transform`, and `sp` for SP / SI slices);
 //! `deblock` filters the finished picture; `dpb` owns POC, reference marking,

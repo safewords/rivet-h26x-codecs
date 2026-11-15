@@ -34,8 +34,8 @@ h26x = { package = "rivet-h26x", version = "0.2" }
 
 | | supported | refused with `Error::Unsupported` |
 |---|---|---|
-| **H.264** | Baseline / Main / High / High 10 / High 4:2:2 / High 4:4:4 Predictive / CAVLC 4:4:4 Intra (and the Intra profiles): frames, field pictures (PAFF — field / frame reference lists and marking, field POCs, colocated field / frame mapping) and MBAFF (macroblock-adaptive frame / field: pair-wise neighbour derivation, field-scan and field-context entropy coding, mixed frame / field prediction and direct-mode mapping, mixed-edge deblocking), 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–14-bit, separate colour planes, lossless (transform bypass), CAVLC + CABAC, I/P/B, spatial + temporal direct, explicit + implicit weighting, 8x8 transform, scaling matrices, PCM, MMCO, multi-slice in any order (ASO), slice groups (FMO, all seven map types), SP / SI slices (Extended profile), frame-num gaps, all three POC types, deblocking, VUI reorder hints, the old-x264 4:4:4 CABAC quirk | unequal luma / chroma bit depths, data partitioning, SP / SI outside the Extended profile's shape (CABAC, 4:2:2 / 4:4:4, > 8-bit, 8x8 transform) |
-| **H.265** | Main / Main 10 / Main 12 and the format range extensions — Main 4:2:2 / 4:4:4 (10, 12, 16 Intra), the High Throughput 4:4:4 (16 Intra) and Monochrome profiles (4:0:0 / 4:2:0 / 4:2:2 / 4:4:4, 8–16-bit, unequal luma / chroma depths): CTB 16–64, AMP, transform skip (any size, rotation, single-context), scaling lists, sign hiding, PCM, `cu_transquant_bypass` (lossless), cu_qp_delta, chroma QP offset lists, cross-component prediction, implicit / explicit RDPCM, persistent Rice adaptation, high-precision weighted-prediction offsets, intra smoothing disabling, extended precision processing, CABAC bypass alignment, tiles, WPP (and both together), dependent slice segments, merge / AMVP / TMVP, explicit weighting, deblocking, SAO, long-term references, CRA / BLA / RASL handling, `pic_output_flag`, `no_output_of_prior_pics`, decoded-picture-hash SEI verification (`H26X_VERIFY_HASH=1`) | separate colour planes, SCC, multi-layer |
+| **H.264** | Baseline / Main / Extended / High / High 10 / High 4:2:2 / High 4:4:4 Predictive / CAVLC 4:4:4 Intra (and the Intra profiles): frames, field pictures (PAFF — field / frame reference lists and marking, field POCs, colocated field / frame mapping) and MBAFF (macroblock-adaptive frame / field: pair-wise neighbour derivation, field-scan and field-context entropy coding, mixed frame / field prediction and direct-mode mapping, mixed-edge deblocking), 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–14-bit with equal or unequal luma / chroma depths, separate colour planes, lossless (transform bypass), CAVLC + CABAC, I/P/B, spatial + temporal direct, explicit + implicit weighting, 8x8 transform, scaling matrices, PCM, MMCO, multi-slice in any order (ASO), slice groups (FMO, all seven map types), slice data partitioning (partitions A / B / C, Extended profile), SP / SI slices (Extended profile), frame-num gaps, all three POC types, deblocking, VUI reorder hints, the old-x264 4:4:4 CABAC quirk | SP / SI outside the Extended profile's shape (CABAC, 4:2:2 / 4:4:4, > 8-bit, 8x8 transform) — combinations no profile allows: SP and SI exist only in the Extended profile (A.2.3), whose SPS has no chroma format or depth and whose PPS no CABAC or 8x8 transform, and every other profile allows I, P and B slices only. Bit depths above 14 |
+| **H.265** | Main / Main 10 / Main 12, the format range extensions — Main 4:2:2 / 4:4:4 (10, 12, 16 Intra), the High Throughput 4:4:4 (16 Intra) and Monochrome profiles (4:0:0 / 4:2:0 / 4:2:2 / 4:4:4, 8–16-bit, unequal luma / chroma depths) — and the screen content coding extensions: CTB 16–64, AMP, transform skip (any size, rotation, single-context), scaling lists, sign hiding, PCM, `cu_transquant_bypass` (lossless), cu_qp_delta, chroma QP offset lists, cross-component prediction, implicit / explicit RDPCM, persistent Rice adaptation, high-precision weighted-prediction offsets, intra smoothing disabling, extended precision processing, CABAC bypass alignment, separate colour planes (three monochrome decodes joined into 4:4:4, 8.1.3), **SCC**: palette mode (predictor initialisers, escapes, transpose, WPP predictor sync), intra block copy (the current picture as a reference, predicted from its unfiltered samples), the adaptive colour transform (with its PPS / slice QP offsets), adaptive motion vector resolution (`use_integer_mv_flag`) and intra boundary filtering disabling; tiles, WPP (and both together), dependent slice segments, merge / AMVP / TMVP, explicit weighting, deblocking, SAO, long-term references, CRA / BLA / RASL handling, `pic_output_flag`, `no_output_of_prior_pics`, decoded-picture-hash SEI verification (`H26X_VERIFY_HASH=1`); the **base layer** of MV-HEVC / SHVC streams (every NAL unit with `nuh_layer_id` > 0 discarded, as a single-layer decoder does; a stream whose base layer is external outputs nothing) | Multi-layer output beyond the base layer (enhancement layers and views are discarded, not decoded). SCC combinations no conformance stream exercises: palette mode in 4:0:0 or 4:2:2 (where 8-69 / 8-70 do not say which index-map sample a 4:2:2 chroma sample reads), the current picture as a reference in 4:0:0 / 4:2:2, palette or ACT above 10 bits, at unequal depths or with `cu_transquant_bypass`, the palette predictor across dependent slice segments, weighted prediction / list modification / constrained intra prediction with the current picture as a reference, an SCC extension behind an unparsed multilayer / 3D parameter-set extension |
 
 Both decoders are **bit-exact**. H.264 passes **all 204** JVT conformance
 bitstreams (AVCv1 + FRExt — every profile set, every field-picture and MBAFF
@@ -44,16 +44,32 @@ suite's reconstructed YUV (the JM reference decoder's output where the zip
 ships none), and **all 38** JVT professional-profile bitstreams (High 10 /
 4:2:2 / 4:4:4 Intra, CAVLC 4:4:4 Intra, High 4:4:4 Predictive at up to
 14-bit, thirteen of them coded as separate colour planes), which ship no
-reference output and are checked against the JM reference decoder. Decoding
-is deterministic across thread counts (every suite stream decoded on 1 and
+reference output and are checked against the JM reference decoder. No JVT
+zip carries slice data partitioning or unequal luma / chroma depths, so
+**18 streams generated with the JM reference encoder** cover them (eight
+partitioned — direct modes, weighting, constrained intra, fields, PAFF,
+multiple slices; ten at unequal depths — every chroma format, both entropy
+coders, the 8x8 transform, chroma weighted-prediction offsets, fields),
+each matching the JM reference decoder frame for frame. Decoding is
+deterministic across thread counts (every suite stream decoded on 1 and
 12 threads gives the same bytes). It matches JM on the workspace fixtures too
 (53 x264 / x265 encodes: CAVLC/CABAC, B-pyramids, weighting, 8x8, slices,
 CQM, 10-bit, 4:2:2, 4:0:0, 4:4:4, lossless, interlaced). H.265 passes **147
-of the 147** JCT-VC HEVC_v1 conformance bitstreams and **all 49** RExt
-bitstreams against the suite's own MD5s (HM's output where a zip ships
-none) — among them 16-bit, extended precision, CABAC bypass alignment and
-unequal luma / chroma bit depths — and matches HM on the x265 feature
-fixtures; every HM stream's decoded-picture-hash SEI is checked as well.
+of the 147** JCT-VC HEVC_v1 conformance bitstreams, **all 49** RExt
+bitstreams and **all 15** SCC bitstreams (palette, intra block copy, the
+adaptive colour transform, adaptive MV resolution, intra boundary filter
+disabling; 4:2:0 and 4:4:4, 8 and 10-bit, RGB) against the suite's own
+MD5s (HM's output where a zip ships none) — among them 16-bit, extended
+precision, CABAC bypass alignment and unequal luma / chroma bit depths —
+and decodes the base layer of **all 9** MV-HEVC and **all 70** SHVC
+conformance bitstreams to the suite's layer-0 MD5 (HM's base-layer output
+where the zip has none). No HEVC profile allows separate colour planes, so
+nothing writes them; **4 generated streams** (three monochrome x265
+encodes spliced into one separate-plane stream, 8 to 12-bit, multiple
+slices, WPP, slices of the planes interleaved) decode to exactly HM's
+decodes of the three monochrome streams. Every HM stream's
+decoded-picture-hash SEI is checked as well, and it matches HM on the x265
+feature fixtures.
 The tools and the reference decoders are described in
 [tools/README.md](tools/README.md); none of it involves FFmpeg. Bit depths above 12, and extended precision at any depth, decode on a
 scalar `i32` pipeline beside the `i16` SIMD one the 8–12-bit streams keep.

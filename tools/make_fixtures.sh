@@ -56,8 +56,11 @@ OUT=${1:-$H26X_WORK}
 TOOLS=$(cd "$(dirname "$0")" && pwd)
 CENSUS=$TOOLS/stream_census.py
 SYNTH=$TOOLS/synth_source.py
-X264=${X264:-x264}
-X265=${X265:-x265}
+# Resolved to paths here: the x264() / x265() helper functions below share
+# the programs' names, so a bare `x264` would call the function, not the
+# encoder (an endless recursion on a machine that does not set X264).
+X264=${X264:-$(command -v x264)}
+X265=${X265:-$(command -v x265)}
 X265_10=${X265_10:-$X265}
 X265_12=${X265_12:-$X265}
 mkdir -p "$OUT" && cd "$OUT" || exit 2
@@ -189,7 +192,7 @@ encode() {
   check_tokens "$name (sei)" "$sei" "${sei_want[@]}"
   check_tokens "$name (census)" "$cen" "pics=$n" "${cen_want[@]}"
   if [ "$errs" = "$before" ]; then
-    printf "%7d bytes  %s\n" "$(stat -c %s "$name")" "$cen"
+    printf "%7d bytes  %s\n" "$(wc -c < "$name" | tr -d ' ')" "$cen"
     echo "$(md5sum < "$name" | cut -c1-32) $name" >> fixtures.md5
     made=$((made + 1))
   fi
