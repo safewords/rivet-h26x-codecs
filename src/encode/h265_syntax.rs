@@ -781,9 +781,19 @@ pub struct Tmvp {
 }
 
 /// Whether this stream's SPS enables temporal motion vector prediction:
-/// the tier asks for it (`h265_tune::Tune::tmvp`).
+/// the tier asks for it (`h265_tune::Tune::tmvp`) and the stream is not
+/// coded to a bitrate. Under one the rate controller's sustained-spend
+/// rows (`tools/verify_encode.sh`, property 4b) went red with it on the
+/// cut clip at 64 and 96 kbit/s with a lookahead (three-GOP windows at
+/// 0.83x and 1.29x of target) while the whole-stream rate stayed within
+/// 0.2%: the controller's per-picture model is tuned to streams without
+/// the temporal candidate, and is left as it was.
 pub fn tmvp_enabled(cfg: &Config) -> bool {
     super::h265_tune::Tune::of(cfg).tmvp
+        && matches!(
+            cfg.rate,
+            super::RateControl::ConstantQp(_) | super::RateControl::Lossless
+        )
 }
 
 /// A slice's `pred_weight_table`, with what the writer needs to spell it
