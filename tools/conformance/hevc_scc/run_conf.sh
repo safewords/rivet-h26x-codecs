@@ -38,6 +38,26 @@ one() {
   # suite's md5 files (bitstream md5s among them are harmless).
   suite_md5s=$(cat $(find "$d" -maxdepth 4 -type f \( -name "*.md5" -o -name "*md5*.txt" \) 2>/dev/null) 2>/dev/null | grep -io '[0-9a-f]\{32\}' | tr 'A-F' 'a-f' | sort -u)
   mine_md5=$(md5sum "$OUT/$name.yuv" | cut -c1-32)
+  # An RGB stream (GBR coded: Y = G, Cb = B, Cr = R) whose suite md5 names
+  # an .rgb file: that file holds each frame's planes as R, G, B (checked
+  # on Slice_ACT_QP_Offsets_A, whose decode HM-SCM writes in the coded
+  # order G, B, R like h26xdec). Compare in that order as well.
+  if grep -qi '\.rgb' $(find "$d" -maxdepth 4 -type f -name "*.md5") 2>/dev/null && [ -s "$OUT/$name.mine" ]; then
+    geo=$(head -1 "$OUT/$name.mine" | cut -d, -f4)
+    rgb_md5=$(python3 -I -c '
+import hashlib, sys
+path, w, h, n = sys.argv[1], *map(int, sys.argv[2:])
+d = open(path, "rb").read()
+f = len(d) // n
+p = f // 3
+out = hashlib.md5()
+for i in range(n):
+    g, b, r = (d[i * f + k * p : i * f + (k + 1) * p] for k in range(3))
+    out.update(r + g + b)
+print(out.hexdigest())
+' "$OUT/$name.yuv" ${geo%x*} ${geo#*x} "$n_mine")
+    echo "$suite_md5s" | grep -q "^$rgb_md5$" && mine_md5=$rgb_md5
+  fi
   if grep -q "unsupported" "$OUT/$name.err"; then
     echo "UNSUPPORTED $name: $(tail -1 $OUT/$name.err)"
   elif [ $status -eq 0 ] && echo "$suite_md5s" | grep -q "^$mine_md5$"; then
