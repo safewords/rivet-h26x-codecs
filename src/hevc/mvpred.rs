@@ -219,6 +219,31 @@ pub fn merge_candidate<S: Sample>(
     pu_in: &PuPos,
     merge_idx: usize,
 ) -> Cand {
+    let list = merge_list(info, cur, refs, pu_in, merge_idx + 1);
+    finalize(list[merge_idx.min(list.len() - 1)], pu_in)
+}
+
+/// Every merge candidate `merge_idx` 0 to 4 can select, from one
+/// derivation of the list: what [`merge_candidate`] returns for each.
+pub fn merge_candidates<S: Sample>(
+    info: &PicInfo,
+    cur: &Frame<S>,
+    refs: &RefCtx<S>,
+    pu_in: &PuPos,
+) -> [Cand; 5] {
+    let list = merge_list(info, cur, refs, pu_in, 5);
+    std::array::from_fn(|i| finalize(list[i.min(list.len() - 1)], pu_in))
+}
+
+/// The merge candidate list, derived until it holds `need` candidates (it
+/// may stop short only when `need` is covered).
+fn merge_list<S: Sample>(
+    info: &PicInfo,
+    cur: &Frame<S>,
+    refs: &RefCtx<S>,
+    pu_in: &PuPos,
+    need: usize,
+) -> Small<Cand, 5> {
     // Parallel merge level: a CU of size 8 shares one candidate list.
     let mut pu = *pu_in;
     if refs.log2_par_mrg_level > 2 && pu.n_cb == 8 {
@@ -310,11 +335,11 @@ pub fn merge_candidate<S: Sample>(
             list.push(c);
         }
     }
-    if list.len() > merge_idx {
+    if list.len() >= need {
         // Only what is needed: the merge index picks an early candidate.
         // (The list must still be complete for later candidates, so only
         // return early when the index is already covered.)
-        return finalize(list[merge_idx], orig);
+        return list;
     }
     // Temporal.
     if refs.tmvp && list.len() < refs.max_merge_cand {
@@ -334,8 +359,8 @@ pub fn merge_candidate<S: Sample>(
             });
         }
     }
-    if list.len() > merge_idx {
-        return finalize(list[merge_idx], orig);
+    if list.len() >= need {
+        return list;
     }
     // Combined bi-predictive (B slices).
     if refs.is_b && list.len() > 1 && list.len() < refs.max_merge_cand {
@@ -391,7 +416,7 @@ pub fn merge_candidate<S: Sample>(
         });
         zero_idx += 1;
     }
-    finalize(list[merge_idx.min(list.len() - 1)], orig)
+    list
 }
 
 /// A fixed-capacity candidate list (no heap allocation per PU).

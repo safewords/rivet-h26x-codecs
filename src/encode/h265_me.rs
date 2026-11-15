@@ -260,7 +260,7 @@ use crate::hevc::ctx::Contexts;
 use crate::hevc::frame::{Frame, MotionInfo, Mv, Plane16, fill_motion};
 use crate::hevc::inter::{McScratch, Weighting, predict_block};
 use crate::hevc::intra::IntraScratch;
-use crate::hevc::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate};
+use crate::hevc::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate, merge_candidates};
 use crate::hevc::pic::{Geometry, PicInfo};
 use crate::hevc::pps::Pps;
 use crate::hevc::residual::{ScalingSource, scale_coefficients};
@@ -1160,9 +1160,7 @@ impl<S: Sample> InterPicture<S> {
         // scales a neighbour's vector by the POC-distance ratio between
         // its reference and this one — so they are derived per
         // reference by calling `amvp` once for each.
-        let merge: Vec<Cand> = (0..MAX_MERGE_CAND)
-            .map(|i| merge_candidate(&self.info, &self.recon, &refs, pu, i))
-            .collect();
+        let merge: [Cand; MAX_MERGE_CAND] = merge_candidates(&self.info, &self.recon, &refs, pu);
         let mvp: Vec<[Mv; 2]> = (0..refs_l0.len())
             .map(|r| {
                 [
@@ -1201,17 +1199,29 @@ impl<S: Sample> InterPicture<S> {
                 per_ref.push((Mv::ZERO, u32::MAX));
                 continue;
             }
-            let mut seeds: Vec<Mv> = vec![Mv::ZERO, mvp[r][0], mvp[r][1]];
-            seeds.extend(
-                merge
-                    .iter()
-                    .filter(|c| c.ref_idx[0] == r as i8)
-                    .map(|c| c.mv[0]),
-            );
-            if let Some(p) = self.parent_seed(pu, 0, r) {
-                seeds.push(p);
+            let mut seeds = [Mv::ZERO; 3 + MAX_MERGE_CAND + 1];
+            let mut ns = 3;
+            (seeds[1], seeds[2]) = (mvp[r][0], mvp[r][1]);
+            for c in merge.iter().filter(|c| c.ref_idx[0] == r as i8) {
+                seeds[ns] = c.mv[0];
+                ns += 1;
             }
-            let full = self.search_full(ctx, &rf.y, x0, y0, wh, src, y_stride, &seeds, lam, mvp[r]);
+            if let Some(p) = self.parent_seed(pu, 0, r) {
+                seeds[ns] = p;
+                ns += 1;
+            }
+            let full = self.search_full(
+                ctx,
+                &rf.y,
+                x0,
+                y0,
+                wh,
+                src,
+                y_stride,
+                &seeds[..ns],
+                lam,
+                mvp[r],
+            );
             let wp = self.wp_for(r)[0];
             let half = self.half_for(rf.poc);
             let found = self.refine_subpel(
@@ -1523,9 +1533,7 @@ impl<S: Sample> InterPicture<S> {
         let wh = (pu.w as usize, pu.h as usize);
         let whole = pu.w == pu.n_cb && pu.h == pu.n_cb;
         let refs = self.ref_ctx_b(ref0.poc, ref1.poc, ref1);
-        let merge: Vec<Cand> = (0..MAX_MERGE_CAND)
-            .map(|i| merge_candidate(&self.info, &self.recon, &refs, pu, i))
-            .collect();
+        let merge: [Cand; MAX_MERGE_CAND] = merge_candidates(&self.info, &self.recon, &refs, pu);
         let mvp: [[Mv; 2]; 2] = [
             [
                 amvp(&self.info, &self.recon, &refs, pu, 0, 0, 0),
@@ -1544,19 +1552,21 @@ impl<S: Sample> InterPicture<S> {
         let mut uni = [(Mv::ZERO, u32::MAX); 2];
         for list in 0..2usize {
             let plane = if list == 0 { &ref0.y } else { &ref1.y };
-            let mut seeds: Vec<Mv> = vec![Mv::ZERO, mvp[list][0], mvp[list][1]];
-            seeds.extend(
-                merge
-                    .iter()
-                    .filter(|c| c.ref_idx[list] == 0)
-                    .map(|c| c.mv[list]),
-            );
+            let mut seeds = [Mv::ZERO; 3 + MAX_MERGE_CAND + 1];
+            let mut ns = 3;
+            (seeds[1], seeds[2]) = (mvp[list][0], mvp[list][1]);
+            for c in merge.iter().filter(|c| c.ref_idx[list] == 0) {
+                seeds[ns] = c.mv[list];
+                ns += 1;
+            }
             // Whole samples are searched on the weighted reference where the
             // list is weighted (`search_b`), the sub-sample rings below on
             // the reference itself under the weighted scoring.
             if let Some(p) = self.parent_seed(pu, list, 0) {
-                seeds.push(p);
+                seeds[ns] = p;
+                ns += 1;
             }
+            let seeds = &seeds[..ns];
             let full = self.search_full(
                 ctx,
                 self.search_b[list].as_ref().unwrap_or(plane),
@@ -1565,7 +1575,7 @@ impl<S: Sample> InterPicture<S> {
                 wh,
                 src,
                 y_stride,
-                &seeds,
+                seeds,
                 lam,
                 mvp[list],
             );
