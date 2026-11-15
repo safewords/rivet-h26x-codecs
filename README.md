@@ -124,7 +124,8 @@ the B pyramid and the lookahead; slow keeps five references):
   coded neighbours' and the lookahead's half-resolution vectors; a hexagon
   (veryfast: small diamond) descent on SAD plus
   lambda times the vector's rate, then half- and quarter-sample refinement
-  on SATD plus rate. P pictures search up to 3 (slow 5) references, and a
+  on SATD plus rate. P pictures search up to 3 (slow 5) references, B pictures nothing
+  references two in list 0 (medium and slow), and a
   P partition below 16x16 picks its own among those whose 16x16 cost came
   within 1.25x (slow 1.5x) of the best (mixed references). A B pair is
   refined jointly — each list's vector a quarter sample around with the
@@ -162,28 +163,64 @@ one loaded Apple M-series machine, summed over the four rate points:
 
 | `--preset` | clip | BD-rate Y | BD-rate avg | time vs x264 |
 |---|---|---:|---:|---:|
-| veryfast | foreman CIF | +3.27 % | +3.06 % | 2.19x |
-| | mobile CIF | -6.82 % | -8.25 % | 2.60x |
-| | akiyo CIF | -6.14 % | -5.84 % | 2.53x |
-| | ducks_take_off 720p | -11.12 % | -13.29 % | 2.44x |
-| | park_joy 720p | -2.58 % | -2.94 % | 2.50x |
-| | **mean** | **-4.68 %** | **-5.45 %** | **2.46x** |
-| medium | foreman CIF | +1.25 % | +1.30 % | 2.01x |
-| | mobile CIF | +3.25 % | +2.69 % | 2.13x |
-| | akiyo CIF | -4.46 % | -4.35 % | 2.02x |
-| | ducks_take_off 720p | -1.18 % | -4.61 % | 2.22x |
-| | park_joy 720p | +2.48 % | +2.58 % | 2.32x |
-| | **mean** | **+0.27 %** | **-0.48 %** | **2.25x** |
-| slow | foreman CIF | +2.87 % | +2.91 % | 1.74x |
-| | mobile CIF | +3.51 % | +2.76 % | 1.40x |
-| | akiyo CIF | -1.92 % | -1.63 % | 1.90x |
-| | ducks_take_off 720p | +1.91 % | -2.59 % | 1.54x |
-| | park_joy 720p | +2.43 % | +2.38 % | 1.53x |
-| | **mean** | **+1.76 %** | **+0.77 %** | **1.54x** |
+| veryfast | foreman CIF | +3.27 % | +3.06 % | 2.55x |
+| | mobile CIF | -6.82 % | -8.25 % | 2.48x |
+| | akiyo CIF | -6.14 % | -5.84 % | 2.50x |
+| | ducks_take_off 720p | -11.12 % | -13.29 % | 2.32x |
+| | park_joy 720p | -2.58 % | -2.94 % | 2.39x |
+| | **mean** | **-4.68 %** | **-5.45 %** | **2.37x** |
+| medium | foreman CIF | +0.65 % | +0.75 % | 1.94x |
+| | mobile CIF | +1.82 % | +1.42 % | 2.12x |
+| | akiyo CIF | -4.39 % | -4.27 % | 2.03x |
+| | ducks_take_off 720p | -1.12 % | -4.56 % | 2.03x |
+| | park_joy 720p | +2.54 % | +2.64 % | 2.13x |
+| | **mean** | **-0.10 %** | **-0.80 %** | **2.07x** |
+| slow | foreman CIF | +2.32 % | +2.40 % | 1.67x |
+| | mobile CIF | +2.06 % | +1.47 % | 1.26x |
+| | akiyo CIF | -1.85 % | -1.56 % | 1.84x |
+| | ducks_take_off 720p | +1.97 % | -2.54 % | 1.31x |
+| | park_joy 720p | +2.51 % | +2.45 % | 1.33x |
+| | **mean** | **+1.40 %** | **+0.44 %** | **1.33x** |
 
-(Third round, 2026-11-15, rivet at --jobs 4 against the cached x264
-times. The second round's tree, 0760d3b, timed in the same session:
--4.56 % / 2.96x, +1.94 % / 2.07x, +1.74 % / 2.01x.)
+(Fourth round, 2026-11-15, rivet at --jobs 4 against the cached x264
+times. The third round's tree, 835d779, timed in the same session:
+-4.68 % / 2.47x, +0.27 % / 2.28x, +1.76 % / 1.50x. Cycles at QP 27 over
+the five clips, `/usr/bin/time -l`: 9.22G / 22.88G / 33.87G before,
+8.88G / 20.71G / 30.53G after — -4 % / -9 % / -10 %.)
+
+What the fourth round did:
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| trellis: the eight reachable path states as vector lanes, each position a fixed gather (byte-identical; 219 -> 126 ns a block on blocks dumped from a park_joy medium encode) | -5 % cycles | -11 % cycles | -11 % cycles |
+| B pictures nothing references: a second list-0 reference | | -0.37 % BD, +3 % cycles | -0.36 % BD, +1 % cycles |
+
+Multiple B references are general in the syntax (the slice header's
+override for both lists, `ref_idx_lX` in both writers for every explicit B
+shape, list construction in the decoder's default order, one loop-filter
+identity per picture since a picture can sit in both lists); the analysis
+searches each list's 16x16 at every active index and binds the
+macroblock's explicit partitions to the cheapest, with 3 bits of bias past
+index 0, while direct predicts at its derived indices. What is configured
+is narrower, because the rest measured worse (medium, BD-rate Y against
+x264): both lists in every B picture +0.86 % (list 1's second entry is
+mostly a picture list 0 already holds); list 0 in every B picture +0.09 %,
++0.02 % with the bias (a reference B picture's further indices cost the
+pictures predicting from it their colocated zero motion); list 0 in
+non-reference B pictures -0.10 % (kept); three references there +0.25 %;
+the bias at 0 / 8 bits +0.09 / +0.03 % (in every B). Veryfast with two:
+-4.97 % for +3 % time, not taken (0.1 % per 1 %).
+
+Tried and dropped in the fourth round: intra candidates in P and B
+pictures quantised plainly, the trellis only on an intra winner, medium
++0.31 % for -4 % cycles; the trellis's sums reassociated so each position
+adds to the path cost once (not byte-identical), -4 % trellis time;
+NEON for the trellis's lane additions and selections (LLVM leaves the
+eight-lane arithmetic scalar either way), no faster than the gathers
+alone. Implicit B weighting still changes nothing as configured: the only
+pairs at unequal distances are the second list-0 reference's.
+
+The third round, for the record:
 
 What the third round did, in instructions retired (`/usr/bin/time -l`,
 deterministic where the loaded machine's seconds are not) summed over
@@ -323,21 +360,26 @@ corpus (BD-rate when x264 drops them): `--trellis 0` +4.6 %, `--ref 1`
 +1.0 %; against slow, `--trellis 1` +2.1 %, `--subme 7` +1.5 %, `--ref 3`
 +0.7 %; `--direct spatial`, `--b-adapt 0`, `--no-chroma-me` nothing.
 Rivet now has the trellis (medium and slow: in every candidate), mixed and
-multiple P references. What it lacks: more than one reference per B list
-(and with it the implicit weighting x264's weightb applies between unequal
-distances), which is most of what is left at medium and slow (~1 %);
-slow's RD refinement of vectors and intra modes (x264's subme 8). The time
-gap after the third round is still implementation efficiency, now spread
-thin: a veryfast park_joy profile is a sixth trellis, a seventh pricing, a
-tenth candidate coding, a twelfth the bitstream writer, a twelfth intra
-analysis, and the rest search, motion compensation and ~8 % copying the
-2 KB decision records between candidates; medium's is a third search
-(two thirds of that sub-sample SATD of partitions), a fifth trellis and a
-sixth pricing. No single piece is more than a few per cent from here: the
-next steps are batching (a macroblock's sixteen transforms and quantisers
-in one kernel, several search candidates per SAD/SATD call), decision
-records referenced rather than copied, and a trellis over all nodes in
-vector lanes.
+multiple P references, and a second list-0 reference in non-reference B
+pictures. x264 uses more B references than that (its log, foreman /
+mobile at medium: list 0 index 1 in 9 / 24 % of B partitions, list 1
+index 1 in 7 / 15 %), but here the extra indices lose where they cost a
+reference B picture's colocated motion or duplicate list 0; per-partition
+reference choice (rivet binds the macroblock to one per list) and the
+implicit weighting between unequal distances are what is left of that.
+Also missing: slow's RD refinement of vectors and intra modes (x264's
+subme 8). The time gap is still implementation efficiency: after the
+fourth round a medium park_joy profile is a quarter trellis (4.2 million
+blocks in 30 pictures, at about 125 ns each — the eight-lane gathers are
+compiled scalar, and the remaining cost is the per-position dependency
+chain and the call count of every coded candidate's 4x4 and chroma
+blocks), a tenth SATD, a twelfth the estimator's residual pricing, and
+about a third search (hexagon, sub-sample SATD of partitions), with
+memmove and memset of the decision records under 5 %. The next steps are
+fewer trellis calls per macroblock (or a cheaper first pass deciding
+which blocks need one), batching (a macroblock's sixteen transforms and
+quantisers in one kernel, several search candidates per SAD/SATD call),
+and decision records referenced rather than copied.
 
 ### H.265 compression against x265
 
