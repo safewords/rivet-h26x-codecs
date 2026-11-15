@@ -122,7 +122,7 @@ the B pyramid and the lookahead; slow keeps five references):
   rounded average — bit-exact with the decoder's kernels at all sixteen
   positions (tested). Candidates are the median, skip and zero vectors, the
   coded neighbours' and the lookahead's half-resolution vectors; a hexagon
-  (veryfast: small diamond; slow: uneven multi-hexagon) descent on SAD plus
+  (veryfast: small diamond) descent on SAD plus
   lambda times the vector's rate, then half- and quarter-sample refinement
   on SATD plus rate. P pictures search up to 3 (slow 5) references, and a
   P partition below 16x16 picks its own among those whose 16x16 cost came
@@ -141,9 +141,12 @@ the B pyramid and the lookahead; slow keeps five references):
   its error is small.
 - **Quantisation**: the chosen macroblock is re-quantised by a trellis over
   each block's level choices, priced from the live contexts
-  (`h264_trellis.rs`). Slow quantises every candidate the comparison codes
-  by the trellis, so its decisions see the levels they will write;
-  veryfast skips the trellis in B pictures nothing references.
+  (`h264_trellis.rs`). Medium and slow quantise every candidate the
+  comparison codes by the trellis, so their decisions see the levels they
+  will write; veryfast skips the trellis in B pictures nothing references.
+  B partitions below 16x16 are searched only when mixing the 16x16
+  candidates per quadrant, unsearched, comes within 1.02x of the best
+  whole-macroblock estimate (`AnalysisCfg::b_part_gate`, medium and slow).
 - **Structure**: a B pyramid (the middle B a reference; a P picture's list 0
   reordered to its anchor), and a lookahead (`h264_lookahead.rs`) that
   propagates half-resolution intra/inter cost estimates back through each
@@ -159,24 +162,82 @@ one loaded Apple M-series machine, summed over the four rate points:
 
 | `--preset` | clip | BD-rate Y | BD-rate avg | time vs x264 |
 |---|---|---:|---:|---:|
-| veryfast | foreman CIF | +3.36 % | +3.10 % | 2.91x |
-| | mobile CIF | -6.68 % | -8.23 % | 3.29x |
-| | akiyo CIF | -6.17 % | -5.89 % | 3.18x |
-| | ducks_take_off 720p | -10.77 % | -13.13 % | 3.22x |
-| | park_joy 720p | -2.53 % | -2.94 % | 3.36x |
-| | **mean** | **-4.56 %** | **-5.42 %** | **3.27x** |
-| medium | foreman CIF | +3.34 % | +3.27 % | 2.07x |
-| | mobile CIF | +3.87 % | +3.06 % | 2.20x |
-| | akiyo CIF | -3.96 % | -3.88 % | 2.25x |
-| | ducks_take_off 720p | +2.54 % | -1.57 % | 2.14x |
-| | park_joy 720p | +3.89 % | +3.80 % | 2.20x |
-| | **mean** | **+1.94 %** | **+0.94 %** | **2.16x** |
-| slow | foreman CIF | +3.05 % | +2.97 % | 2.65x |
-| | mobile CIF | +3.50 % | +2.64 % | 2.46x |
-| | akiyo CIF | -2.08 % | -1.87 % | 3.34x |
-| | ducks_take_off 720p | +3.08 % | -1.81 % | 2.24x |
-| | park_joy 720p | +1.13 % | +1.01 % | 2.17x |
-| | **mean** | **+1.74 %** | **+0.59 %** | **2.24x** |
+| veryfast | foreman CIF | +3.27 % | +3.06 % | 2.19x |
+| | mobile CIF | -6.82 % | -8.25 % | 2.60x |
+| | akiyo CIF | -6.14 % | -5.84 % | 2.53x |
+| | ducks_take_off 720p | -11.12 % | -13.29 % | 2.44x |
+| | park_joy 720p | -2.58 % | -2.94 % | 2.50x |
+| | **mean** | **-4.68 %** | **-5.45 %** | **2.46x** |
+| medium | foreman CIF | +1.25 % | +1.30 % | 2.01x |
+| | mobile CIF | +3.25 % | +2.69 % | 2.13x |
+| | akiyo CIF | -4.46 % | -4.35 % | 2.02x |
+| | ducks_take_off 720p | -1.18 % | -4.61 % | 2.22x |
+| | park_joy 720p | +2.48 % | +2.58 % | 2.32x |
+| | **mean** | **+0.27 %** | **-0.48 %** | **2.25x** |
+| slow | foreman CIF | +2.87 % | +2.91 % | 1.74x |
+| | mobile CIF | +3.51 % | +2.76 % | 1.40x |
+| | akiyo CIF | -1.92 % | -1.63 % | 1.90x |
+| | ducks_take_off 720p | +1.91 % | -2.59 % | 1.54x |
+| | park_joy 720p | +2.43 % | +2.38 % | 1.53x |
+| | **mean** | **+1.76 %** | **+0.77 %** | **1.54x** |
+
+(Third round, 2026-11-15, rivet at --jobs 4 against the cached x264
+times. The second round's tree, 0760d3b, timed in the same session:
+-4.56 % / 2.96x, +1.94 % / 2.07x, +1.74 % / 2.01x.)
+
+What the third round did, in instructions retired (`/usr/bin/time -l`,
+deterministic where the loaded machine's seconds are not) summed over
+the parity runs. Every change below up to the estimator is byte-identical
+on all three presets; together they take 0760d3b's 176.6G / 376.0G /
+874.0G instructions (veryfast / medium / slow) to 154.3G / 338.9G /
+759.8G (-13 % / -10 % / -13 %; cycles at QP 27 -17 % / -14 % / -12 %):
+
+| change | what it bought |
+|---|---|
+| CABAC residual writer: levels and significant positions gathered branch-free | veryfast -5 %, medium -2.5 % cycles |
+| trellis: no 2 KB memset per block; levels scaled in raster order; zero-only positions as one lane expression | slow -4 % |
+| search: no point scored twice (second sub-sample ring, the multi-hexagon's axis points) | medium -3 % instructions |
+| NEON SATD: last butterfly stage folded into the sum (the absolute sum of a sum and a difference is twice the larger magnitude) | -0.7 % instructions |
+| fused average + SATD for quarter-sample candidates (`H264EncDsp::satd_avg`, NEON) | slow -3 %, medium -2 % cycles |
+| CABAC writer and estimator state held in registers through a block (`BinEnc::split`) | veryfast -2 % |
+| CABAC writer: bins without a branch on their value | veryfast -3 % cycles |
+| a reference's half-sample planes built once, not per picture searching it | veryfast -2.4 % instructions |
+| block coders' residual a row at a time; intra modes scored in place | -2 % instructions |
+| early skip: the error first, then quantisation without reconstruction, stopping at the first surviving level | veryfast -5.5 %, medium -3 % instructions |
+| estimator total in fixed point (not byte-identical: near-ties in veryfast, BD-rate unchanged) | veryfast -2.4 %, medium -1.9 % cycles |
+
+Then the decisions, against x264 at the same preset (BD-rate Y):
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| after the speed work above | -4.56 % | +1.94 % | +1.74 % |
+| B coded candidates at 0.85 lambda | -4.68 % | +1.71 % | +1.58 % |
+| medium: intra analysed to 1.5x the best inter estimate (was 1.2x) | | +1.26 % | |
+| medium: the trellis in every coded candidate | | +0.26 % (+23 % instructions) | |
+| B partition gate 1.02 | | +0.27 % (-5 %) | |
+| slow: hexagon instead of multi-hexagon, intra to 2.0x, gate | | | +1.76 % (-21 %) |
+
+Tried and dropped in the third round (medium unless named; instructions
+against the tree they were tried on): sub-partition search skipped below
+an SATD threshold, +0.31 % for -8 %; B partitions off, +1.8 % for -17 %;
+the gate at 1.0, +0.15 % for -9 % (kept at 1.02); one refinement round for
+16x16, +0.24 % for -1.7 %; a quarter-sample diamond for partitions,
++0.57 % for -5 %; a half-sample diamond, +0.23 % for -3.7 %; SAD instead
+of SATD at half samples, +0.1 % for -1.6 %; partitions below 16x16 from
+their candidates without an integer descent, +0.1 % for -2.5 %; lambda
+0.85x / 1.15x in P pictures, the trellis lambda 0.8x / 1.2x in B, no
+better; intra to 2.0x in medium, -0.13 % for +6 %; rd_max 3 in medium,
+-0.17 % for +4 %; slow with the gate at 1.0, +0.25 % for -14 %. Veryfast's
+trades are all near 0.3 % BD-rate per 1 % of time (intra to 0.9x, +0.9 %
+for -3 %; no pair refinement, +1.4 % for -4.5 %; no Intra_4x4, +1.6 % for
+-5 %; no trellis, +5.7 % for -13 %), well off x264's own slope, so none
+was taken. Speed attempts that changed nothing or cost: a branch-free
+estimator significance map; the trellis's last position from an inverse
+scan (more instructions); precomputed per-position level costs in the
+trellis; LTO and one codegen unit (-2 %, and not what a dependent crate
+builds). x264 black-box (medium): `--no-dct-decimate` +0.45 %, `--trellis
+2` -1.6 % for +54 %, `--subme 8` -1.1 % for +14 %, `--me umh` -0.3 % for
++27 %.
 
 The tree before this round (d66a816), timed the same way in the same
 session: 3.92x (veryfast), 2.33x (medium), 1.70x (slow), at -2.44 / +5.37 /
@@ -261,18 +322,22 @@ corpus (BD-rate when x264 drops them): `--trellis 0` +4.6 %, `--ref 1`
 +2.3 %, `--no-weightb` +1.2 %, `--subme 6` +1.2 %, `--no-mixed-refs`
 +1.0 %; against slow, `--trellis 1` +2.1 %, `--subme 7` +1.5 %, `--ref 3`
 +0.7 %; `--direct spatial`, `--b-adapt 0`, `--no-chroma-me` nothing.
-Rivet now has the trellis (slow: in every candidate), mixed and multiple P
-references. What it lacks: more than one reference per B list (and with it
-the implicit weighting x264's weightb applies between unequal distances),
-which is most of the remaining medium gap (~1 %); slow's RD refinement of
-vectors and intra modes (x264's subme 8), tried in its simplest form above
-without return. The time gap is implementation efficiency: a slow
-park_joy profile is a quarter trellis (now in every candidate), a third
-search (SAD, SATD and the quarter-sample averages), a quarter candidate
-residual coding and its pricing; veryfast's is a sixth trellis, a sixth
-pricing, a fifth candidate coding and an eighth the bitstream writer
-itself — scalar control flow around SIMD kernels, where x264 is assembly
-throughout and decides veryfast without coding candidates at all.
+Rivet now has the trellis (medium and slow: in every candidate), mixed and
+multiple P references. What it lacks: more than one reference per B list
+(and with it the implicit weighting x264's weightb applies between unequal
+distances), which is most of what is left at medium and slow (~1 %);
+slow's RD refinement of vectors and intra modes (x264's subme 8). The time
+gap after the third round is still implementation efficiency, now spread
+thin: a veryfast park_joy profile is a sixth trellis, a seventh pricing, a
+tenth candidate coding, a twelfth the bitstream writer, a twelfth intra
+analysis, and the rest search, motion compensation and ~8 % copying the
+2 KB decision records between candidates; medium's is a third search
+(two thirds of that sub-sample SATD of partitions), a fifth trellis and a
+sixth pricing. No single piece is more than a few per cent from here: the
+next steps are batching (a macroblock's sixteen transforms and quantisers
+in one kernel, several search candidates per SAD/SATD call), decision
+records referenced rather than copied, and a trellis over all nodes in
+vector lanes.
 
 ### H.265 compression against x265
 
