@@ -83,19 +83,115 @@ static BIN_COST: LazyLock<Box<[f64]>> = LazyLock::new(|| {
 /// approximate) — so a bin's information content is `-log2` of the
 /// probability its state gives it. Independent of the coder's range, which
 /// is what makes an estimate this cheap: one load, no renormalisation.
-static STATE_COST: LazyLock<[[f32; 2]; 64]> = LazyLock::new(|| {
-    let a = (0.01875f64 / 0.5).powf(1.0 / 63.0);
-    let mut t = [[0f32; 2]; 64];
-    for (s, e) in t.iter_mut().enumerate() {
-        let p = 0.5 * a.powi(s as i32);
-        *e = [(-(1.0 - p).log2()) as f32, (-p.log2()) as f32];
+/// What a bin costs in bits at each probability state, `[MPS, LPS]`:
+/// `-log2` of the state's probability, the states' probabilities being
+/// `0.5 * a^s` with `a = (0.01875 / 0.5)^(1/63)` (9.3.2.2's model). A
+/// literal rather than computed at first use, so a hot loop pricing bins
+/// pays no initialisation check per bin; the test
+/// `state_cost_table_is_the_formula` holds it to the formula bit for bit.
+static STATE_COST: [[f32; 2]; 64] = [
+    [f32::from_bits(0x3f800000), f32::from_bits(0x3f800000)],
+    [f32::from_bits(0x3f6db480), f32::from_bits(0x3f899fd3)],
+    [f32::from_bits(0x3f5d23b2), f32::from_bits(0x3f933fa6)],
+    [f32::from_bits(0x3f4e12f0), f32::from_bits(0x3f9cdf79)],
+    [f32::from_bits(0x3f405214), f32::from_bits(0x3fa67f4b)],
+    [f32::from_bits(0x3f33b91b), f32::from_bits(0x3fb01f1e)],
+    [f32::from_bits(0x3f282670), f32::from_bits(0x3fb9bef1)],
+    [f32::from_bits(0x3f1d7d95), f32::from_bits(0x3fc35ec4)],
+    [f32::from_bits(0x3f13a633), f32::from_bits(0x3fccfe97)],
+    [f32::from_bits(0x3f0a8b4e), f32::from_bits(0x3fd69e6a)],
+    [f32::from_bits(0x3f021ab5), f32::from_bits(0x3fe03e3c)],
+    [f32::from_bits(0x3ef4890c), f32::from_bits(0x3fe9de0f)],
+    [f32::from_bits(0x3ee5f59e), f32::from_bits(0x3ff37de2)],
+    [f32::from_bits(0x3ed86286), f32::from_bits(0x3ffd1db5)],
+    [f32::from_bits(0x3ecbb9f6), f32::from_bits(0x40035ec4)],
+    [f32::from_bits(0x3ebfe880), f32::from_bits(0x40082ead)],
+    [f32::from_bits(0x3eb4dcc8), f32::from_bits(0x400cfe97)],
+    [f32::from_bits(0x3eaa8739), f32::from_bits(0x4011ce80)],
+    [f32::from_bits(0x3ea0d9cd), f32::from_bits(0x40169e6a)],
+    [f32::from_bits(0x3e97c7d7), f32::from_bits(0x401b6e53)],
+    [f32::from_bits(0x3e8f45dc), f32::from_bits(0x40203e3c)],
+    [f32::from_bits(0x3e874971), f32::from_bits(0x40250e26)],
+    [f32::from_bits(0x3e7f9227), f32::from_bits(0x4029de0f)],
+    [f32::from_bits(0x3e717834), f32::from_bits(0x402eadf9)],
+    [f32::from_bits(0x3e64352a), f32::from_bits(0x40337de2)],
+    [f32::from_bits(0x3e57ba7c), f32::from_bits(0x40384dcc)],
+    [f32::from_bits(0x3e4bface), f32::from_bits(0x403d1db5)],
+    [f32::from_bits(0x3e40e9d3), f32::from_bits(0x4041ed9e)],
+    [f32::from_bits(0x3e367c33), f32::from_bits(0x4046bd88)],
+    [f32::from_bits(0x3e2ca777), f32::from_bits(0x404b8d71)],
+    [f32::from_bits(0x3e2361ee), f32::from_bits(0x40505d5b)],
+    [f32::from_bits(0x3e1aa2a0), f32::from_bits(0x40552d44)],
+    [f32::from_bits(0x3e12613d), f32::from_bits(0x4059fd2e)],
+    [f32::from_bits(0x3e0a960a), f32::from_bits(0x405ecd17)],
+    [f32::from_bits(0x3e0339da), f32::from_bits(0x40639d00)],
+    [f32::from_bits(0x3df88bfd), f32::from_bits(0x40686cea)],
+    [f32::from_bits(0x3deb6878), f32::from_bits(0x406d3cd3)],
+    [f32::from_bits(0x3ddefd89), f32::from_bits(0x40720cbd)],
+    [f32::from_bits(0x3dd34059), f32::from_bits(0x4076dca6)],
+    [f32::from_bits(0x3dc826c6), f32::from_bits(0x407bac90)],
+    [f32::from_bits(0x3dbda759), f32::from_bits(0x40803e3c)],
+    [f32::from_bits(0x3db3b932), f32::from_bits(0x4082a631)],
+    [f32::from_bits(0x3daa5406), f32::from_bits(0x40850e26)],
+    [f32::from_bits(0x3da1700b), f32::from_bits(0x4087761b)],
+    [f32::from_bits(0x3d9905f6), f32::from_bits(0x4089de0f)],
+    [f32::from_bits(0x3d910eee), f32::from_bits(0x408c4604)],
+    [f32::from_bits(0x3d898485), f32::from_bits(0x408eadf9)],
+    [f32::from_bits(0x3d8260b0), f32::from_bits(0x409115ed)],
+    [f32::from_bits(0x3d773b81), f32::from_bits(0x40937de2)],
+    [f32::from_bits(0x3d6a6cc1), f32::from_bits(0x4095e5d7)],
+    [f32::from_bits(0x3d5e4b11), f32::from_bits(0x40984dcc)],
+    [f32::from_bits(0x3d52ccfc), f32::from_bits(0x409ab5c0)],
+    [f32::from_bits(0x3d47e997), f32::from_bits(0x409d1db5)],
+    [f32::from_bits(0x3d3d987e), f32::from_bits(0x409f85aa)],
+    [f32::from_bits(0x3d33d1c6), f32::from_bits(0x40a1ed9e)],
+    [f32::from_bits(0x3d2a8dfa), f32::from_bits(0x40a45593)],
+    [f32::from_bits(0x3d21c60f), f32::from_bits(0x40a6bd88)],
+    [f32::from_bits(0x3d197362), f32::from_bits(0x40a9257d)],
+    [f32::from_bits(0x3d118faf), f32::from_bits(0x40ab8d71)],
+    [f32::from_bits(0x3d0a150a), f32::from_bits(0x40adf566)],
+    [f32::from_bits(0x3d02fdde), f32::from_bits(0x40b05d5b)],
+    [f32::from_bits(0x3cf889c5), f32::from_bits(0x40b2c54f)],
+    [f32::from_bits(0x3cebca38), f32::from_bits(0x40b52d44)],
+    [f32::from_bits(0x3cdfb3a8), f32::from_bits(0x40b79539)],
+];
+
+/// A bin's cost and the context's next state, indexed by
+/// `(ctx << 1) | bin` — [`STATE_COST`] and the transition tables fused,
+/// so an estimating encoder prices a bin with two loads.
+static EST_NEXT: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut c = 0;
+    while c < 128 {
+        let p = c >> 1;
+        let mps = (c & 1) as u8;
+        let mut bin = 0;
+        while bin < 2 {
+            t[(c << 1) | bin] = if bin as u8 != mps {
+                let flipped = if p == 0 { mps ^ 1 } else { mps };
+                (NEXT_STATE_LPS[p] << 1) | flipped
+            } else {
+                (NEXT_STATE_MPS[p] << 1) | mps
+            };
+            bin += 1;
+        }
+        c += 1;
     }
     t
-});
+};
 
-/// What coding `bin` in a context in probability state `state` (the
-/// context byte: `state << 1 | mps`) costs, in bits — [`STATE_COST`] for
-/// callers that price bins without running an encoder.
+static EST_COST: [f32; 256] = {
+    let mut t = [0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let c = i >> 1;
+        let bin = (i & 1) as u8;
+        t[i] = STATE_COST[c >> 1][(bin != (c & 1) as u8) as usize];
+        i += 1;
+    }
+    t
+};
+
 #[inline]
 pub(crate) fn state_bits(state: u8, bin: u32) -> f32 {
     STATE_COST[(state >> 1) as usize][(bin != (state & 1) as u32) as usize]
@@ -424,16 +520,9 @@ impl<'a> CabacEncoder<'a> {
         debug_assert!(bin <= 1);
         let state = *ctx;
         if let Out::Estimate = self.w {
-            let p = (state >> 1) as usize;
-            let mps = (state & 1) as u32;
-            if bin != mps {
-                self.frac += STATE_COST[p][1] as f64;
-                let flipped = if p == 0 { mps ^ 1 } else { mps };
-                *ctx = (NEXT_STATE_LPS[p] << 1) | flipped as u8;
-            } else {
-                self.frac += STATE_COST[p][0] as f64;
-                *ctx = (NEXT_STATE_MPS[p] << 1) | mps as u8;
-            }
+            let i = ((state as usize) << 1 | bin as usize) & 255;
+            self.frac += EST_COST[i] as f64;
+            *ctx = EST_NEXT[i];
             return;
         }
         let p = (state >> 1) as usize;
@@ -615,6 +704,28 @@ mod tests {
     /// The table IS the expression: every entry against the inline
     /// computation it replaced, as f64 bits, so the encoder's decisions
     /// cannot have moved by a rounding.
+    /// The literal [`STATE_COST`] is the model's formula, to the bit, and
+    /// the fused estimator tables agree with the coder's own transitions.
+    #[test]
+    fn state_cost_table_is_the_formula() {
+        let a = (0.01875f64 / 0.5).powf(1.0 / 63.0);
+        for (s, e) in STATE_COST.iter().enumerate() {
+            let p = 0.5 * a.powi(s as i32);
+            assert_eq!(e[0].to_bits(), ((-(1.0 - p).log2()) as f32).to_bits(), "state {s}");
+            assert_eq!(e[1].to_bits(), ((-p.log2()) as f32).to_bits(), "state {s}");
+        }
+        for c in 0..128u8 {
+            for bin in 0..2u32 {
+                let mut x = c;
+                let mut e = CabacEncoder::counting();
+                e.encode_decision(&mut x, bin);
+                let i = ((c as usize) << 1) | bin as usize;
+                assert_eq!(EST_NEXT[i], x, "ctx {c} bin {bin}");
+                assert_eq!(EST_COST[i].to_bits(), state_bits(c, bin).to_bits());
+            }
+        }
+    }
+
     #[test]
     fn bin_cost_table_is_the_inline_expression() {
         for range in 256u32..=510 {
