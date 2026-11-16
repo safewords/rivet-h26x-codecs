@@ -279,6 +279,11 @@ struct Core<S: Sample> {
     /// as it arrives — and behind it by up to `cfg.lookahead` with one,
     /// which is what holds pictures back for the rate controller to see.
     offered: u64,
+    /// The display indices forced IDRs were asked for ([`H265Encoder::force_idr`]):
+    /// the next picture pushed at each call, ascending. Each is handed to
+    /// the scheduler when its picture is offered, which under a lookahead
+    /// is pictures later than it was pushed — so more than one can wait.
+    forced_idr: std::collections::VecDeque<u64>,
     /// Each held picture's lookahead cost by display index, measured once
     /// when it was pushed and dropped when it is coded. Empty without a
     /// lookahead.
@@ -509,8 +514,17 @@ impl H265Encoder {
     /// Make the next picture pushed an IDR, restarting the GOP there. See
     /// [`Scheduler::force_idr`] for who needs this and what it does to any
     /// B pictures held back at the time.
+    ///
+    /// The next picture *pushed*, under a lookahead too: the encoder holds
+    /// the request until that picture reaches the scheduler, so a caller
+    /// never has to know how far behind the scheduler runs. A request with
+    /// no picture pushed after it does nothing.
     pub fn force_idr(&mut self) {
-        with_core!(&mut self.inner, e => e.sched.force_idr())
+        with_core!(&mut self.inner, e => {
+            if e.forced_idr.back() != Some(&e.next_display) {
+                e.forced_idr.push_back(e.next_display);
+            }
+        })
     }
 }
 
@@ -686,6 +700,7 @@ impl<S: Sample> Core<S> {
             frame_bytes: (luma + chroma) * S::BYTES,
             next_display: 0,
             offered: 0,
+            forced_idr: std::collections::VecDeque::new(),
             costs: std::collections::BTreeMap::new(),
             last_luma: None,
             cuts: std::collections::BTreeSet::new(),
@@ -770,11 +785,21 @@ impl<S: Sample> Core<S> {
             0
         });
         while self.next_display - self.offered > hold {
+            self.offer_forced_idr(self.offered);
             self.offered += 1;
             let ready = self.sched.push();
             out.extend(self.code(ready)?);
         }
         Ok(out)
+    }
+
+    /// Pass a forced IDR ([`H265Encoder::force_idr`]) to the scheduler when the
+    /// picture it was asked for is the one about to be offered.
+    fn offer_forced_idr(&mut self, display: u64) {
+        if self.forced_idr.front() == Some(&display) {
+            self.sched.force_idr();
+            self.forced_idr.pop_front();
+        }
     }
 
     /// See [`H265Encoder::flush`].
@@ -783,6 +808,7 @@ impl<S: Sample> Core<S> {
         // Whatever the lookahead was still holding back goes to the
         // scheduler first, in order, so it types them as it would have.
         while self.offered < self.next_display {
+            self.offer_forced_idr(self.offered);
             self.offered += 1;
             let ready = self.sched.push();
             out.extend(self.code(ready)?);

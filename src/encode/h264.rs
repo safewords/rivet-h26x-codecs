@@ -174,6 +174,11 @@ struct Core<S: Sample> {
     /// Pictures taken but not yet offered to the scheduler — the
     /// lookahead's window.
     la_queued: usize,
+    /// The display indices forced IDRs were asked for ([`H264Encoder::force_idr`]):
+    /// the next picture pushed at each call, ascending. Each is handed to
+    /// the scheduler when its picture is offered, which under a lookahead
+    /// is pictures later than it was pushed — so more than one can wait.
+    forced_idr: std::collections::VecDeque<u64>,
     /// Display indices of the reference pictures coded, newest last (a
     /// few), for the lookahead's reference structure.
     la_refs: Vec<u64>,
@@ -727,8 +732,17 @@ impl H264Encoder {
     /// Make the next picture pushed an IDR, restarting the GOP there. See
     /// [`Scheduler::force_idr`] for who needs this and what it does to any
     /// B pictures held back at the time.
+    ///
+    /// The next picture *pushed*, under a lookahead too: the encoder holds
+    /// the request until that picture reaches the scheduler, so a caller
+    /// never has to know how far behind the scheduler runs. A request with
+    /// no picture pushed after it does nothing.
     pub fn force_idr(&mut self) {
-        with_core!(&mut self.inner, e => e.sched.force_idr())
+        with_core!(&mut self.inner, e => {
+            if e.forced_idr.back() != Some(&e.next_display) {
+                e.forced_idr.push_back(e.next_display);
+            }
+        })
     }
 
     /// What the rate controller achieved against what it was asked for,
@@ -1038,6 +1052,7 @@ impl<S: Sample> Core<S> {
         Ok(Self {
             la,
             la_queued: 0,
+            forced_idr: std::collections::VecDeque::new(),
             la_refs: Vec::new(),
             fields,
             rc,
@@ -1091,6 +1106,7 @@ impl<S: Sample> Core<S> {
         self.la_queued += 1;
         let mut out = Vec::new();
         while self.la_queued > depth {
+            self.offer_forced_idr(self.next_display - self.la_queued as u64);
             self.la_queued -= 1;
             let ready = self.sched.push();
             out.extend(self.code(ready)?);
@@ -1098,10 +1114,20 @@ impl<S: Sample> Core<S> {
         Ok(out)
     }
 
+    /// Pass a forced IDR ([`H264Encoder::force_idr`]) to the scheduler when the
+    /// picture it was asked for is the one about to be offered.
+    fn offer_forced_idr(&mut self, display: u64) {
+        if self.forced_idr.front() == Some(&display) {
+            self.sched.force_idr();
+            self.forced_idr.pop_front();
+        }
+    }
+
     /// See [`H264Encoder::flush`].
     fn flush(&mut self) -> Result<Vec<Access>> {
         let mut out = Vec::new();
         while self.la_queued > 0 {
+            self.offer_forced_idr(self.next_display - self.la_queued as u64);
             self.la_queued -= 1;
             let ready = self.sched.push();
             out.extend(self.code(ready)?);
