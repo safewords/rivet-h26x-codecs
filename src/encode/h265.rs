@@ -327,6 +327,11 @@ struct Core<S: Sample> {
     /// it is retained ([`super::h265_search::HalfPlanes`]); pruned with
     /// `refs`.
     half: Vec<(i32, std::sync::Arc<super::h265_search::HalfPlanes<S>>)>,
+    /// The inter decisions of the last inter picture coded, handed to the
+    /// next one's quadtree walk to decide into rather than allocated and
+    /// zeroed again (each is several kilobytes, and a picture holds one
+    /// per coding unit).
+    inter_pool: Vec<Box<InterCuDecision>>,
     /// The rate controller, when the configuration asked for a bitrate.
     /// `None` at a constant quantiser, which is the mode every other one
     /// is measured against.
@@ -708,6 +713,7 @@ impl<S: Sample> Core<S> {
             last_qp: None,
             refs: Vec::new(),
             half: Vec::new(),
+            inter_pool: Vec::new(),
             last_anchor_qp: None,
             tree: tree_on.then(TreeState::default),
             tree_offsets: None,
@@ -1778,6 +1784,7 @@ impl<S: Sample> Core<S> {
         // The reconstruction takes its sample depth from the parsed SPS —
         // the same field a decoder of this stream sizes its frames by.
         let mut pic = InterPicture::<S>::new(&sps, &pps, c.poc);
+        pic.pool = std::mem::take(&mut self.inter_pool);
         pic.parts = self.cfg.inter_parts;
         pic.half = self.half.clone();
         pic.search_rings = tune.search_rings;
@@ -2244,6 +2251,14 @@ impl<S: Sample> Core<S> {
             crop(&pic.recon.cb, cdw, cdh, &mut rec);
             crop(&pic.recon.cr, cdw, cdh, &mut rec);
         }
+        // The picture's decisions, written and filtered, to the next
+        // picture's walk.
+        let mut pool = std::mem::take(&mut pic.pool);
+        pool.extend(cus.into_iter().filter_map(|cu| match cu.d {
+            PCuDecision::Inter(d) => Some(d),
+            PCuDecision::Intra(_) => None,
+        }));
+        self.inter_pool = pool;
         // Handed back rather than kept — see the intra path.
         Ok(Attempt {
             access: Access {

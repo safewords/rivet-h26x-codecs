@@ -2153,17 +2153,34 @@ fn search_luma_mode<S: Sample>(
     // then at one — 9 + 2 + 2 angles with planar, DC and the three most
     // probable modes, about half the predictions of the full search.
     let mut tried = [false; 35];
-    let mut order: Vec<u8> = if ctx.fast_intra {
-        let mut v: Vec<u8> = vec![0, 1];
-        v.extend((2..35u8).step_by(4));
-        v.extend(cands.iter().map(|&c| c as u8));
-        v
+    // The modes to try next, in order, on the stack: at most all 35 (the
+    // full search), else planar, DC, nine angles and three candidates, then
+    // two at a time. (A heap list here was a measurable share of an encode
+    // in its allocations.)
+    let mut order = [0u8; 35];
+    let mut len = if ctx.fast_intra {
+        order[0] = 0;
+        order[1] = 1;
+        let mut k = 2;
+        for m in (2..35u8).step_by(4) {
+            order[k] = m;
+            k += 1;
+        }
+        for &c in &cands {
+            order[k] = c as u8;
+            k += 1;
+        }
+        k
     } else {
-        (0..35u8).collect()
+        for (k, o) in order.iter_mut().enumerate() {
+            *o = k as u8;
+        }
+        35
     };
     let mut stage = 0;
     loop {
-        for mode in order.drain(..) {
+        let batch = order;
+        for &mode in &batch[..len] {
             if tried[mode as usize] {
                 continue;
             }
@@ -2201,12 +2218,13 @@ fn search_luma_mode<S: Sample>(
         let d = if stage == 0 { 2 } else { 1 };
         stage += 1;
         let b = i32::from(best.1);
-        order.extend(
-            [b - d, b + d]
-                .into_iter()
-                .filter(|m| (2..35).contains(m))
-                .map(|m| m as u8),
-        );
+        len = 0;
+        for m in [b - d, b + d] {
+            if (2..35).contains(&m) {
+                order[len] = m as u8;
+                len += 1;
+            }
+        }
     }
     sc_cost_set(best.0);
     best.1

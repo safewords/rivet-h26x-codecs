@@ -690,8 +690,9 @@ pub struct InterPicture<S: Sample> {
     tu_keep: Vec<S>,
     tu_alt: Box<InterCuDecision>,
     /// Inter decisions the quadtree walk discarded, kept for the next
-    /// unit rather than allocated, zeroed and copied each time.
-    pool: Vec<Box<InterCuDecision>>,
+    /// unit rather than allocated, zeroed and copied each time; the
+    /// encoder hands in the last picture's and takes this one's back.
+    pub(crate) pool: Vec<Box<InterCuDecision>>,
     /// Trial saves finished with, for [`Self::take_save`].
     saves: Vec<TrialSave<S>>,
     /// The transform tree's price, as the last [`Self::code_residual_cu`]
