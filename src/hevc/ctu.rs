@@ -4,6 +4,7 @@
 //! and the per-CU bookkeeping the loop filters and later CUs read.
 
 use crate::cabac::Cabac;
+#[cfg(test)]
 use crate::cabac_enc::CabacEncoder;
 use crate::picture::ChromaFormat;
 use crate::{Error, Result};
@@ -2268,7 +2269,7 @@ pub(crate) struct SplitCuNb {
 /// neighbour depths are compared against.
 #[allow(dead_code)]
 pub(crate) fn write_split_cu_flag(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     nb: &SplitCuNb,
     depth: u32,
@@ -2293,7 +2294,7 @@ pub(crate) fn write_split_cu_flag(
 /// that does and does not change in the spelling.
 #[allow(dead_code)]
 pub(crate) fn write_cu_transquant_bypass_flag(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     bypass: bool,
 ) {
@@ -2308,7 +2309,11 @@ pub(crate) fn write_cu_transquant_bypass_flag(
 /// There is no `pred_mode_flag` writer: in an I slice the reader never
 /// reads one — intra is inferred — and inter slices are future work.
 #[allow(dead_code)]
-pub(crate) fn write_part_mode_intra(e: &mut CabacEncoder, cx: &mut Contexts, nxn: bool) {
+pub(crate) fn write_part_mode_intra(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    nxn: bool,
+) {
     e.encode_decision(&mut cx.c[PART_MODE_OFFSET], !nxn as u32);
 }
 
@@ -2323,7 +2328,11 @@ pub(crate) fn write_part_mode_intra(e: &mut CabacEncoder, cx: &mut Contexts, nxn
 /// the encoder's mode decision, which mirrors `mpm_candidates` over its own
 /// reconstruction state. The writers take the already-derived values.
 #[allow(dead_code)]
-pub(crate) fn write_prev_intra_luma_pred_flag(e: &mut CabacEncoder, cx: &mut Contexts, prev: bool) {
+pub(crate) fn write_prev_intra_luma_pred_flag(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    prev: bool,
+) {
     e.encode_decision(&mut cx.c[PREV_INTRA_LUMA_PRED_FLAG_OFFSET], prev as u32);
 }
 
@@ -2331,7 +2340,7 @@ pub(crate) fn write_prev_intra_luma_pred_flag(e: &mut CabacEncoder, cx: &mut Con
 /// of the reader's `while idx < 2 && bypass() != 0` — `idx` ones, then a
 /// terminating zero unless the cap was reached.
 #[allow(dead_code)]
-pub(crate) fn write_mpm_idx(e: &mut CabacEncoder, idx: u32) {
+pub(crate) fn write_mpm_idx(e: &mut impl crate::cabac_enc::BinEnc, idx: u32) {
     debug_assert!(idx <= 2);
     for _ in 0..idx {
         e.encode_bypass(1);
@@ -2347,7 +2356,7 @@ pub(crate) fn write_mpm_idx(e: &mut CabacEncoder, idx: u32) {
 /// candidate smaller than it — the inverse of the reader's re-insertion
 /// over the sorted candidates.
 #[allow(dead_code)]
-pub(crate) fn write_rem_intra_luma_pred_mode(e: &mut CabacEncoder, rem: u32) {
+pub(crate) fn write_rem_intra_luma_pred_mode(e: &mut impl crate::cabac_enc::BinEnc, rem: u32) {
     debug_assert!(rem < 32);
     e.encode_bypass_bits(5, rem);
 }
@@ -2360,7 +2369,11 @@ pub(crate) fn write_rem_intra_luma_pred_mode(e: &mut CabacEncoder, rem: u32) {
 /// resulting `IntraPredModeC`; an encoder chooses the syntax and derives
 /// the mode through that one copy of the mapping.
 #[allow(dead_code)]
-pub(crate) fn write_intra_chroma_pred_mode(e: &mut CabacEncoder, cx: &mut Contexts, syntax: u32) {
+pub(crate) fn write_intra_chroma_pred_mode(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    syntax: u32,
+) {
     debug_assert!(syntax <= 4);
     if syntax == 4 {
         e.encode_decision(&mut cx.c[INTRA_CHROMA_PRED_MODE_OFFSET], 0);
@@ -2378,7 +2391,7 @@ pub(crate) fn write_intra_chroma_pred_mode(e: &mut CabacEncoder, cx: &mut Contex
 /// The context depends only on the TB size.
 #[allow(dead_code)]
 pub(crate) fn write_split_transform_flag(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     log2: u32,
     split: bool,
@@ -2399,7 +2412,7 @@ pub(crate) fn write_split_transform_flag(
 /// first, mirroring the reader's order (cb both halves, then cr).
 #[allow(dead_code)]
 pub(crate) fn write_cbf_chroma(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     trafo_depth: u32,
     cbf: bool,
@@ -2419,7 +2432,12 @@ pub(crate) fn write_cbf_chroma(
 /// skips, instead). The caller mirrors `transform_tree`'s exact condition:
 /// `cu.intra || depth != 0 || any chroma cbf of this leaf`.
 #[allow(dead_code)]
-pub(crate) fn write_cbf_luma(e: &mut CabacEncoder, cx: &mut Contexts, trafo_depth: u32, cbf: bool) {
+pub(crate) fn write_cbf_luma(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    trafo_depth: u32,
+    cbf: bool,
+) {
     e.encode_decision(
         &mut cx.c[CBF_LUMA_OFFSET + (trafo_depth == 0) as usize],
         cbf as u32,
@@ -2436,7 +2454,7 @@ pub(crate) fn write_cbf_luma(e: &mut CabacEncoder, cx: &mut Contexts, trafo_dept
 /// HEVC's counts *skipped* ones.
 #[allow(dead_code)]
 pub(crate) fn write_cu_skip_flag(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     left_skip: Option<bool>,
     above_skip: Option<bool>,
@@ -2451,7 +2469,11 @@ pub(crate) fn write_cu_skip_flag(
 /// writing one there desyncs the stream, exactly like the split flags the
 /// reader infers.
 #[allow(dead_code)]
-pub(crate) fn write_pred_mode_flag(e: &mut CabacEncoder, cx: &mut Contexts, intra: bool) {
+pub(crate) fn write_pred_mode_flag(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    intra: bool,
+) {
     e.encode_decision(&mut cx.c[PRED_MODE_FLAG_OFFSET], intra as u32);
 }
 
@@ -2462,7 +2484,11 @@ pub(crate) fn write_pred_mode_flag(e: &mut CabacEncoder, cx: &mut Contexts, intr
 /// `amp_enabled_flag`; for 2Nx2N they do not, which is why this spelling
 /// needs neither.
 #[allow(dead_code)]
-pub(crate) fn write_part_mode_inter(e: &mut CabacEncoder, cx: &mut Contexts, mode: PartMode) {
+pub(crate) fn write_part_mode_inter(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    mode: PartMode,
+) {
     debug_assert!(
         mode == PartMode::P2Nx2N,
         "a shape other than PART_2Nx2N needs the CB size: write_part_mode_inter_at"
@@ -2489,7 +2515,7 @@ pub(crate) fn write_part_mode_inter(e: &mut CabacEncoder, cx: &mut Contexts, mod
 /// The AMP shapes above the minimum only; the reader has no spelling for
 /// them at it, and none for inter NxN at 8x8.
 pub(crate) fn write_part_mode_inter_at(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     mode: PartMode,
     log2_cb: u32,
@@ -2547,7 +2573,11 @@ pub(crate) fn write_part_mode_inter_at(
 /// Write `merge_flag` for a non-skipped inter PU (a skipped CU implies
 /// merge and codes no flag).
 #[allow(dead_code)]
-pub(crate) fn write_merge_flag(e: &mut CabacEncoder, cx: &mut Contexts, merge: bool) {
+pub(crate) fn write_merge_flag(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    merge: bool,
+) {
     e.encode_decision(&mut cx.c[MERGE_FLAG_OFFSET], merge as u32);
 }
 
@@ -2560,7 +2590,7 @@ pub(crate) fn write_merge_flag(e: &mut CabacEncoder, cx: &mut Contexts, merge: b
 /// or every bin after the first mismatched index desyncs.
 #[allow(dead_code)]
 pub(crate) fn write_merge_idx(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     max_num_merge_cand: u32,
     idx: u32,
@@ -2609,7 +2639,7 @@ pub(crate) fn write_merge_idx(
 /// whole-CTU CU passes 0 whatever its partitioning.
 #[allow(dead_code)]
 pub(crate) fn write_inter_pred_idc(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     w: i32,
     h: i32,
@@ -2646,7 +2676,12 @@ pub(crate) fn write_inter_pred_idc(
 /// with no terminating zero at the cap. Writes nothing when the list has
 /// a single entry, exactly as the reader then reads nothing.
 #[allow(dead_code)]
-pub(crate) fn write_ref_idx(e: &mut CabacEncoder, cx: &mut Contexts, nref: u32, v: u32) {
+pub(crate) fn write_ref_idx(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    nref: u32,
+    v: u32,
+) {
     debug_assert!(v < nref.max(1), "ref_idx beyond the active list");
     let cmax = nref.saturating_sub(1);
     for k in 0..v {
@@ -2672,7 +2707,7 @@ pub(crate) fn write_ref_idx(e: &mut CabacEncoder, cx: &mut Contexts, nref: u32, 
 /// `abs_mvd_minus2` as EG1 bypass where the magnitude exceeds one, then
 /// the bypass sign. A zero component carries no sign bin.
 #[allow(dead_code)]
-pub(crate) fn write_mvd(e: &mut CabacEncoder, cx: &mut Contexts, mvd: Mv) {
+pub(crate) fn write_mvd(e: &mut impl crate::cabac_enc::BinEnc, cx: &mut Contexts, mvd: Mv) {
     let ax = (mvd.x as i32).unsigned_abs();
     let ay = (mvd.y as i32).unsigned_abs();
     e.encode_decision(&mut cx.c[ABS_MVD_GREATER0_FLAG_OFFSET], (ax > 0) as u32);
@@ -2709,7 +2744,7 @@ pub(crate) fn write_mvd(e: &mut CabacEncoder, cx: &mut Contexts, mvd: Mv) {
 /// Write `mvp_l0_flag` / `mvp_l1_flag` (one shared context): which of the
 /// two AMVP candidates the decoder should add the mvd to.
 #[allow(dead_code)]
-pub(crate) fn write_mvp_flag(e: &mut CabacEncoder, cx: &mut Contexts, flag: bool) {
+pub(crate) fn write_mvp_flag(e: &mut impl crate::cabac_enc::BinEnc, cx: &mut Contexts, flag: bool) {
     e.encode_decision(&mut cx.c[MVP_LX_FLAG_OFFSET], flag as u32);
 }
 
@@ -2721,7 +2756,11 @@ pub(crate) fn write_mvp_flag(e: &mut CabacEncoder, cx: &mut Contexts, flag: bool
 /// merge with an empty tree (the depth-0 leaf would then infer
 /// `cbf_luma` 1 with nothing to code).
 #[allow(dead_code)]
-pub(crate) fn write_rqt_root_cbf(e: &mut CabacEncoder, cx: &mut Contexts, cbf: bool) {
+pub(crate) fn write_rqt_root_cbf(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    cbf: bool,
+) {
     e.encode_decision(&mut cx.c[NO_RESIDUAL_DATA_FLAG_OFFSET], cbf as u32);
 }
 
@@ -2743,7 +2782,11 @@ pub(crate) fn write_rqt_root_cbf(e: &mut CabacEncoder, cx: &mut Contexts, cbf: b
 /// at 5 an Exp-Golomb order-0 suffix of the remainder in bypass; then a
 /// bypass sign for any nonzero value.
 #[allow(dead_code)]
-pub(crate) fn write_cu_qp_delta(e: &mut CabacEncoder, cx: &mut Contexts, val: i32) {
+pub(crate) fn write_cu_qp_delta(
+    e: &mut impl crate::cabac_enc::BinEnc,
+    cx: &mut Contexts,
+    val: i32,
+) {
     let abs = val.unsigned_abs();
     let prefix = abs.min(5);
     for i in 0..prefix {
@@ -2874,7 +2917,7 @@ pub(crate) struct SaoCtx {
 ///   no way to spell it and must not try.
 #[allow(dead_code)]
 pub(crate) fn write_sao(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     sctx: &SaoCtx,
     nb: &SaoMergeNb,
@@ -2993,7 +3036,7 @@ pub(crate) fn write_sao(
 /// `sao_offset_abs`: truncated unary in the bypass engine — `v` ones then
 /// a terminating zero, which is **absent** at `v == cmax`.
 #[allow(dead_code)]
-fn write_sao_offset_abs(e: &mut CabacEncoder, cmax: u32, v: u32) {
+fn write_sao_offset_abs(e: &mut impl crate::cabac_enc::BinEnc, cmax: u32, v: u32) {
     debug_assert!(v <= cmax, "sao_offset_abs {v} above cMax {cmax}");
     for _ in 0..v {
         e.encode_bypass(1);
@@ -3320,7 +3363,12 @@ mod write_round_trip {
             if self.rng.chance(50) { -mag } else { mag }
         }
 
-        fn write_ctu(&mut self, e: &mut CabacEncoder, ctb_addr_rs: usize, wc: usize) {
+        fn write_ctu(
+            &mut self,
+            e: &mut impl crate::cabac_enc::BinEnc,
+            ctb_addr_rs: usize,
+            wc: usize,
+        ) {
             let rx = ctb_addr_rs % wc;
             let ry = ctb_addr_rs / wc;
             let x0 = (rx << self.log2_ctb) as i32;
@@ -3330,7 +3378,14 @@ mod write_round_trip {
 
         /// The writer's `coding_quadtree`: the flag is coded only where the
         /// reader reads one, and inferred by the same conditions elsewhere.
-        fn quadtree(&mut self, e: &mut CabacEncoder, x0: i32, y0: i32, log2_cb: u32, depth: u32) {
+        fn quadtree(
+            &mut self,
+            e: &mut impl crate::cabac_enc::BinEnc,
+            x0: i32,
+            y0: i32,
+            log2_cb: u32,
+            depth: u32,
+        ) {
             let size = 1i32 << log2_cb;
             let split =
                 if x0 + size <= self.pw && y0 + size <= self.ph && log2_cb > self.log2_min_cb {
@@ -3425,7 +3480,14 @@ mod write_round_trip {
             }
         }
 
-        fn cu(&mut self, e: &mut CabacEncoder, x0: i32, y0: i32, log2_cb: u32, depth: u32) {
+        fn cu(
+            &mut self,
+            e: &mut impl crate::cabac_enc::BinEnc,
+            x0: i32,
+            y0: i32,
+            log2_cb: u32,
+            depth: u32,
+        ) {
             let n = 1i32 << log2_cb;
             debug_assert!(
                 x0 + n <= self.pw && y0 + n <= self.ph,
@@ -3488,7 +3550,14 @@ mod write_round_trip {
         /// merge_idx or ref_idx / mvd / mvp_l0_flag — then rqt_root_cbf
         /// where the reader reads it (never for a merged 2Nx2N, whose tree
         /// is inferred present) and the transform tree.
-        fn p_cu(&mut self, e: &mut CabacEncoder, x0: i32, y0: i32, log2_cb: u32, by: bool) {
+        fn p_cu(
+            &mut self,
+            e: &mut impl crate::cabac_enc::BinEnc,
+            x0: i32,
+            y0: i32,
+            log2_cb: u32,
+            by: bool,
+        ) {
             let n = 1i32 << log2_cb;
             let skip = self.rng.chance(30);
             let ls = self.neighbour_skip(x0 - 1, y0);
@@ -3613,7 +3682,7 @@ mod write_round_trip {
         /// serves both slice types.
         fn intra_cu_body(
             &mut self,
-            e: &mut CabacEncoder,
+            e: &mut impl crate::cabac_enc::BinEnc,
             x0: i32,
             y0: i32,
             log2_cb: u32,
@@ -3709,7 +3778,7 @@ mod write_round_trip {
         #[allow(clippy::too_many_arguments)]
         fn tt(
             &mut self,
-            e: &mut CabacEncoder,
+            e: &mut impl crate::cabac_enc::BinEnc,
             x0: i32,
             y0: i32,
             log2: u32,

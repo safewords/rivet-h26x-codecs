@@ -2364,7 +2364,6 @@ fn rdoq_trim<S: Sample>(
     mode: u8,
     nz: u32,
 ) -> u32 {
-    use crate::cabac_enc::CabacEncoder;
     use crate::hevc::residual::{ResidualParams, residual_scan_idx, scan_pos, write_residual};
 
     /// How many trailing significant coefficients the search will consider
@@ -2433,7 +2432,7 @@ fn rdoq_trim<S: Sample>(
     // decoder's own reconstruction of it.
     let cost_of = |cand: &[i16], scratch: &mut [i16]| -> f32 {
         let mut cx = crate::encode::h265::initial_contexts(0, qp);
-        let mut e = CabacEncoder::estimating();
+        let mut e = crate::cabac_enc::CabacEstimator::new();
         let all_zero = cand[..n * n].iter().all(|&v| v == 0);
         let bits = if all_zero {
             // A cbf of 0 codes no residual block at all; the saving is the
@@ -3125,9 +3124,8 @@ fn code_cu_2nx2n<S: Sample>(
 /// a real RD pass would want to revisit along with everything else in
 /// this function.
 fn cu_bits(d: &CuDecision, cat: u32, qp: i32, bypass: bool) -> f32 {
-    use crate::cabac_enc::CabacEncoder;
     let mut cx = crate::encode::h265::initial_contexts(0, qp);
-    let mut e = CabacEncoder::estimating();
+    let mut e = crate::cabac_enc::CabacEstimator::new();
     // The production serialiser, over the decision as coded: every
     // signalling bin AND every residual block, at their real widths.
     //

@@ -241,7 +241,7 @@
 //! files next change hands. `lambda` duplicates the intra module's
 //! Lagrangian constant for the same reason.
 
-use crate::cabac_enc::CabacEncoder;
+use crate::cabac_enc::CabacEstimator;
 use crate::dsp::hevc_enc::{qbits, quant_offset, quant_scale};
 use crate::encode::InterParts;
 use crate::encode::h265_intra::{
@@ -4323,9 +4323,9 @@ impl Rate {
     /// all, so `bits_counted` would price several distinct shapes at zero
     /// and delete the rate term from the comparison. See
     /// `CabacEncoder::fractional_bits`.
-    fn count(&self, f: impl FnOnce(&mut CabacEncoder<'static>, &mut Contexts)) -> f32 {
+    fn count(&self, f: impl FnOnce(&mut CabacEstimator, &mut Contexts)) -> f32 {
         let mut cx = self.cx.clone();
-        let mut e = CabacEncoder::estimating();
+        let mut e = CabacEstimator::new();
         f(&mut e, &mut cx);
         e.fractional_bits() as f32
     }
@@ -4333,7 +4333,7 @@ impl Rate {
     /// The elements every inter CU spells before its shape diverges:
     /// `split_cu_flag` then `cu_skip_flag`. `nb` is the neutral neighbour
     /// context described on [`Rate`].
-    fn prefix(&self, e: &mut CabacEncoder<'static>, cx: &mut Contexts, skip: bool) {
+    fn prefix(&self, e: &mut CabacEstimator, cx: &mut Contexts, skip: bool) {
         // `split_cu_flag` exists only above the 8x8 minimum coding block;
         // at it the reader infers the leaf and takes no bin.
         if self.log2_cu > 3 {
@@ -4474,7 +4474,7 @@ impl Rate {
 /// merge) exist only there.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_prediction_unit(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     pu: &PuPick,
     is_b: bool,

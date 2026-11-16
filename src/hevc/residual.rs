@@ -6,6 +6,7 @@
 //! an inverse pair drifts when its halves are edited apart.
 
 use crate::cabac::Cabac;
+#[cfg(test)]
 use crate::cabac_enc::CabacEncoder;
 use crate::{Error, Result};
 
@@ -746,7 +747,7 @@ pub(crate) fn parse_residual<C: Coeff, const ALIGN: bool>(
 /// being built alongside it; drop the allow when it lands.
 #[allow(dead_code)]
 pub(crate) fn write_residual(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     p: &ResidualParams,
     coeffs: &[i16],
@@ -1069,7 +1070,7 @@ pub(crate) fn write_residual(
 /// lies beyond the four groups.
 #[allow(dead_code)]
 #[inline]
-fn write_abs_level_remaining(e: &mut CabacEncoder, rice: u32, v: u32) {
+fn write_abs_level_remaining(e: &mut impl crate::cabac_enc::BinEnc, rice: u32, v: u32) {
     let prefix = v >> rice;
     if prefix < 4 {
         for _ in 0..prefix {

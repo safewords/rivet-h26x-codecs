@@ -3150,7 +3150,7 @@ fn write_tree<D: CodedUnit>(
 /// encoder is taken in (see `h265_me::Rate`).
 pub(crate) fn split_flag_bits(init_type: usize, qp: i32, split: bool) -> f32 {
     let mut cx = initial_contexts(init_type, qp);
-    let mut e = CabacEncoder::estimating();
+    let mut e = crate::cabac_enc::CabacEstimator::new();
     write_split_cu_flag(
         &mut e,
         &mut cx,
@@ -3169,7 +3169,7 @@ pub(crate) fn split_flag_bits(init_type: usize, qp: i32, split: bool) -> f32 {
 /// quadtree's rate term, residual included.
 pub(crate) fn intra_cu_bits(d: &CuDecision, cat: u32, qp: i32, pps_bypass: bool) -> f32 {
     let mut cx = initial_contexts(0, qp);
-    let mut e = CabacEncoder::estimating();
+    let mut e = crate::cabac_enc::CabacEstimator::new();
     write_cu_intra_i(&mut e, &mut cx, d, pps_bypass, cat, None);
     e.fractional_bits() as f32
 }
@@ -3229,7 +3229,7 @@ pub(crate) fn p_cu_bits(
     depth: u32,
 ) -> f32 {
     let mut cx = initial_contexts(if is_b { 2 } else { 1 }, qp);
-    let mut e = CabacEncoder::estimating();
+    let mut e = crate::cabac_enc::CabacEstimator::new();
     match d {
         PCuDecision::Inter(d) => write_cu_inter(
             &mut e, &mut cx, d, None, None, cat, pps_bypass, None, nref, depth, is_b,
@@ -3506,7 +3506,7 @@ fn parsed_sets(
 /// where `decode_ctu` reads it.
 #[allow(clippy::too_many_arguments)]
 fn write_sao_for(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     plan: Option<&SaoPlan>,
     addr: usize,
@@ -3567,7 +3567,7 @@ fn write_sao_for(
 /// `write_ctu_intra`'s unsplit branch spells.
 #[allow(clippy::too_many_arguments)]
 fn write_cu_inter(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &InterCuDecision,
     left_skip: Option<bool>,
@@ -3589,7 +3589,7 @@ fn write_cu_inter(
 /// [`write_cu_inter`] up to its transform tree: whether one follows.
 #[allow(clippy::too_many_arguments)]
 fn write_cu_inter_head(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &InterCuDecision,
     left_skip: Option<bool>,
@@ -3726,7 +3726,7 @@ fn write_cu_inter_head(
 /// every other rate is.
 pub(crate) fn inter_tree_bits(d: &InterCuDecision, cat: u32, is_b: bool) -> f64 {
     let mut cx = initial_contexts(if is_b { 2 } else { 1 }, d.qp_y);
-    let mut e = CabacEncoder::estimating();
+    let mut e = crate::cabac_enc::CabacEstimator::new();
     write_inter_tree(&mut e, &mut cx, d, cat, None);
     e.fractional_bits()
 }
@@ -3747,7 +3747,7 @@ pub(crate) fn p_cu_bits_with_tree(
     tree: f64,
 ) -> f32 {
     let mut cx = initial_contexts(if is_b { 2 } else { 1 }, qp);
-    let mut e = CabacEncoder::estimating();
+    let mut e = crate::cabac_enc::CabacEstimator::new();
     let has_tree = write_cu_inter_head(
         &mut e, &mut cx, d, None, None, pps_bypass, None, nref, depth, is_b,
     );
@@ -3758,7 +3758,7 @@ pub(crate) fn p_cu_bits_with_tree(
 /// of 1: one CU-sized TU, or one split into four quarters
 /// (`InterCuDecision::split_tu`).
 fn write_inter_tree(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &InterCuDecision,
     cat: u32,
@@ -3869,7 +3869,7 @@ fn write_inter_tree(
 /// first child with its luma cbf or an inherited chroma one, and the
 /// fourth child carries the parent-sized 4x4 chroma blocks (`blkIdx` 3).
 fn write_inter_tree_split8(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &InterCuDecision,
     cat: u32,
@@ -3926,7 +3926,7 @@ fn write_inter_tree_split8(
 /// its always-coded `cbf_luma`, the quantiser delta at the first quadrant
 /// with a cbf, and its residuals, every block scanned diagonally.
 fn write_inter_tree_split(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &InterCuDecision,
     cat: u32,
@@ -4027,7 +4027,7 @@ fn write_inter_tree_split(
 /// quantiser chain decides both; see [`write_cu_intra_body`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_ctu_intra(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &CuDecision,
     ctu_x: usize,
@@ -4055,7 +4055,7 @@ pub(crate) fn write_ctu_intra(
 /// it: what [`write_ctu_intra`] spells after its `split_cu_flag`, and what
 /// the quadtree walk spells for every unit of an I picture.
 pub(crate) fn write_cu_intra_i(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &CuDecision,
     pps_bypass: bool,
@@ -4104,7 +4104,7 @@ pub(crate) fn write_cu_intra_i(
 /// name upstream), so the reader takes no such bin.
 #[allow(clippy::too_many_arguments)]
 fn write_cu_intra_in_p(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &CuDecision,
     left_skip: Option<bool>,
@@ -4156,7 +4156,7 @@ fn write_cu_intra_in_p(
 /// unit exists (`CuDecision::any_cbf`); a delta left unspelled at the
 /// end is a caller bug and is asserted.
 fn write_cu_intra_body(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &CuDecision,
     cat: u32,
@@ -4384,7 +4384,7 @@ fn write_cu_intra_body(
 ///   4:2:0 and 4:2:2 the CU's chroma once, after the fourth child
 ///   (`blk_idx == 3`).
 fn write_cu_intra_nxn_body(
-    e: &mut CabacEncoder,
+    e: &mut impl crate::cabac_enc::BinEnc,
     cx: &mut Contexts,
     d: &CuDecision,
     cat: u32,
