@@ -439,6 +439,96 @@ Where the time goes now (park_joy, sampled): at veryfast the trellis
 13 % and the final writer 12 %; at medium the trellis 17 % (every coded
 candidate's blocks) and the final writer 6 %.
 
+#### Round 10B: the motion search and its kernels
+
+(2026-11-16. The other half of the tenth round: the motion search, the
+SAD / SATD kernels around it and the candidate pricing. One change moves
+medium's decisions; everything else is byte-identical, and veryfast and
+slow keep the ninth round's BD-rates to the digit.)
+
+Cycles and instructions at QP 27 over the five clips, minimum of three
+interleaved runs, `/usr/bin/time -l`, each change against the tree
+before it (measured before round 10A was merged; the total is against
+round 10A's tree):
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| the three half-sample planes of a reference in one allocation, each a quarter, a half and three quarters of a 16 KiB span past the integer plane — allocated apart, all four planes of every reference were page-aligned, so one sample of each fell in the same L1D set (park_joy medium: L1D load misses 166M to 90M) | -1.3 % cycles (-0.0 % ins) | -1.4 % (-0.0 %) | -2.3 % (-0.1 %) |
+| medium: a 16x16 search at a further reference (P past the first, each B list past its first) whose whole-sample cost, SAD plus rate with its index's bits, is 1.5x the best an earlier one reached is not refined to sub-samples (`refine_ratio`; `Search::run` split into `int_search` and `refine`) | | +0.33 → +0.36 %, -2.4 % (-2.4 %) | |
+| the planes, the block's offset and the rate table read out of the search once rather than reloaded through two or three dependent loads after every kernel call; the rate table a fixed array, its index clamped to it | +0.2 % (-0.4 %) | -0.1 % (-1.2 %) | -0.7 % (-1.6 %) |
+| half-sample rings scored by a four-way SATD with no average (`H264EncDsp::satd_x4`, NEON): every half-sample point is a plane sample, which the average-SATD loaded twice and averaged with itself | -0.8 % (-1.0 %) | -1.0 % (-1.4 %) | -1.5 % (-2.0 %) |
+| **all four, on round 10A's tree** (4.87G / 11.31G / 18.03G before) | **-1.6 %** (-1.4 %) | **-5.3 %** (-5.1 %) | **-4.3 %** (-4.0 %) |
+
+The gate's measurement (park_joy, medium, QP 27, before it): of P
+searches at a further reference 1.5x or more behind at whole samples,
+4 of 17,500 would have won the 16x16 after refinement; of B ones, 25 of
+18,300. Mobile is the clip it costs (+0.24 %; the others moved within
+the corpus's noise). Branch mispredictions (park_joy, PMI-sampled
+counts): 70.4M before, 69.9M after at medium, 104.9M / 104.5M at slow —
+this round's changes are not where they are: the trellis has 38 % of
+them, the final writer 18 %, the estimator 15 % and the whole search 7 %
+(before round 10A).
+
+On x264's ladder (`frontier.py`, x264 timed again in the same shuffled
+batch, four at a time, minimum of three runs; BD-rate Y against x264
+medium):
+
+| rivet | BD-rate Y | CPU | x264's CPU at this BD-rate | rivet's time at equal BD-rate |
+|---|---:|---:|---:|---:|
+| veryfast, round 10A (f0ccc51) | +13.09 % | 0.518x | 0.489x | 1.06x |
+| veryfast, now | +13.09 % | 0.510x | 0.489x | **1.04x** |
+| medium, round 10A | +0.33 % | 1.182x | 0.978x | 1.21x |
+| medium, now | +0.36 % | 1.123x | 0.976x | **1.15x** |
+| slow, round 10A | -2.21 % | 1.884x | 1.582x | 1.19x |
+| slow, now | -2.21 % | 1.804x | 1.582x | **1.14x** |
+
+(Round 10A's own run of its tree read 1.05x / 1.20x / 1.19x: the
+measurement repeats to about 0.01.)
+
+What limited the ninth round's `satd_avg_x4`. Not memory: it had half
+of all L1D load misses (81M of 166M, park_joy medium), and halving them
+with the skewed planes left its share of the time where it was (11.9 %).
+Its calls that run (1.13M at 16x16, 0.48M at 16x8 and 8x16, 0.73M at
+8x8) cost, at a hot-cache microbenchmark's rates (75 cycles a 16x16
+candidate, 99 a call at 8x8), about 500M cycles; in the encode it takes
+540M. Out-of-order execution hides the misses. What binds it is SIMD
+issue: a 4x4 tile pair is about 32 vector operations (the differences,
+two butterfly stages, eight `trn`s, the folded last stage, `sadalp`),
+about one per sample, and the four-way kernel's shared source rows saved
+loads and instructions, not vector operations — 89 cycles a 16x16
+candidate alone, 75 four at a time, against a floor near 64. Taking the
+redundant average out of plane-sample candidates (four `urhadd`s and
+four loads a candidate stripe) took it to 68.
+
+Tried and dropped. Kernels (hot microbenchmark, 16x16, cycles a
+candidate): the horizontal transform as `sdot` dot products against
+the Hadamard rows on bias-shifted bytes, the source's transform folded
+into the accumulators, 86 against 75 (sixteen `sdot`s, sixteen
+accumulator copies and eight narrowings a stripe are more instructions
+than the transposes they replace); the four candidates unrolled with
+sixteen-bit accumulators, 84 (LLVM's loop prefetching and register
+pressure); a branch-free refinement (masks for the points a ring
+scores, selects for its winner, a ring that did not move followed by an
+empty one rather than a branch out), identical output, -0.1 % cycles
+for +0.3 % instructions. Decisions (BD-rate Y against x264 at the same
+preset, cycles against the kept tree): `refine_ratio` at 1.3, medium
++0.27 % for -3.0 %; at 2.0, -0.01 % for -1.2 %; slow at 1.5, +0.17 % for
+-2.6 % and at 2.0 +0.07 % for -1.4 % (x264's slope there is 0.04 to
+0.05 % per 1 %); veryfast at 1.3, +0.12 % for -0.5 %; the same gate on a
+P partition's references and a B partition's two lists at 1.5, medium
++0.16 % for -0.8 %, slow +0.34 % for -1.7 %; medium with one
+quarter-sample round, +0.10 % for -1.5 %, or one half-sample round,
++0.15 % for -1.4 %. The estimator was left as it is: its bins are
+already two table loads each from the live state, and its
+mispredictions (the significance and level loops' exits and the test
+for levels above two) are in the residual walk it shares with the final
+writer that round 10A was changing.
+
+Where the time goes now (medium, ducks_take_off and park_joy, sampled,
+before round 10A): the four-way SATD kernels about a ninth, the trellis
+a fifth, the estimator 8 %, the integer search with its SAD kernel 7 %,
+the refinement's own code 4 %.
+
 The eighth round, for the record (its frontier: 1.15x / 1.45x / 1.46x).
 
 What the eighth round did (BD-rate Y against x264 at the same preset,
