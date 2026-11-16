@@ -3156,6 +3156,13 @@ fn write_plane_residual_cabac(
                 inc,
                 enc_cbf_ctx_inc(cur, left, above, rows, cat, bx, by, 0, 0)
             );
+            if cur.nz_plane(p)[raster] == 0 {
+                // An empty block is its coded_block_flag alone: known from
+                // the decision's count, without the block's mask.
+                debug_assert!(buf[start..start + max_coeff].iter().all(|&v| v == 0));
+                e.encode_decision(&mut st.ctx[CBF_CTX_BASE[cat] + inc], 0);
+                continue;
+            }
             let n = write_residual_block_cabac(
                 e,
                 st,
@@ -3272,6 +3279,12 @@ fn write_residual_walk_cabac(
                     inc,
                     enc_cbf_ctx_inc(cur, left, above, rows, CAT_CHROMA_AC, 0, 0, comp, blk)
                 );
+                if cur.nz_chroma[comp][blk] == 0 {
+                    // As the luma blocks': the flag alone.
+                    debug_assert!(buf[1..].iter().all(|&v| v == 0));
+                    e.encode_decision(&mut st.ctx[CBF_CTX_BASE[CAT_CHROMA_AC] + inc], 0);
+                    continue;
+                }
                 let n = write_residual_block_cabac(
                     e,
                     st,
