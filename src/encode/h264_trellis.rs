@@ -260,11 +260,13 @@ impl Trellis {
         let mut x = [0f32; N];
         let mut top = [0u32; N];
         let mut last = usize::MAX;
+        let mut top_max = 0;
         for i in 0..count {
             let v = xr[scan[start + i] as usize & (N - 1)];
             x[i] = v;
             let t = (v + 0.5) as u32;
             top[i] = t;
+            top_max = top_max.max(t);
             last = if t != 0 { i } else { last };
         }
         if last == usize::MAX {
@@ -275,6 +277,9 @@ impl Trellis {
         // own step (chroma's differs from luma's).
         let own = qstep(qp - self.bd_off);
         let lam = self.lambda / (own * own);
+        if top_max == 1 {
+            return self.quant_ones::<N>(kind, coeffs, levels, &x, &top, last, lam);
+        }
 
         // Every bin the block can code, priced once and scaled by lambda:
         // the level bins by context increment, then sig / last per position.
@@ -550,6 +555,136 @@ impl Trellis {
                 nz += 1;
             }
             lane = (e >> 24) as usize;
+        }
+        nz
+    }
+}
+
+impl Trellis {
+    /// [`Trellis::quant_n`] for a block whose rounded levels are all zero
+    /// or one: the choices are then one or zero, so no path ever reaches a
+    /// larger level's nodes (5..=8) and only the four lanes of nodes 0 and
+    /// 2..=4 are live — one vector of four. The arithmetic is the general
+    /// path's on those lanes, operation for operation, and the dead lanes
+    /// there stay infinite and never win, so the levels are the same.
+    #[allow(clippy::too_many_arguments)]
+    fn quant_ones<const N: usize>(
+        &self,
+        kind: Block,
+        coeffs: &[i32],
+        levels: &mut [i16],
+        x: &[f32; N],
+        top: &[u32; N],
+        last: usize,
+        lam: f32,
+    ) -> u32 {
+        type V4 = [f32; 4];
+        #[inline(always)]
+        fn add4(a: V4, b: V4) -> V4 {
+            [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
+        }
+        /// `from` code: the source lane and the level (0 or 1).
+        const fn c4(lane: u8, lv: u8) -> u8 {
+            (lane << 1) | lv
+        }
+        const STAY4: [u8; 4] = [c4(0, 0), c4(1, 0), c4(2, 0), c4(3, 0)];
+        let (scan, start, count): (&[u8], usize, usize) = match kind {
+            Block::Luma8 => (&ZIGZAG8X8[..], 0, 64),
+            Block::Luma4 => (&ZIGZAG4X4[..], 0, 16),
+            _ => (&ZIGZAG4X4[..], 1, 15),
+        };
+        let (sig_base, last_base, abs_base, cbf_base) = kind.bases();
+        // A level of one from each live lane: the first bin's context
+        // increment is 1..=4 there (`FIRST_INC`), plus the sign.
+        let one: V4 = std::array::from_fn(|j| lam * self.bits(abs_base + j + 1, 0) + lam);
+        let max_idx = count - 1;
+        let mut cost: V4 = [INF; 4];
+        cost[0] = (last + 1..count).map(|i| x[i] * x[i]).sum();
+        let mut from = [const { std::mem::MaybeUninit::<[u8; 4]>::uninit() }; N];
+        for i in (0..=last).rev() {
+            let coded_sig = i < max_idx;
+            let xi = x[i];
+            let d0 = xi * xi;
+            // The significance context (only the last position has none).
+            let sc = || {
+                if count == 64 {
+                    sig_base + SIG_COEFF_8X8_CTX[0][i] as usize
+                } else {
+                    sig_base + i
+                }
+            };
+            if top[i] == 0 {
+                let zs0 = if coded_sig {
+                    lam * self.bits(sc(), 0)
+                } else {
+                    0.0
+                };
+                cost = add4(add4(cost, [d0; 4]), [0.0, zs0, zs0, zs0]);
+                from[i].write(STAY4);
+                continue;
+            }
+            let (zs, os, l0, l1) = if coded_sig {
+                let lc = if count == 64 {
+                    last_base + LAST_COEFF_8X8_CTX[i] as usize
+                } else {
+                    last_base + i
+                };
+                let sc = sc();
+                (
+                    lam * self.bits(sc, 0),
+                    lam * self.bits(sc, 1),
+                    lam * self.bits(lc, 0),
+                    lam * self.bits(lc, 1),
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
+            let sig: V4 = [os + l1, os + l0, os + l0, os + l0];
+            let dd = (xi - 1.0) * (xi - 1.0);
+            let l1v = add4(add4(add4(cost, [dd; 4]), sig), one);
+            let z = add4(add4(cost, [d0; 4]), [0.0, zs, zs, zs]);
+            // Lane 0 keeps its zero; a one moves lanes 0..=2 up one; then
+            // lanes 1..=3's zeros, then lane 3's one (it saturates), each
+            // only where strictly cheaper — the general path's order.
+            let mut nc = [z[0], l1v[0], l1v[1], l1v[2]];
+            let mut nf = [c4(0, 0), c4(0, 1), c4(1, 1), c4(2, 1)];
+            for j in 1..4 {
+                if z[j] < nc[j] {
+                    nc[j] = z[j];
+                    nf[j] = c4(j as u8, 0);
+                }
+            }
+            if l1v[3] < nc[3] {
+                nc[3] = l1v[3];
+                nf[3] = c4(3, 1);
+            }
+            cost = nc;
+            from[i].write(nf);
+        }
+        if let Some(cb) = cbf_base {
+            let c = cb + 1;
+            cost[0] += lam * self.bits(c, 0);
+            let one = lam * self.bits(c, 1);
+            for v in cost.iter_mut().skip(1) {
+                *v += one;
+            }
+        }
+        let mut lane = 0;
+        for j in 1..4 {
+            if cost[j] < cost[lane] {
+                lane = j;
+            }
+        }
+        let mut nz = 0;
+        for i in 0..=last {
+            // SAFETY: every position up to `last` was written above.
+            let e = unsafe { from[i].assume_init_ref() }[lane];
+            if e & 1 != 0 {
+                let r = scan[start + i] as usize;
+                levels[r] = if coeffs[r] < 0 { -1 } else { 1 };
+                nz += 1;
+            }
+            lane = (e >> 1) as usize;
         }
         nz
     }
