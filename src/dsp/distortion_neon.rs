@@ -647,11 +647,14 @@ mod tests {
                     (s.ssd)(pa, sa, pb, sb, w, h),
                     "ssd {w}x{h} round {round}"
                 );
-                assert_eq!(
-                    (d.satd)(pa, sa, pb, sb, w, h),
-                    (s.satd)(pa, sa, pb, sb, w, h),
-                    "satd {w}x{h} round {round}"
-                );
+                // SATD is defined over whole 4x4 tiles only.
+                if w.is_multiple_of(4) && h.is_multiple_of(4) {
+                    assert_eq!(
+                        (d.satd)(pa, sa, pb, sb, w, h),
+                        (s.satd)(pa, sa, pb, sb, w, h),
+                        "satd {w}x{h} round {round}"
+                    );
+                }
             }
         }
     }
