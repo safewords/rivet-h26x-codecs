@@ -1141,6 +1141,14 @@ pub(crate) fn p_mb<S: Sample>(
         ..InterDecision::default()
     };
     let sy = &src.y[py * src.ys + px..];
+    // Each reference's half-sample planes, for the predictions.
+    let me_r = |r: i8| -> Option<&MeRef<'_, S>> {
+        if r == 0 {
+            an.me[0].as_ref()
+        } else {
+            an.me_more.get(r as usize - 1)
+        }
+    };
     let predict_r =
         |rec: &mut [Recon<S>], x: usize, y: usize, w: usize, h: usize, mv: Mv, r: i8| {
             let pl = if r == 0 {
@@ -1159,6 +1167,7 @@ pub(crate) fn p_mb<S: Sample>(
                 [true, false],
                 [mv, Mv::ZERO],
                 pref.weighting,
+                [me_r(r), None],
             );
         };
     let predict = |rec: &mut [Recon<S>], x: usize, y: usize, w: usize, h: usize, mv: Mv| {
@@ -1173,6 +1182,7 @@ pub(crate) fn p_mb<S: Sample>(
             [true, false],
             [mv, Mv::ZERO],
             pref.weighting,
+            [me_r(0), None],
         );
     };
 
@@ -1934,6 +1944,10 @@ pub(crate) fn b_mb<S: Sample>(
                 used,
                 mv,
                 refs.weighting_for(used),
+                [
+                    used[0].then(|| me_at(0, rf[0])),
+                    used[1].then(|| me_at(1, rf[1])),
+                ],
             );
         }
     };

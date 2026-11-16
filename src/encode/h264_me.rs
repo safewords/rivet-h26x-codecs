@@ -1137,6 +1137,7 @@ pub(crate) fn predict_inter_rect<S: Sample>(
     used: [bool; 2],
     mv: [Mv; 2],
     weighting: Weighting,
+    me: [Option<&crate::encode::h264_hpel::MeRef<'_, S>>; 2],
 ) {
     debug_assert!(used[0] || used[1]);
     let mut a = [S::default(); 16 * PRED_STRIDE];
@@ -1144,7 +1145,49 @@ pub(crate) fn predict_inter_rect<S: Sample>(
     // Luma.
     let off = rec[0].offset(px as isize, py as isize);
     let stride = rec[0].stride;
-    if used[0] && used[1] {
+    // Under default weighting, from the reference's half-sample planes
+    // where the caller has them for this very plane and the vector's
+    // window lies where they were built (the search's own test): each
+    // quarter-sample position is a plane read or one rounded average,
+    // the decoder's six-tap kernels' values exactly
+    // (`plane_predictions_are_the_decoders`), so the samples are the ones
+    // the interpolation below would make, without the six taps.
+    let plane = |l: usize| -> Option<&crate::encode::h264_hpel::MeRef<'_, S>> {
+        let m = me[l]?;
+        if !matches!(weighting, Weighting::Default) || !std::ptr::eq(m.p[0], &refs[l][0]) {
+            return None;
+        }
+        let (lx, hx, ly, hy) =
+            crate::encode::h264_hpel::search_bounds(m.p[0], px as i32, py as i32, pw, ph, i32::MAX);
+        let (mx, my) = (mv[l].x as i32 >> 2, mv[l].y as i32 >> 2);
+        (mx >= lx && mx < hx && my >= ly && my < hy).then_some(m)
+    };
+    let planes = [
+        used[0].then(|| plane(0)).flatten(),
+        used[1].then(|| plane(1)).flatten(),
+    ];
+    if (planes[0].is_some() || !used[0]) && (planes[1].is_some() || !used[1]) {
+        let (x, y) = (px as i32, py as i32);
+        if let [Some(m0), Some(m1)] = planes {
+            let (p0, s0) = m0.pred(x, y, mv[0], pw, ph, &mut a);
+            let (p1, s1) = m1.pred(x, y, mv[1], pw, ph, &mut b);
+            crate::encode::h264_hpel::avg_into(
+                &mut rec[0].data[off..],
+                stride,
+                p0,
+                s0,
+                p1,
+                s1,
+                pw,
+                ph,
+            );
+        } else {
+            let m = planes[0].or(planes[1]).expect("one list is used");
+            let l = if used[0] { 0 } else { 1 };
+            let (p, ps) = m.pred(x, y, mv[l], pw, ph, &mut a);
+            crate::encode::h264_hpel::copy_rows(&mut rec[0].data[off..], stride, p, ps, pw, ph);
+        }
+    } else if used[0] && used[1] {
         luma_pred_into(
             ctx,
             &refs[0][0],
@@ -2079,6 +2122,7 @@ pub fn code_macroblock_p<S: Sample>(
             [true, false],
             [mv, Mv::ZERO],
             refp.weighting,
+            [None, None],
         );
     }
     // `transform_size_8x8_flag` is not present when any sub-macroblock
@@ -3472,6 +3516,7 @@ pub fn code_macroblock_b<S: Sample>(
             used,
             mv,
             refs.weighting_for(used),
+            [None, None],
         );
     }
     // `transform_size_8x8_flag` is absent when any sub-macroblock

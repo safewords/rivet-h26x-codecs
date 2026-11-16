@@ -202,6 +202,39 @@ fn avg_rows_u8<const W: usize>(
     }
 }
 
+/// A `w` by `h` block copied between two strides: fixed-width rows for
+/// the 8-bit widths a partition has, not a `memmove` per row.
+#[inline]
+pub(crate) fn copy_rows<S: Sample>(
+    out: &mut [S],
+    os: usize,
+    a: &[S],
+    as_: usize,
+    w: usize,
+    h: usize,
+) {
+    #[inline(always)]
+    fn rows<S: Sample, const W: usize>(out: &mut [S], os: usize, a: &[S], as_: usize, h: usize) {
+        for y in 0..h {
+            let r: &[S; W] = a[y * as_..y * as_ + W].try_into().expect("W samples");
+            let o: &mut [S; W] = (&mut out[y * os..y * os + W])
+                .try_into()
+                .expect("W samples");
+            *o = *r;
+        }
+    }
+    match w {
+        16 => rows::<S, 16>(out, os, a, as_, h),
+        8 => rows::<S, 8>(out, os, a, as_, h),
+        4 => rows::<S, 4>(out, os, a, as_, h),
+        _ => {
+            for y in 0..h {
+                out[y * os..y * os + w].copy_from_slice(&a[y * as_..y * as_ + w]);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub(crate) fn avg_into<S: Sample>(
