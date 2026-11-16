@@ -60,11 +60,14 @@ pub(crate) struct AnalysisCfg {
     /// quantiser steps per sample: a prediction that quantises to nothing
     /// can still be one a searched vector beats by far.
     pub(crate) skip_ssd: f32,
-    /// Intra_4x4 is analysed.
+    /// Intra_4x4 is analysed in P and B pictures (I pictures always
+    /// analyse it).
     pub(crate) i4x4: bool,
     /// How far the best intra estimate may trail the best inter one and
     /// still be coded for the rate-distortion comparison.
     pub(crate) intra_ratio: f32,
+    /// The same in B pictures, where intra rarely wins.
+    pub(crate) b_intra_ratio: f32,
     /// Second-best inter shapes within this ratio of the best estimate are
     /// also coded for the comparison.
     pub(crate) rd_ratio: f32,
@@ -81,8 +84,12 @@ pub(crate) struct AnalysisCfg {
     /// Intra_4x4 off in inter pictures +1.6 % for 4 %.)
     pub(crate) trellis_nonref: bool,
     /// Decide by coding candidates and pricing them (`SSD + lambda * R`);
-    /// false decides on the estimates alone and codes only the winner.
+    /// false decides on the estimates alone and codes only the winner
+    /// (I pictures are always decided by pricing).
     pub(crate) rd: bool,
+    /// Without `rd`: a coded winner whose estimate is no better than skip's
+    /// times this is priced against skip (0: never).
+    pub(crate) skip_rd: f32,
     /// Active list-0 references of a P picture, at most.
     pub(crate) refs: usize,
     /// Active list-0 references of a B picture nothing references, at
@@ -94,6 +101,9 @@ pub(crate) struct AnalysisCfg {
     pub(crate) mixed_refs: f32,
     /// Rounds of joint quarter-sample refinement of a B pair.
     pub(crate) bi_refine: u8,
+    /// ... each round each list's four nearest quarter samples rather than
+    /// eight.
+    pub(crate) bi_diamond: bool,
     /// A partition's pair is refined only when it starts within this
     /// factor of the partition's better single list (0: never).
     pub(crate) bi_part_ratio: f32,
@@ -111,6 +121,8 @@ impl AnalysisCfg {
     /// coded only within 1.03x of the best estimate (was 1.1: +0.18 %
     /// BD-rate for 8 % fewer cycles) and B partitions are searched only
     /// within 0.98x (was 1.02: with the shape ratio, +0.41 % for 13 %).
+    /// B pictures analyse intra only within 1.0x (+0.08 % for 2.4 % fewer
+    /// instructions).
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -142,14 +154,23 @@ impl AnalysisCfg {
         b_refs: 2,
         mixed_refs: 1.25,
         bi_refine: 2,
+        b_intra_ratio: 1.0,
+        skip_rd: 0.0,
+        bi_diamond: false,
         bi_part_ratio: 0.0,
         b_part_gate: 0.98,
     };
 
-    /// The fastest tier: a diamond search, one refinement round each, one
-    /// inter shape priced against skip and intra. (Deciding on the
-    /// estimates alone, coding only the winner, measured +35 % BD-rate
-    /// against x264 veryfast; pricing one shape, -1.8 %.)
+    /// The fastest tier: a diamond search, one refinement round each, and
+    /// P and B macroblocks decided on their estimates, only the winner
+    /// coded (by the trellis in reference pictures), its transform size
+    /// from the two Hadamard SATDs; skip is priced against the winner only
+    /// where its estimate is no worse, and Intra_4x4 is left to I pictures,
+    /// which are decided by pricing. Against the tier that priced one
+    /// shape, skip and intra in every macroblock: +1.9 % BD-rate against
+    /// x264 veryfast for 24 % fewer instructions. (The estimate decision
+    /// had measured +35 % when skip competed on its prediction's error,
+    /// which the coded candidates' estimates do not include.)
     pub(crate) const VERYFAST: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -168,19 +189,22 @@ impl AnalysisCfg {
             dia: true,
         },
         early_skip: true,
-        skip_ssd: 0.06,
-        i4x4: true,
+        skip_ssd: 0.1,
+        i4x4: false,
         intra_ratio: 1.0,
         rd_ratio: 1.0,
         rd_max: 1,
         trellis: true,
         trellis_rd: false,
         trellis_nonref: false,
-        rd: true,
+        rd: false,
         refs: 1,
         b_refs: 1,
         mixed_refs: 1.0,
         bi_refine: 1,
+        b_intra_ratio: 1.0,
+        skip_rd: 1.0,
+        bi_diamond: true,
         bi_part_ratio: 0.0,
         b_part_gate: 0.0,
     };
@@ -188,7 +212,8 @@ impl AnalysisCfg {
     /// The most thorough tier: more references, refinement and candidates
     /// priced. (The multi-hexagon search it had bought -0.27 % BD-rate for
     /// 17 % of its instructions; without it, and with intra analysed up to
-    /// 2.0x the best inter estimate, it is +0.05 % for 12 % fewer.)
+    /// 2.0x the best inter estimate, it is +0.05 % for 12 % fewer. B
+    /// pictures analyse intra within 1.25x: -0.02 % for 3.4 % fewer.)
     pub(crate) const SLOW: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 24,
@@ -220,6 +245,9 @@ impl AnalysisCfg {
         b_refs: 2,
         mixed_refs: 1.5,
         bi_refine: 2,
+        b_intra_ratio: 1.25,
+        skip_rd: 0.0,
+        bi_diamond: false,
         bi_part_ratio: 1.2,
         b_part_gate: 1.02,
     };
@@ -497,6 +525,61 @@ fn early_skip_sad(qp: i32) -> u32 {
 fn early_skip_ssd(qp: i32, factor: f32) -> f32 {
     let qstep = 0.625 * (qp as f32 / 6.0).exp2();
     256.0 * qstep * qstep * factor
+}
+
+/// The 8x8-Hadamard SATD of a 16x16 block against its prediction, on
+/// the same scale as the 4x4 one (the four 8x8 transforms' absolute sums
+/// halved twice, as the 4x4 one halves once): which transform size leaves
+/// the residual more compact, for decisions that do not code both.
+fn sa8d_16x16<S: Sample>(a: &[S], sa: usize, b: &[S], sb: usize) -> u32 {
+    type R = [i32; 8];
+    /// The 8-point Hadamard down the columns, each butterfly a whole row
+    /// at once (the lanes are the eight columns, a vector's worth).
+    #[inline(always)]
+    fn cols(d: &mut [R; 8]) {
+        for (step, n) in [(4usize, 1usize), (2, 2), (1, 4)] {
+            for blk in 0..n {
+                let base = blk * step * 2;
+                for i in base..base + step {
+                    let (x, y) = (d[i], d[i + step]);
+                    d[i] = std::array::from_fn(|k| x[k] + y[k]);
+                    d[i + step] = std::array::from_fn(|k| x[k] - y[k]);
+                }
+            }
+        }
+    }
+    let mut total = 0u32;
+    for blk in 0..4 {
+        let (bx, by) = ((blk & 1) * 8, (blk >> 1) * 8);
+        let mut d: [R; 8] = std::array::from_fn(|y| {
+            let ra = &a[(by + y) * sa + bx..][..8];
+            let rb = &b[(by + y) * sb + bx..][..8];
+            std::array::from_fn(|x| ra[x].to_i32() - rb[x].to_i32())
+        });
+        cols(&mut d);
+        // Turned, and down the columns again: the rows' transform.
+        let mut t: [R; 8] = std::array::from_fn(|x| std::array::from_fn(|y| d[y][x]));
+        cols(&mut t);
+        let sum: u32 = t.iter().flatten().map(|v| v.unsigned_abs()).sum();
+        total += (sum + 2) >> 2;
+    }
+    total
+}
+
+/// Whether the 8x8 transform leaves the prediction standing in `rec`
+/// (luma, at `(px, py)`) more compact than the 4x4 one, by their Hadamard
+/// SATDs: the transform size for a decision that codes only one.
+fn sa8d_prefers_8x8<S: Sample>(
+    ctx: &IntraCtx<S>,
+    rec: &[Recon<S>],
+    px: usize,
+    py: usize,
+    src: &[S],
+    ss: usize,
+) -> bool {
+    let o = rec[0].offset(px as isize, py as isize);
+    let s4 = (ctx.dist.satd)(src, ss, &rec[0].data[o..], rec[0].stride, 16, 16);
+    sa8d_16x16(src, ss, &rec[0].data[o..], rec[0].stride) < s4
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +945,11 @@ pub(crate) fn intra_mb<S: Sample>(
     }
     // Chroma first: one mode for every luma candidate.
     let mut chroma = MbDecision::default();
-    if ctx.chroma_h != 0 {
+    if ctx.chroma_h != 0 && !cfg.rd {
+        // Decided on the estimates, the winner coded again below: the
+        // chroma mode is all the candidates need.
+        chroma.chroma_mode = best_chroma_mode(ctx, rec, mb_x, mb_y, src, nb.avail, lam1);
+    } else if ctx.chroma_h != 0 {
         let mode = best_chroma_mode(ctx, rec, mb_x, mb_y, src, nb.avail, lam1);
         let (cx, cy) = (mb_x * 8, mb_y * ctx.chroma_h);
         let co = cy * src.cs + cx;
@@ -885,7 +972,7 @@ pub(crate) fn intra_mb<S: Sample>(
     // error joined) and whose luma error alone already reaches it, or the
     // best one here, cannot win: rate is never negative and wins are
     // strict, so it is not priced.
-    let luma_bound = if bound.is_finite() {
+    let luma_bound = if bound.is_finite() && cfg.rd {
         bound - (ssd_mb(ctx, rec, src, mb_x, mb_y) - ssd_luma(ctx, rec, src, mb_x, mb_y)) as f64
     } else {
         f64::INFINITY
@@ -926,7 +1013,12 @@ pub(crate) fn intra_mb<S: Sample>(
     };
 
     let mut any = false;
-    let budget = e16 * cfg.intra_ratio.max(1.0) * 1.15;
+    let mut budget = e16 * cfg.intra_ratio.max(1.0) * 1.15;
+    if !use_rate {
+        // Decided on the estimates against the caller's: a candidate whose
+        // running estimate passes that bound cannot win.
+        budget = budget.min(bound as f32);
+    }
     let mut floor = e16;
     if ctx.t8x8
         && let Some(mut c) = i8x8(ctx, &mut rec[0], px, py, sy, src.ys, nb, lam1, budget)
@@ -947,7 +1039,12 @@ pub(crate) fn intra_mb<S: Sample>(
     }
     if e16 <= floor * 1.15 || !any {
         let mut d = MbDecision::default();
-        code_i16x16(ctx, &mut rec[0], px, py, sy, src.ys, m16, nb.avail, &mut d);
+        if use_rate {
+            code_i16x16(ctx, &mut rec[0], px, py, sy, src.ys, m16, nb.avail, &mut d);
+        } else {
+            d.kind = MbKind::I16x16;
+            d.intra16_mode = m16;
+        }
         with_chroma(&mut d);
         consider(d, [2u8; 16], e16, rec, rate);
     }
@@ -963,6 +1060,9 @@ pub(crate) fn intra_mb<S: Sample>(
                 ..*ctx
             };
             requant_intra(&tctx, rec, mb_x, mb_y, src, nb, &mut dec, &modes, qp_pred);
+        }
+        None if !use_rate => {
+            requant_intra(ctx, rec, mb_x, mb_y, src, nb, &mut dec, &modes, qp_pred);
         }
         None => best_pix.restore_luma(rec, mb_x, mb_y),
     }
@@ -1407,13 +1507,30 @@ pub(crate) fn p_mb<S: Sample>(
     let i_est = i16.0;
 
     if !cfg.rd {
-        // Decided on the estimates; only the winner is coded.
+        // Decided on the estimates; only the winner is coded, by the
+        // trellis where the picture has one. Skip is not a candidate here:
+        // its estimate is the prediction's error before any residual, which
+        // a coded candidate's is not, so the comparison would hand skip the
+        // macroblocks the residual would have mended. A 16x16 at the skip
+        // vector that codes nothing becomes skip below.
         let best = *shapes
             .iter()
             .flatten()
             .min_by(|a, b| a.est.total_cmp(&b.est))
             .expect("16x16 is always searched");
-        let inter = best.est.min(skip_est);
+        let tr = an.trellis().filter(|_| !ctx.c444);
+        let tctx_store;
+        let fctx: &IntraCtx<S> = match tr {
+            Some(t) => {
+                tctx_store = IntraCtx {
+                    trellis: Some(t),
+                    ..*ctx
+                };
+                &tctx_store
+            }
+            None => ctx,
+        };
+        let inter = best.est;
         if i_est < inter * cfg.intra_ratio {
             let (idec, modes, e) = intra_mb(
                 &cfg,
@@ -1424,9 +1541,9 @@ pub(crate) fn p_mb<S: Sample>(
                 src,
                 nb,
                 qp_pred,
-                None,
+                tr,
                 Some(i16),
-                f64::INFINITY,
+                inter as f64,
                 &mut |_: &MbDecision| 0.0,
             );
             if (e as f32) < inter {
@@ -1435,11 +1552,6 @@ pub(crate) fn p_mb<S: Sample>(
             }
         }
         st.reset_mb();
-        if skip_est <= best.est {
-            st.commit_part(0, 0, 16, 16, [Some(skip_mv), None]);
-            predict(rec, 0, 0, 16, 16, skip_mv);
-            return MbChoice::Inter(skip_dec);
-        }
         let mut rects = [(0usize, 0usize, 0usize, 0usize); 16];
         let n = best.rects(&mut rects);
         for &(x, y, w, h) in rects.iter().take(n) {
@@ -1450,17 +1562,9 @@ pub(crate) fn p_mb<S: Sample>(
         }
         let allow8 = ctx.t8x8
             && (best.kind != InterMbKind::P8x8 || best.sub_shape.iter().all(|s| s.count() == 1));
+        let force = Some(allow8 && sa8d_prefers_8x8(ctx, rec, px, py, sy, src.ys));
         let r = code_inter_mb_residual(
-            ctx,
-            rec,
-            mb_x,
-            mb_y,
-            src.y,
-            src.ys,
-            src.c,
-            src.cs,
-            allow8,
-            Some(allow8),
+            fctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs, allow8, force,
         );
         let residual = r.cbp_luma != 0 || r.cbp_chroma != 0;
         let kind = if best.kind == InterMbKind::P16x16
@@ -1472,7 +1576,7 @@ pub(crate) fn p_mb<S: Sample>(
         } else {
             best.kind
         };
-        return MbChoice::Inter(InterDecision {
+        let dec = InterDecision {
             kind,
             transform_8x8: r.transform_8x8,
             mvd: best.mvds,
@@ -1487,7 +1591,20 @@ pub(crate) fn p_mb<S: Sample>(
             chroma_ac: r.chroma_ac,
             nz_luma: r.nz_luma,
             nz_chroma: r.nz_chroma,
-        });
+        };
+        if kind != InterMbKind::PSkip && skip_est <= best.est * cfg.skip_rd {
+            // Skip near the coded winner: the two priced, as the
+            // rate-distortion decision would.
+            let jc = ssd_mb(ctx, rec, src, mb_x, mb_y) as f64 + lam2 * rate(PMb::Coded(&dec));
+            if (skip_ssd as f64) < jc && (skip_ssd as f64) + lam2 * rate(PMb::Skip(&skip_dec)) < jc
+            {
+                st.reset_mb();
+                st.commit_part(0, 0, 16, 16, [Some(skip_mv), None]);
+                predict(rec, 0, 0, 16, 16, skip_mv);
+                return MbChoice::Inter(skip_dec);
+            }
+        }
+        return MbChoice::Inter(dec);
     }
 
     // The comparison, in coded form (by the trellis where it decides).
@@ -2088,11 +2205,13 @@ pub(crate) fn b_mb<S: Sample>(
             let mut bi_cost =
                 satd(r, PRED_BI, mbi, br) + costs.of(mbi[0], p[0]) + costs.of(mbi[1], p[1]);
             let rounds = if bi_cost > limit { 0 } else { cfg.bi_refine };
+            // The diamond's four, or the square's eight.
+            let npts = if cfg.bi_diamond { 4 } else { 8 };
             for _ in 0..rounds {
                 let before = mbi;
                 for l in 0..2 {
                     let c = mbi[l];
-                    for (dx, dy) in [
+                    for &(dx, dy) in &[
                         (0, -1),
                         (-1, 0),
                         (1, 0),
@@ -2101,7 +2220,8 @@ pub(crate) fn b_mb<S: Sample>(
                         (1, -1),
                         (-1, 1),
                         (1, 1),
-                    ] {
+                    ][..npts]
+                    {
                         let mut m = mbi;
                         m[l] = Mv::new(c.x + dx, c.y + dy);
                         let rc = costs.of(m[0], p[0]) + costs.of(m[1], p[1]);
@@ -2331,7 +2451,19 @@ pub(crate) fn b_mb<S: Sample>(
             .flatten()
             .min_by(|a, b| a.est.total_cmp(&b.est))
             .expect("direct is always a candidate");
-        if i_est < best.est * cfg.intra_ratio {
+        let tr = an.trellis().filter(|_| !ctx.c444);
+        let tctx_store;
+        let fctx: &IntraCtx<S> = match tr {
+            Some(t) => {
+                tctx_store = IntraCtx {
+                    trellis: Some(t),
+                    ..*ctx
+                };
+                &tctx_store
+            }
+            None => ctx,
+        };
+        if i_est < best.est * cfg.b_intra_ratio {
             let (idec, modes, e) = intra_mb(
                 &cfg,
                 ctx,
@@ -2341,9 +2473,9 @@ pub(crate) fn b_mb<S: Sample>(
                 src,
                 nb,
                 qp_pred,
-                None,
+                tr,
                 Some(i16),
-                f64::INFINITY,
+                best.est as f64,
                 &mut |_: &MbDecision| 0.0,
             );
             if (e as f32) < best.est {
@@ -2354,17 +2486,9 @@ pub(crate) fn b_mb<S: Sample>(
         predict_cand(rec, st, &best);
         let d0 = best.decision();
         let allow8 = ctx.t8x8 && d0.no_sub_mb_part_less_than_8x8();
+        let force = Some(allow8 && sa8d_prefers_8x8(ctx, rec, px, py, sy, src.ys));
         let r = code_inter_mb_residual(
-            ctx,
-            rec,
-            mb_x,
-            mb_y,
-            src.y,
-            src.ys,
-            src.c,
-            src.cs,
-            allow8,
-            Some(allow8),
+            fctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs, allow8, force,
         );
         let residual = r.cbp_luma != 0 || r.cbp_chroma != 0;
         let kind = if best.kind == BMbKind::BDirect16 && !residual {
@@ -2372,7 +2496,7 @@ pub(crate) fn b_mb<S: Sample>(
         } else {
             best.kind
         };
-        return MbChoice::Inter(BDecision {
+        let dec = BDecision {
             kind,
             transform_8x8: r.transform_8x8,
             cbp_luma: r.cbp_luma,
@@ -2384,7 +2508,21 @@ pub(crate) fn b_mb<S: Sample>(
             nz_luma: r.nz_luma,
             nz_chroma: r.nz_chroma,
             ..d0
-        });
+        };
+        if kind != BMbKind::BSkip && direct.est <= best.est * cfg.skip_rd {
+            let mb = if kind == BMbKind::BDirect16 {
+                BMb::Direct(&dec)
+            } else {
+                BMb::Explicit(&dec)
+            };
+            let jc = ssd_mb(ctx, rec, src, mb_x, mb_y) as f64 + lam2 * rate(mb);
+            if (skip_ssd as f64) < jc && (skip_ssd as f64) + lam2 * rate(BMb::Skip(&skip_dec)) < jc
+            {
+                predict_cand(rec, st, &direct);
+                return MbChoice::Inter(skip_dec);
+            }
+        }
+        return MbChoice::Inter(dec);
     }
 
     let rctx_store;
@@ -2492,7 +2630,7 @@ pub(crate) fn b_mb<S: Sample>(
         }
     }
 
-    if i_est < best_est * cfg.intra_ratio {
+    if i_est < best_est * cfg.b_intra_ratio {
         let (idec, modes, j) = intra_mb(
             &cfg,
             rctx,
@@ -2565,4 +2703,61 @@ pub(crate) fn b_mb<S: Sample>(
         best_pix.restore(ctx, rec, mb_x, mb_y);
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`sa8d_16x16`] against the 8x8 Hadamard written as a matrix
+    /// product (entry `(-1)^popcount(i & j)`), on random blocks at both
+    /// sample widths.
+    #[test]
+    fn sa8d_is_the_hadamard_sum() {
+        fn reference(a: &[i32], b: &[i32]) -> u32 {
+            let h = |i: usize, j: usize| {
+                if (i & j).count_ones().is_multiple_of(2) {
+                    1
+                } else {
+                    -1
+                }
+            };
+            let mut total = 0;
+            for blk in 0..4 {
+                let (bx, by) = ((blk & 1) * 8, (blk >> 1) * 8);
+                let mut sum = 0u32;
+                for u in 0..8 {
+                    for v in 0..8 {
+                        let mut c = 0i32;
+                        for y in 0..8 {
+                            for x in 0..8 {
+                                let o = (by + y) * 16 + bx + x;
+                                c += h(u, y) * h(v, x) * (a[o] - b[o]);
+                            }
+                        }
+                        sum += c.unsigned_abs();
+                    }
+                }
+                total += (sum + 2) >> 2;
+            }
+            total
+        }
+        let mut seed = 0x1234_5678u32;
+        let mut next = |m: u32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 8) % m
+        };
+        for _ in 0..20 {
+            let a: Vec<i32> = (0..256).map(|_| next(256) as i32).collect();
+            let b: Vec<i32> = (0..256).map(|_| next(256) as i32).collect();
+            let a8: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+            let b8: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+            assert_eq!(sa8d_16x16(&a8, 16, &b8, 16), reference(&a, &b));
+            let a16: Vec<u16> = a.iter().map(|&v| (v * 64) as u16).collect();
+            let b16: Vec<u16> = b.iter().map(|&v| (v * 64) as u16).collect();
+            let r: Vec<i32> = a.iter().map(|&v| v * 64).collect();
+            let s: Vec<i32> = b.iter().map(|&v| v * 64).collect();
+            assert_eq!(sa8d_16x16(&a16, 16, &b16, 16), reference(&r, &s));
+        }
+    }
 }

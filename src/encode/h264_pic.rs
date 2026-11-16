@@ -833,6 +833,14 @@ pub(crate) fn code_intra_picture<S: Sample>(
                     cands: [[Mv::ZERO; 4]; 2],
                     ncands: [0; 2],
                 };
+                // An I picture is decided by pricing, whatever the tier
+                // does in inter pictures: every picture after it predicts
+                // from it (veryfast's estimate-only intra: +0.9 % BD-rate).
+                let cfg = AnalysisCfg {
+                    rd: true,
+                    i4x4: true,
+                    ..cfg
+                };
                 let (d, m, _) = intra_mb(
                     &cfg,
                     &mctx,
