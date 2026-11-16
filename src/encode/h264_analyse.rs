@@ -185,7 +185,11 @@ impl AnalysisCfg {
     /// tenth round a further reference whose whole-sample cost is 1.5x the
     /// best one's so far is not refined to sub-samples (`refine_ratio`:
     /// +0.03 % for 2.3 % fewer cycles; slow, +0.17 % for 2.6 %, and
-    /// veryfast, +0.04 % for 0.4 %, are left without it).
+    /// veryfast, +0.04 % for 0.4 %, are left without it). Round 12B spent
+    /// time where it buys BD-rate faster than x264's slope there (0.05 %
+    /// per 1 %): four P references (was three), partitions searched up to
+    /// 1.1x Intra_16x16's estimate (was 1.0x) and partition pairs refined
+    /// from within 1.1x, together -0.42 % for 5.6 % more cycles.
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -252,7 +256,11 @@ impl AnalysisCfg {
     /// trellis in B pictures nothing references (-1.2 % for +2.3 %) and
     /// intra analysed within 1.2x of the best inter estimate (-0.7 % for
     /// +1 %). A B pair is refined only from within 1.05x of the better
-    /// list (ninth round: +0.01 % for 0.5 % fewer cycles).
+    /// list (ninth round: +0.01 % for 0.5 % fewer cycles). Round 12B:
+    /// quarter samples on the square (-0.79 % for 2.4 % more cycles) and
+    /// intra within 1.5x (-0.25 % for 0.8 %), both past x264's 0.2 % per
+    /// 1 %, and a skip prediction this close to the source taken without
+    /// quantising (`skip_loose`: +0.04 % for 1.2 % fewer).
     pub(crate) const VERYFAST: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
