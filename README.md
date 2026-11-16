@@ -163,24 +163,75 @@ one loaded Apple M-series machine, summed over the four rate points:
 
 | `--preset` | clip | BD-rate Y | BD-rate avg | time vs x264 |
 |---|---|---:|---:|---:|
-| veryfast | foreman CIF | +3.27 % | +3.06 % | 2.06x |
-| | mobile CIF | -6.82 % | -8.25 % | 2.39x |
-| | akiyo CIF | -6.14 % | -5.84 % | 2.49x |
-| | ducks_take_off 720p | -11.12 % | -13.29 % | 2.25x |
-| | park_joy 720p | -2.58 % | -2.94 % | 2.35x |
-| | **mean** | **-4.68 %** | **-5.45 %** | **2.30x** |
-| medium | foreman CIF | +1.35 % | +1.50 % | 1.67x |
-| | mobile CIF | +2.19 % | +1.79 % | 1.60x |
-| | akiyo CIF | -4.29 % | -4.15 % | 1.79x |
-| | ducks_take_off 720p | -0.76 % | -4.26 % | 1.65x |
-| | park_joy 720p | +3.07 % | +3.17 % | 1.82x |
-| | **mean** | **+0.31 %** | **-0.39 %** | **1.72x** |
-| slow | foreman CIF | +2.32 % | +2.40 % | 1.60x |
-| | mobile CIF | +2.06 % | +1.47 % | 1.20x |
-| | akiyo CIF | -1.85 % | -1.56 % | 1.79x |
-| | ducks_take_off 720p | +1.97 % | -2.54 % | 1.26x |
-| | park_joy 720p | +2.51 % | +2.45 % | 1.29x |
-| | **mean** | **+1.40 %** | **+0.44 %** | **1.28x** |
+| veryfast | foreman CIF | +3.27 % | +3.06 % | 1.78x |
+| | mobile CIF | -6.82 % | -8.25 % | 2.08x |
+| | akiyo CIF | -6.14 % | -5.84 % | 2.13x |
+| | ducks_take_off 720p | -11.12 % | -13.29 % | 1.92x |
+| | park_joy 720p | -2.58 % | -2.94 % | 1.99x |
+| | **mean** | **-4.68 %** | **-5.45 %** | **1.96x** |
+| medium | foreman CIF | +1.35 % | +1.50 % | 1.47x |
+| | mobile CIF | +2.19 % | +1.79 % | 1.45x |
+| | akiyo CIF | -4.29 % | -4.15 % | 1.57x |
+| | ducks_take_off 720p | -0.76 % | -4.26 % | 1.46x |
+| | park_joy 720p | +3.07 % | +3.17 % | 1.58x |
+| | **mean** | **+0.31 %** | **-0.39 %** | **1.51x** |
+| slow | foreman CIF | +2.32 % | +2.40 % | 1.39x |
+| | mobile CIF | +2.06 % | +1.47 % | 1.08x |
+| | akiyo CIF | -1.85 % | -1.56 % | 1.54x |
+| | ducks_take_off 720p | +1.97 % | -2.54 % | 1.12x |
+| | park_joy 720p | +2.51 % | +2.45 % | 1.12x |
+| | **mean** | **+1.40 %** | **+0.44 %** | **1.13x** |
+
+(Sixth round, 2026-11-15, rivet at --jobs 4 against the cached x264
+times; every stream on all three presets is byte-identical to the fifth
+round's, so the BD-rates are unchanged and the time is all speed. Cycles
+at QP 27 over the five clips, minimum of three runs, `/usr/bin/time -l`:
+8.52G / 17.11G / 29.13G before (3c2ed48), 7.24G / 15.10G / 25.76G after,
+-15 / -12 / -12 %; instructions 38.9G / 81.4G / 141.7G to 30.4G / 66.4G /
+116.9G, -22 / -18 / -17 %. x264 at CRF 23 on the same clips in the same
+session: 3.38G / 9.84G / 21.84G cycles, 12.1G / 34.4G / 74.7G
+instructions.)
+
+What the sixth round did, every change byte-identical (instructions at
+QP 27, veryfast / medium / slow, each against the tree before it):
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| Intra_16x16 found once per macroblock (the estimate's mode handed to the analysis), its rows written as fixed-width slices | -2.7 % | -1.6 % | -1.3 % |
+| Intra_4x4 / 8x8: the neighbours gathered (and filtered) once per block, each mode predicted into its own buffer (`Edge4` / `Edge8`, `pred_4x4` / `pred_8x8`) | -2.6 % | -2.2 % | -2.1 % |
+| trellis: an all-zero block found from its largest exact level before the scan; Qstep without `exp2`; the general path's eight lanes as two NEON vectors, each destination's candidates a tree of first minima (`Trellis::simd`) | -1.5 % | -2.9 % | -3.1 % |
+| NEON SATD: tile pairs folded with `sadalp`, `sabd` for the difference magnitudes, sixteen-wide rows in one load (shared with H.265) | -2.4 % | -3.8 % | -3.3 % |
+| NEON prediction copy and two-/four-wide stores without `memmove`; chroma rows loaded once (shared with the decoder) | -1.6 % | -1.0 % | -0.9 % |
+| difference and forward transform in one NEON pass (`sub_fdct4` / `sub_fdct8`); 4x4 dequantisation's shift chosen once per block | -4.3 % | -2.4 % | -2.4 % |
+| CABAC residual writer: the significant positions as one mask (NEON table lookup), `i16` blocks straight in; the walk's coded_block_flag increments a plane at a time | -5.5 % | -3.5 % | -3.2 % |
+| candidates' luma predicted from the search's half-sample planes instead of the six-tap kernels | -2.3 % | -1.3 % | -1.1 % |
+| smaller: 8x8 sub-scan counts as masked sums, no memsets in the trellis's scan, the B search's pair average in the fused average-SATD | -2 % | -1.6 % | -2 % |
+
+Tried and dropped in the sixth round: the ones-only trellis path in NEON
+(slower than its scalar form — the per-position chain, not the
+arithmetic, is its cost); a per-macroblock memo of trellis inputs (9 % of
+medium's and 19 % of slow's trellis calls repeat one within the
+macroblock, not enough to pay for the lookup); pricing chroma once per
+candidate (chroma is 11-14 % of the priced coefficients, about 1 % of the
+time); caching the lookahead's propagation fractions and landing blocks
+(0.1 %). Decision trades, BD-rate Y against x264 (all over the 0.05 %
+per 1 % of time allowed): medium partitions from their candidates without
+an integer descent, +0.54 % for -2.6 % instructions; veryfast early-skip
+error ceiling 0.10, +0.07 % for -0.6 %; veryfast intra ratio 0.9, +0.87 %
+for -2.3 %; veryfast's 8x8 transform tried only when the 4x4 one coded
+two (three) quadrants, +0.34 (+0.62) % for -0.6 (-1.3) %.
+
+Where the time still goes (medium, park_joy, sampled): the trellis about
+a fifth (latency-bound: a ones-only block is ~100 ns, a general 4x4 ~190
+ns, a general 8x8 ~570 ns), the motion search a fifth (sub-sample SATD
+at the kernel's floor, ~22 SATDs per 16x16 search, and the refinement's
+control flow), the CABAC estimator's and writer's bins about a seventh
+(one context per bin, at the coder's serial floor), and intra analysis
+in inter pictures about a tenth. Rivet still executes 2.5x / 1.9x / 1.6x
+x264's instructions; the profile is flat, with nothing left over a few
+per cent that can be had without changing a decision, and the decisions
+that would cut most (veryfast's rate-distortion pricing, medium's trellis
+in every candidate) cost far more than the allowed rate.
 
 (Fifth round, 2026-11-15, rivet at --jobs 4 against the cached x264
 times; veryfast and slow streams are byte-identical to the fourth
@@ -407,8 +458,8 @@ reference B picture's colocated motion or duplicate list 0; per-partition
 reference choice (rivet binds the macroblock to one per list) and the
 implicit weighting between unequal distances are what is left of that.
 Also missing: slow's RD refinement of vectors and intra modes (x264's
-subme 8). The time gap is still implementation efficiency, now 2.3x / 1.7x /
-1.3x after the fifth round: rivet runs 3.2x / 2.4x / 1.9x x264's
+subme 8). The time gap is still implementation efficiency, now 2.0x / 1.5x /
+1.1x after the sixth round (2.3x / 1.7x / 1.3x after the fifth): rivet runs 3.2x / 2.4x / 1.9x x264's
 instructions at a higher IPC. The fifth round's profile is flat — no
 piece over a quarter — so what is left is many kernels each a few per
 cent (the trellis's eight-lane state machine compiled scalar, SATD of
@@ -986,7 +1037,7 @@ compares (280 identical, 0 moved) — so this is speed and nothing else.
 encode-side tables scalar for a measurement; `H26X_MAX_SIMD` caps the
 ladder as it does for the decoders. Neither encoder is threaded yet:
 `--threads` is accepted and unused. Against x264 at matched tiers see
-"H.264 compression against x264" above: 1.3x to 2.3x x264's single-thread
+"H.264 compression against x264" above: 1.1x to 2.0x x264's single-thread
 time, the gap in rivet's scalar candidate pricing, residual coding and
 search control flow rather than in how much it searches.
 
