@@ -1371,7 +1371,7 @@ fn residual4(dst: &mut [u16], stride: usize, coefs: &[i32; 16], dc: i32, max: i3
             v128_or(v128_andnot(rows[0], i32x4(-1, 0, 0, 0)), rows[1]),
             v128_or(rows[2], rows[3]),
         );
-        if !v128_any_true(ac) {
+        if !super::wasm_any_nonzero(ac) {
             if c[0] != 0 {
                 dc_add_impl(dst.as_mut_ptr(), stride, c[0], 4, max);
             }
@@ -1398,7 +1398,7 @@ fn residual8(dst: &mut [u16], stride: usize, coefs: &[i32; 64], max: i32) {
         for r in &rows[1..] {
             ac = v128_or(ac, v128_or(r[0], r[1]));
         }
-        if !v128_any_true(ac) {
+        if !super::wasm_any_nonzero(ac) {
             if coefs[0] != 0 {
                 dc_add_impl(dst.as_mut_ptr(), stride, coefs[0], 8, max);
             }

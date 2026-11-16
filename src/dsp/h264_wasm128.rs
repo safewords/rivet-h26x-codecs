@@ -1357,7 +1357,7 @@ unsafe fn residual4_impl(dst: *mut u8, stride: usize, coefs: &[i32; 16], dc: i32
         // is `a & !b` — the operands sit the other way round from x86's
         // `_mm_andnot_si128`, which is `!a & b`.)
         let ac = v128_or(v128_andnot(c0, lane0_mask()), c1);
-        if !v128_any_true(ac) {
+        if !super::wasm_any_nonzero(ac) {
             let d = i16x8_extract_lane::<0>(c0) as i32;
             if d != 0 {
                 dc_add_impl(dst, stride, d, 4);
@@ -1390,7 +1390,7 @@ unsafe fn residual8_impl(dst: *mut u8, stride: usize, coefs: &[i32; 64]) {
             };
             ac = v128_or(ac, masked);
         }
-        if !v128_any_true(ac) {
+        if !super::wasm_any_nonzero(ac) {
             let d = coeffs[0] as i32;
             if d != 0 {
                 dc_add_impl(dst, stride, d, 8);

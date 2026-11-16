@@ -55,6 +55,25 @@ pub(crate) mod h264_neon_u16;
 pub(crate) mod h264_wasm128;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod h264_wasm128_u16;
+
+/// Whether any bit of `v` is set: `v128.any_true`, without that instruction.
+///
+/// Firefox before 153 lowers `v128.any_true` on arm64 to an `ADDP` of the
+/// two 64-bit halves and a compare with zero, so a vector whose halves sum
+/// to 0 mod 2^64 — `[1, -1]`, or `i32x4(0, 2304, 0, -2304)` — reads as all
+/// zero ([Bugzilla 2042331](https://bugzilla.mozilla.org/show_bug.cgi?id=2042331),
+/// fixed in 153). The residual kernels test arbitrary coefficients for
+/// "any AC nonzero" and skipped the inverse transform on exactly such blocks
+/// (H.264 High 10 in Firefox 142 on Apple silicon). Two lane extracts and an
+/// OR are exact on every engine. The `v128_any_true` calls left in the wasm
+/// kernels test masked sample bits, whose halves cannot cancel for samples
+/// of at most 14 bits.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+pub(crate) fn wasm_any_nonzero(v: core::arch::wasm32::v128) -> bool {
+    use core::arch::wasm32::i64x2_extract_lane;
+    (i64x2_extract_lane::<0>(v) | i64x2_extract_lane::<1>(v)) != 0
+}
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod h264_x86_128;
 #[cfg(target_arch = "x86_64")]
