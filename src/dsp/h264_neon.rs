@@ -35,6 +35,7 @@ pub fn install(d: &mut H264Dsp<u8>) {
     ];
     d.chroma = chroma_neon;
     d.avg = avg_neon;
+    d.copy = copy_neon;
     d.weighted_uni = weighted_uni_neon;
     d.weighted_bi = weighted_bi_neon;
     d.deblock_luma_v = deblock_luma_v_neon;
@@ -59,6 +60,12 @@ unsafe fn store8_n(dst: *mut u8, v: uint8x8_t, n: usize) {
     unsafe {
         if n >= 8 {
             vst1_u8(dst, v);
+        } else if n == 4 {
+            // The 4:2:0 chroma width: one 32-bit store, not a call into
+            // `memmove` for four bytes.
+            std::ptr::write_unaligned(dst as *mut u32, vget_lane_u32::<0>(vreinterpret_u32_u8(v)));
+        } else if n == 2 {
+            std::ptr::write_unaligned(dst as *mut u16, vget_lane_u16::<0>(vreinterpret_u16_u8(v)));
         } else {
             let mut t = [0u8; 8];
             vst1_u8(t.as_mut_ptr(), v);
@@ -286,6 +293,38 @@ fn chroma_neon(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf
                 let p = vqmovun_s16(vshrq_n_s16::<6>(v));
                 vst1_u8(dst.as_mut_ptr().add(y * PRED_STRIDE + x0), p);
                 x0 += 8;
+            }
+        }
+    }
+}
+
+/// The plain prediction copy, a row per one or two vector moves at the
+/// widths prediction blocks have (16, 8, 4 and 2), not a `memmove` call
+/// per row.
+fn copy_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
+    if h == 0 || w == 0 {
+        return;
+    }
+    assert!(
+        dst.len() >= (h - 1) * stride + w && src.len() >= (h - 1) * PRED_STRIDE + w,
+        "block out of range"
+    );
+    unsafe {
+        let (d, s) = (dst.as_mut_ptr(), src.as_ptr());
+        for y in 0..h {
+            let (d, s) = (d.add(y * stride), s.add(y * PRED_STRIDE));
+            match w {
+                16 => vst1q_u8(d, vld1q_u8(s)),
+                8 => vst1_u8(d, vld1_u8(s)),
+                4 => std::ptr::write_unaligned(
+                    d as *mut u32,
+                    std::ptr::read_unaligned(s as *const u32),
+                ),
+                2 => std::ptr::write_unaligned(
+                    d as *mut u16,
+                    std::ptr::read_unaligned(s as *const u16),
+                ),
+                _ => std::ptr::copy_nonoverlapping(s, d, w),
             }
         }
     }
@@ -1191,6 +1230,36 @@ mod tests {
                 (s.weighted_bi)(&mut d1, ds, &a, &b, w, h, lwd, wt, 64 - wt, o, -o, 255);
                 (d.weighted_bi)(&mut d2, ds, &a, &b, w, h, lwd, wt, 64 - wt, o, -o, 255);
                 assert_eq!(d1, d2, "wbi {w}x{h} {lwd} {wt} {o}");
+            }
+        }
+    }
+
+    /// The copy and the average at every prediction width, chroma's two
+    /// and four included.
+    #[test]
+    fn copy_and_avg_match_scalar() {
+        let mut d = H264Dsp::<u8>::SCALAR;
+        install(&mut d);
+        let s = H264Dsp::<u8>::SCALAR;
+        let mut seed = 9u64;
+        for &w in &[2usize, 4, 8, 16, 6, 12] {
+            for &h in &[2usize, 4, 8, 16] {
+                let a: Vec<u8> = (0..16 * PRED_STRIDE)
+                    .map(|_| lcg(&mut seed) as u8)
+                    .collect();
+                let b: Vec<u8> = (0..16 * PRED_STRIDE)
+                    .map(|_| lcg(&mut seed) as u8)
+                    .collect();
+                let ds = w + 5;
+                let fill: Vec<u8> = (0..ds * h).map(|_| lcg(&mut seed) as u8).collect();
+                let (mut d1, mut d2) = (fill.clone(), fill.clone());
+                (s.copy)(&mut d1, ds, &a, w, h);
+                (d.copy)(&mut d2, ds, &a, w, h);
+                assert_eq!(d1, d2, "copy {w}x{h}");
+                let (mut d1, mut d2) = (fill.clone(), fill);
+                (s.avg)(&mut d1, ds, &a, &b, w, h);
+                (d.avg)(&mut d2, ds, &a, &b, w, h);
+                assert_eq!(d1, d2, "avg {w}x{h}");
             }
         }
     }
