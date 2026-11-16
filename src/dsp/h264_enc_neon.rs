@@ -123,7 +123,7 @@ unsafe fn satd_avg_impl(
     w: usize,
     h: usize,
 ) -> u32 {
-    use super::distortion_neon::{diff8, load4, load4x2, satd_pair};
+    use super::distortion_neon::{acc_pair, diff8, load4, load4x2, satd_pair};
     unsafe {
         let mut acc = vdupq_n_s32(0);
         if w == 4 {
@@ -136,7 +136,7 @@ unsafe fn satd_avg_impl(
                     );
                     diff8(load4x2(s.add((y + r) * ss), s.add((y + r + 4) * ss)), p)
                 };
-                acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
                 y += 8;
             }
             if y < h {
@@ -144,19 +144,35 @@ unsafe fn satd_avg_impl(
                     let p = vrhadd_u8(load4(a.add((y + r) * sa)), load4(b.add((y + r) * sb)));
                     diff8(load4(s.add((y + r) * ss)), p)
                 };
-                acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
             }
         } else {
             let mut y = 0;
             while y < h {
                 let (rs, ra, rb) = (s.add(y * ss), a.add(y * sa), b.add(y * sb));
                 let mut x = 0;
+                // Sixteen columns a row: one load each, two tile pairs.
+                while x + 16 <= w {
+                    let row = |r: usize| {
+                        let p =
+                            vrhaddq_u8(vld1q_u8(ra.add(r * sa + x)), vld1q_u8(rb.add(r * sb + x)));
+                        let v = vld1q_u8(rs.add(r * ss + x));
+                        (
+                            vreinterpretq_s16_u16(vsubl_u8(vget_low_u8(v), vget_low_u8(p))),
+                            vreinterpretq_s16_u16(vsubl_high_u8(v, p)),
+                        )
+                    };
+                    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+                    acc = acc_pair(acc, satd_pair(r0.0, r1.0, r2.0, r3.0));
+                    acc = acc_pair(acc, satd_pair(r0.1, r1.1, r2.1, r3.1));
+                    x += 16;
+                }
                 while x + 8 <= w {
                     let row = |r: usize| {
                         let p = vrhadd_u8(vld1_u8(ra.add(r * sa + x)), vld1_u8(rb.add(r * sb + x)));
                         diff8(vld1_u8(rs.add(r * ss + x)), p)
                     };
-                    acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                    acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
                     x += 8;
                 }
                 if x < w {
@@ -164,12 +180,12 @@ unsafe fn satd_avg_impl(
                         let p = vrhadd_u8(load4(ra.add(r * sa + x)), load4(rb.add(r * sb + x)));
                         diff8(load4(rs.add(r * ss + x)), p)
                     };
-                    acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                    acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
                 }
                 y += 4;
             }
         }
-        (vgetq_lane_s32(acc, 0) as u32).wrapping_add(vgetq_lane_s32(acc, 1) as u32)
+        vaddvq_s32(acc) as u32
     }
 }
 

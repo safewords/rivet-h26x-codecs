@@ -148,14 +148,16 @@ unsafe fn butterfly(r0: int16x8_t, r1: int16x8_t, r2: int16x8_t, r3: int16x8_t) 
 }
 
 /// SATD of the two tiles in `r0..r3` (one row each, A low, B high), as
-/// `[A, B, A, B]` i32 with the per-tile rounding applied.
+/// eight i16 lanes whose sum is the two tiles' SATDs with the per-tile
+/// rounding applied; a caller folds them into i32 with `sadalp`
+/// ([`acc_pair`]) and sums its lanes once at the end.
 #[inline(always)]
 pub(super) unsafe fn satd_pair(
     r0: int16x8_t,
     r1: int16x8_t,
     r2: int16x8_t,
     r3: int16x8_t,
-) -> int32x4_t {
+) -> int16x8_t {
     unsafe {
         let [t0, t1, t2, t3] = butterfly(r0, r1, r2, r3);
         // Transpose each 4x4 tile: 16-bit pairs, then 32-bit pairs.
@@ -183,18 +185,20 @@ pub(super) unsafe fn satd_pair(
         // as `x + y` and `x - y`, and `|x + y| + |x - y| = 2 max(|x|, |y|)`,
         // so the tile's sum is twice the sum of the maxima — even, which
         // makes the tile's `(sum + 1) >> 1` exactly that sum of maxima.
-        let s0 = vaddq_s16(c0, c3);
-        let s1 = vaddq_s16(c1, c2);
-        let s2 = vsubq_s16(c1, c2);
-        let s3 = vsubq_s16(c0, c3);
-        let s = vaddq_s16(
-            vmaxq_s16(vabsq_s16(s0), vabsq_s16(s1)),
-            vmaxq_s16(vabsq_s16(s2), vabsq_s16(s3)),
-        );
-        // [A01, A23, B01, B23] -> [A, B, A, B].
-        let p = vpaddlq_s16(s);
-        vpaddq_s32(p, p)
+        // The differences' magnitudes are one `sabd` each (the values are
+        // at most 8 * 1020 here, nowhere near the i16 range's edge).
+        let s0 = vabsq_s16(vaddq_s16(c0, c3));
+        let s1 = vabsq_s16(vaddq_s16(c1, c2));
+        let s2 = vabdq_s16(c1, c2);
+        let s3 = vabdq_s16(c0, c3);
+        vaddq_s16(vmaxq_s16(s0, s1), vmaxq_s16(s2, s3))
     }
+}
+
+/// Fold one [`satd_pair`] into an i32 accumulator.
+#[inline(always)]
+pub(super) unsafe fn acc_pair(acc: int32x4_t, s: int16x8_t) -> int32x4_t {
+    unsafe { vpadalq_s16(acc, s) }
 }
 
 #[inline(always)]
@@ -215,12 +219,12 @@ unsafe fn satd_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, 
                         load4x2(b.add((y + r) * sb), b.add((y + r + 4) * sb)),
                     )
                 };
-                acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
                 y += 8;
             }
             if y < h {
                 let row = |r: usize| diff8(load4(a.add((y + r) * sa)), load4(b.add((y + r) * sb)));
-                acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
             }
         } else {
             let mut y = 0;
@@ -228,22 +232,36 @@ unsafe fn satd_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, 
                 let ra = a.add(y * sa);
                 let rb = b.add(y * sb);
                 let mut x = 0;
+                // Sixteen columns a row as one load each side, its halves
+                // widened apart: two tile pairs.
+                while x + 16 <= w {
+                    let row = |r: usize| {
+                        let (va, vb) = (vld1q_u8(ra.add(r * sa + x)), vld1q_u8(rb.add(r * sb + x)));
+                        (
+                            vreinterpretq_s16_u16(vsubl_u8(vget_low_u8(va), vget_low_u8(vb))),
+                            vreinterpretq_s16_u16(vsubl_high_u8(va, vb)),
+                        )
+                    };
+                    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+                    acc = acc_pair(acc, satd_pair(r0.0, r1.0, r2.0, r3.0));
+                    acc = acc_pair(acc, satd_pair(r0.1, r1.1, r2.1, r3.1));
+                    x += 16;
+                }
                 while x + 8 <= w {
                     let row =
                         |r: usize| diff8(vld1_u8(ra.add(r * sa + x)), vld1_u8(rb.add(r * sb + x)));
-                    acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                    acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
                     x += 8;
                 }
                 if x < w {
                     let row =
                         |r: usize| diff8(load4(ra.add(r * sa + x)), load4(rb.add(r * sb + x)));
-                    acc = vaddq_s32(acc, satd_pair(row(0), row(1), row(2), row(3)));
+                    acc = acc_pair(acc, satd_pair(row(0), row(1), row(2), row(3)));
                 }
                 y += 4;
             }
         }
-        // Lanes are [A, B, A, B] sums: one of each.
-        (vgetq_lane_s32(acc, 0) as u32).wrapping_add(vgetq_lane_s32(acc, 1) as u32)
+        vaddvq_s32(acc) as u32
     }
 }
 
