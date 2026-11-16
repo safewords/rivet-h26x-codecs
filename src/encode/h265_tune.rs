@@ -5,7 +5,7 @@
 //! [`Config`] fields, which [`apply_preset`] sets to the tier's defaults
 //! so that a caller can still override any of them afterwards. The
 //! *tuning* — quantiser offsets per picture kind, search effort, early
-//! exits — has no field of its own and is read off [`Tune::of`], which
+//! exits — has no field of its own and is read off `Tune::of`, which
 //! is all-neutral when no tier was asked for: a configuration without a
 //! preset codes exactly as it did before tiers existed.
 

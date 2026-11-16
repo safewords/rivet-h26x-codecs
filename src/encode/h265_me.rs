@@ -719,7 +719,7 @@ pub struct InterPicture<S: Sample> {
     pub parts_after_merge: bool,
     /// When the losing shape of 2Nx2N and partitioned comes within this
     /// fraction of the winner's SATD cost, both are coded and the cheaper
-    /// in SSD plus bits kept ([`PARTS_RD_MARGIN`] by default).
+    /// in SSD plus bits kept (`PARTS_RD_MARGIN` by default).
     pub parts_rd_margin: f32,
     /// The reference-list context's buffers, reused unit to unit.
     rc_pocs: [Vec<i32>; 2],
@@ -744,8 +744,8 @@ pub struct InterPicture<S: Sample> {
     /// `Config::inter_parts`, set by the caller. [`InterParts::None`]
     /// until then, which is every CU a single unit.
     pub parts: InterParts,
-    /// The last CU decision's two candidates, as [`Self::code_cu`] or
-    /// [`Self::code_cu_b`] left them: the 2Nx2N unit and the cheapest
+    /// The last CU decision's two candidates, as [`Self::code_cu_into`] or
+    /// [`Self::code_cu_b_into`] left them: the 2Nx2N unit and the cheapest
     /// partitioned shape, if one was offered. `tree_leaf` codes the loser
     /// too when the two are close, and keeps the cheaper in SSD plus
     /// lambda times the bits of the whole CU.
@@ -763,7 +763,7 @@ pub struct InterPicture<S: Sample> {
     /// Scratch for a bi-prediction scored from the fractional planes.
     spred_avg: Vec<S>,
     /// How many rounds of iterative bi-prediction refinement a B unit's
-    /// AMVP pair gets ([`Self::refine_bi`]); 0 scores the pair of
+    /// AMVP pair gets (`refine_bi`); 0 scores the pair of
     /// independently searched vectors only.
     pub bi_refine: u32,
     /// Refinement is tried only where the unrefined pair costs less than
@@ -822,7 +822,7 @@ pub struct InterPicture<S: Sample> {
     /// The reference each depth's whole unit chose, by position.
     parent_ref: [Option<(u32, u32, i8)>; 4],
     /// Whether a unit with residual is also tried without it
-    /// ([`Self::tree_leaf_drop`]).
+    /// (`tree_leaf_drop`).
     pub drop_trial: bool,
     /// At the minimum coding block an intra unit also tries `PART_NxN`
     /// when its 2Nx2N cost is below this many times the inter unit's; 0
@@ -867,7 +867,7 @@ pub struct InterPicture<S: Sample> {
     /// `[-1, 0]` and `[0, 0]`, each list's one active reference. All
     /// `Weighting::Default` when the slice carries no table, or one whose
     /// every entry is the default (which predicts the same samples). Read
-    /// by [`Self::code_cu_b`]'s search, its merge and bi scoring and its
+    /// by [`Self::code_cu_b_into`]'s search, its merge and bi scoring and its
     /// final prediction. The P walk does not read it.
     pub wp_b: [[Weighting; 3]; 3],
     /// The luma plane each list's full-sample search scores against in a
@@ -1557,7 +1557,7 @@ impl<S: Sample> InterPicture<S> {
     }
 
     /// [`Self::code_ctu_b`] for one coding unit of `1 << log2_cu` at luma
-    /// `(x0, y0)` and coding-tree depth `depth`, as [`Self::code_cu`] is
+    /// `(x0, y0)` and coding-tree depth `depth`, as [`Self::code_cu_into`] is
     /// to [`Self::code_ctu`].
     #[allow(clippy::too_many_arguments)]
     pub fn code_cu_b_into(
@@ -2795,7 +2795,7 @@ impl<S: Sample> InterPicture<S> {
     }
 
     /// [`Self::code_ctu_intra`] for one coding unit of `1 << log2_cu` at
-    /// luma `(x0, y0)`: the CU [`Self::code_cu`] or [`Self::code_cu_b`]
+    /// luma `(x0, y0)`: the CU [`Self::code_cu_into`] or [`Self::code_cu_b_into`]
     /// answered [`InterCuKind::UseIntra`] for, called immediately after.
     #[allow(clippy::too_many_arguments)]
     pub fn code_cu_intra(
@@ -2841,7 +2841,7 @@ impl<S: Sample> InterPicture<S> {
     /// picture as a coding quadtree — the walk and the cost of
     /// [`super::h265_intra::IntraPicture::code_ctu_tree`] over this
     /// picture's units: every node coded whole by the inter decision
-    /// ([`Self::code_cu`] or [`Self::code_cu_b`], handing over to
+    /// ([`Self::code_cu_into`] or [`Self::code_cu_b_into`], handing over to
     /// [`Self::code_cu_intra`] where it answers [`InterCuKind::UseIntra`])
     /// and then split, the cheaper kept.
     ///

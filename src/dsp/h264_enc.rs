@@ -108,7 +108,7 @@ pub type SatdAvgFn = fn(
 
 /// SAD of one 8-bit `src` block against four candidate blocks sharing a
 /// stride, `w` by `h`: four integer motion candidates scored with the
-/// source read once. Each sum is [`super::distortion::sad_scalar`]'s.
+/// source read once. Each sum is `sad_scalar`'s.
 pub type SadX4Fn = fn(
     src: &[u8],
     src_stride: usize,
