@@ -1639,20 +1639,18 @@ pub(crate) fn luma_tbs(d: &CuDecision, x0: usize, y0: usize) -> Vec<(usize, usiz
 /// of the 4x4 x-coordinate contributes `4^i`, of the y-coordinate
 /// `2 * 4^i`.
 pub(crate) fn z_within_ctb(log2_ctb: u32, x: usize, y: usize) -> u32 {
+    debug_assert!(log2_ctb <= 6, "a CTB is at most 64 samples");
     let mask = (1usize << log2_ctb) - 1;
-    let x4 = (x & mask) >> 2;
-    let y4 = (y & mask) >> 2;
-    let mut v = 0u32;
-    for i in 0..log2_ctb - 2 {
-        let m = 1usize << i;
-        if x4 & m != 0 {
-            v += (m * m) as u32;
-        }
-        if y4 & m != 0 {
-            v += (2 * m * m) as u32;
-        }
-    }
-    v
+    let x4 = ((x & mask) >> 2) as u32;
+    let y4 = ((y & mask) >> 2) as u32;
+    // Bit `i` moved to bit `2i` (a CTB is at most 64 samples, so a 4x4
+    // coordinate has at most four bits): `4^i` per x bit, by shifts and
+    // masks rather than a loop with a branch per bit.
+    let spread = |v: u32| {
+        let v = (v | (v << 2)) & 0x33;
+        (v | (v << 1)) & 0x55
+    };
+    spread(x4) + 2 * spread(y4)
 }
 
 /// Whether the block holding luma sample `(xn, yn)` is reconstructed by
@@ -2029,11 +2027,13 @@ fn code_residual<S: Sample>(
     let max = (1i32 << ctx.bit_depth) - 1;
 
     let mut work = [0i16; 1024];
-    for yy in 0..n {
-        for xx in 0..n {
-            work[yy * n + xx] = (src[yy * src_stride + xx].to_i32()
-                - plane.data[off + yy * stride + xx].to_i32())
-                as i16;
+    // Row slices zipped: no bounds checks inside a row, which the
+    // compiler then vectorises.
+    for (yy, row) in work[..n * n].chunks_exact_mut(n).enumerate() {
+        let s = &src[yy * src_stride..yy * src_stride + n];
+        let p = &plane.data[off + yy * stride..off + yy * stride + n];
+        for ((w, &a), &b) in row.iter_mut().zip(s).zip(p) {
+            *w = (a.to_i32() - b.to_i32()) as i16;
         }
     }
 
@@ -3425,6 +3425,23 @@ mod tests {
         // 4x4 coordinates (7, 6), whose interleave y2 x2 y1 x1 y0 x0 is
         // 110111 with y0 = 0.
         assert_eq!(z_within_ctb(5, 28, 24), 32 + 16 + 8 + 4 + 1);
+        // Every block of every CTB size against the per-bit sum it is
+        // defined by (`4^i` per x bit, `2 * 4^i` per y bit).
+        for log2 in 3..=6u32 {
+            for y in (0..1usize << log2).step_by(4) {
+                for x in (0..1usize << log2).step_by(4) {
+                    let (x4, y4) = (x >> 2, y >> 2);
+                    let want: u32 = (0..log2 - 2)
+                        .map(|i| {
+                            let m = 1u32 << (2 * i);
+                            (x4 >> i & 1) as u32 * m + (y4 >> i & 1) as u32 * 2 * m
+                        })
+                        .sum();
+                    // Coordinates past the CTB are masked to it.
+                    assert_eq!(z_within_ctb(log2, x + (3 << log2), y), want);
+                }
+            }
+        }
     }
 
     /// The availability mirror held against the decoder itself: build the

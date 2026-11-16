@@ -4733,11 +4733,13 @@ fn code_residual_inter_n<S: Sample, const N: usize>(
     let max = (1i32 << ctx.bit_depth) - 1;
 
     let mut work = [0i16; N];
-    for yy in 0..n {
-        for xx in 0..n {
-            work[yy * n + xx] = (src[yy * src_stride + xx].to_i32()
-                - plane.data[off + yy * stride + xx].to_i32())
-                as i16;
+    // Row slices zipped: no bounds checks inside a row, which the
+    // compiler then vectorises.
+    for (yy, row) in work[..n * n].chunks_exact_mut(n).enumerate() {
+        let s = &src[yy * src_stride..yy * src_stride + n];
+        let p = &plane.data[off + yy * stride..off + yy * stride + n];
+        for ((w, &a), &b) in row.iter_mut().zip(s).zip(p) {
+            *w = (a.to_i32() - b.to_i32()) as i16;
         }
     }
 
