@@ -993,16 +993,15 @@ fn code_inter_4x4<S: Sample>(
     qp: i32,
     keep_dc: bool,
 ) -> ([i16; 16], u32, i32) {
-    let mut residual = [0i16; 16];
-    crate::encode::h264_intra::diff_block::<S, 4>(
+    let mut coeffs = [0i32; 16];
+    crate::encode::h264_intra::sub_fdct4(
+        ctx.enc,
         src,
         src_stride,
         &rec.data[off..],
         rec.stride,
-        &mut residual,
+        &mut coeffs,
     );
-    let mut coeffs = [0i32; 16];
-    (ctx.enc.fdct4)(&residual, &mut coeffs);
     let dc = coeffs[0];
     let m = (qp % 6) as usize;
     let qbits = qbits4(qp);
@@ -1568,16 +1567,15 @@ pub(crate) fn inter_residual_is_empty<S: Sample>(
                  list: usize,
                  qp: i32|
      -> ([i16; 16], i32) {
-        let mut residual = [0i16; 16];
-        crate::encode::h264_intra::diff_block::<S, 4>(
+        let mut coeffs = [0i32; 16];
+        crate::encode::h264_intra::sub_fdct4(
+            ctx.enc,
             src,
             ss,
             &plane.data[off..],
             plane.stride,
-            &mut residual,
+            &mut coeffs,
         );
-        let mut coeffs = [0i32; 16];
-        (ctx.enc.fdct4)(&residual, &mut coeffs);
         let qbits = qbits4(qp);
         let mut levels = [0i16; 16];
         (ctx.enc.quant4)(

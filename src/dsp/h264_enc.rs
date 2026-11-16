@@ -46,6 +46,35 @@ use crate::h264::tables::{DEQUANT4_INIT, DEQUANT8_INIT, DEQUANT8_INIT_SCAN};
 pub type Fdct4Fn = fn(residual: &[i16; 16], coeffs: &mut [i32; 16]);
 /// Forward 8x8 integer transform (8.5.13.2 run forwards).
 pub type Fdct8Fn = fn(residual: &[i16; 64], coeffs: &mut [i32; 64]);
+/// An 8-bit source block less its prediction, forward 4x4 transformed:
+/// [`Fdct4Fn`] of `src - pred` (row strides `ss`, `ps`), as
+/// [`sub_fdct4_scalar`] defines it.
+pub type SubFdct4Fn = fn(src: &[u8], ss: usize, pred: &[u8], ps: usize, coeffs: &mut [i32; 16]);
+/// The same for the 8x8 transform ([`sub_fdct8_scalar`]).
+pub type SubFdct8Fn = fn(src: &[u8], ss: usize, pred: &[u8], ps: usize, coeffs: &mut [i32; 64]);
+
+/// The definition [`SubFdct4Fn`] kernels are held to: the difference into
+/// a residual block, then the scalar transform.
+pub fn sub_fdct4_scalar(src: &[u8], ss: usize, pred: &[u8], ps: usize, coeffs: &mut [i32; 16]) {
+    let mut r = [0i16; 16];
+    for y in 0..4 {
+        for x in 0..4 {
+            r[y * 4 + x] = src[y * ss + x] as i16 - pred[y * ps + x] as i16;
+        }
+    }
+    fdct4_scalar(&r, coeffs);
+}
+
+/// The definition [`SubFdct8Fn`] kernels are held to.
+pub fn sub_fdct8_scalar(src: &[u8], ss: usize, pred: &[u8], ps: usize, coeffs: &mut [i32; 64]) {
+    let mut r = [0i16; 64];
+    for y in 0..8 {
+        for x in 0..8 {
+            r[y * 8 + x] = src[y * ss + x] as i16 - pred[y * ps + x] as i16;
+        }
+    }
+    fdct8_scalar(&r, coeffs);
+}
 /// Forward 4x4 Hadamard over the Intra_16x16 luma DC coefficients (8.5.10
 /// run forwards), in raster order.
 pub type Hadamard4Fn = fn(dc: &mut [i32; 16]);
@@ -130,6 +159,12 @@ pub struct H264EncDsp {
     /// and callers take the distortion table's SAD four times, which is
     /// what [`sad_x4_scalar`] defines.
     pub sad_x4: Option<SadX4Fn>,
+    /// An 8-bit block's difference from its prediction and its forward
+    /// 4x4 transform in one pass, where a rung has it; `None` and callers
+    /// difference into a residual and take [`Self::fdct4`].
+    pub sub_fdct4: Option<SubFdct4Fn>,
+    /// The same for the 8x8 transform.
+    pub sub_fdct8: Option<SubFdct8Fn>,
 }
 
 impl H264EncDsp {
@@ -146,6 +181,8 @@ impl H264EncDsp {
         quant8: quant8_scalar,
         satd_avg: None,
         sad_x4: None,
+        sub_fdct4: None,
+        sub_fdct8: None,
     };
 
     /// The best table for `cpu`: the scalar reference, then each rung of

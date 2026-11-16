@@ -32,6 +32,8 @@ pub fn install(d: &mut H264EncDsp, cpu: Cpu) {
         d.quant8 = quant8;
         d.satd_avg = Some(satd_avg);
         d.sad_x4 = Some(sad_x4);
+        d.sub_fdct4 = Some(sub_fdct4);
+        d.sub_fdct8 = Some(sub_fdct8);
     }
 }
 
@@ -254,6 +256,47 @@ fn fdct4(residual: &[i16; 16], coeffs: &mut [i32; 16]) {
             vst1q_s32(q.add(4 * i), *v);
         }
     }
+}
+
+/// [`super::h264_enc::SubFdct4Fn`]: each row's difference widened
+/// straight from the bytes (`usubl`) into [`fdct4`]'s lanes.
+fn sub_fdct4(src: &[u8], ss: usize, pred: &[u8], ps: usize, coeffs: &mut [i32; 16]) {
+    assert!(
+        src.len() >= 3 * ss + 4 && pred.len() >= 3 * ps + 4,
+        "block out of range"
+    );
+    unsafe {
+        use super::distortion_neon::load4;
+        let (s, p) = (src.as_ptr(), pred.as_ptr());
+        let row = |i: usize| {
+            let d = vreinterpretq_s16_u16(vsubl_u8(load4(s.add(i * ss)), load4(p.add(i * ps))));
+            vmovl_s16(vget_low_s16(d))
+        };
+        let t = fdct4_lanes(transpose4([row(0), row(1), row(2), row(3)]));
+        let o = fdct4_lanes(transpose4(t));
+        let q = coeffs.as_mut_ptr();
+        for (i, v) in o.iter().enumerate() {
+            vst1q_s32(q.add(4 * i), *v);
+        }
+    }
+}
+
+/// [`super::h264_enc::SubFdct8Fn`]: the difference rows straight into
+/// [`fdct8`]'s residual, one `usubl` each, then that transform.
+fn sub_fdct8(src: &[u8], ss: usize, pred: &[u8], ps: usize, coeffs: &mut [i32; 64]) {
+    assert!(
+        src.len() >= 7 * ss + 8 && pred.len() >= 7 * ps + 8,
+        "block out of range"
+    );
+    let mut r = [0i16; 64];
+    unsafe {
+        let (s, p) = (src.as_ptr(), pred.as_ptr());
+        for i in 0..8 {
+            let d = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(s.add(i * ss)), vld1_u8(p.add(i * ps))));
+            vst1q_s16(r.as_mut_ptr().add(8 * i), d);
+        }
+    }
+    fdct8(&r, coeffs);
 }
 
 fn hadamard4(dc: &mut [i32; 16]) {
@@ -538,6 +581,42 @@ mod tests {
                     "{w}x{h} trial {trial}"
                 );
             }
+        }
+    }
+
+    /// The fused difference and transform against its definition.
+    #[test]
+    fn sub_fdct_matches_scalar() {
+        let d = neon();
+        let (f4, f8) = (
+            d.sub_fdct4.expect("NEON installs it"),
+            d.sub_fdct8.expect("NEON installs it"),
+        );
+        let mut seed = 0x51u64;
+        for trial in 0..400 {
+            let mk = |seed: &mut u64| -> Vec<u8> {
+                (0..24 * 12)
+                    .map(|_| match trial % 4 {
+                        0 => 0,
+                        1 => 255,
+                        _ => lcg(seed) as u8,
+                    })
+                    .collect()
+            };
+            let (s, p) = (mk(&mut seed), mk(&mut seed));
+            let p = if trial % 8 == 1 {
+                vec![0u8; p.len()]
+            } else {
+                p
+            };
+            let (mut a, mut b) = ([0i32; 16], [0i32; 16]);
+            f4(&s, 24, &p, 19, &mut a);
+            crate::dsp::h264_enc::sub_fdct4_scalar(&s, 24, &p, 19, &mut b);
+            assert_eq!(a, b, "4x4 trial {trial}");
+            let (mut a, mut b) = ([0i32; 64], [0i32; 64]);
+            f8(&s, 24, &p, 19, &mut a);
+            crate::dsp::h264_enc::sub_fdct8_scalar(&s, 24, &p, 19, &mut b);
+            assert_eq!(a, b, "8x8 trial {trial}");
         }
     }
 

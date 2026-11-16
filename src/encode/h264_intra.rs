@@ -378,6 +378,58 @@ pub(crate) fn diff_block<S: Sample, const N: usize>(
     }
 }
 
+/// `src - pred` (`N` = 4) forward transformed: in one pass through the
+/// encode table's fused kernel for 8-bit samples where it has one, else
+/// the difference and then [`H264EncDsp::fdct4`].
+#[inline]
+pub(crate) fn sub_fdct4<S: Sample>(
+    enc: &crate::dsp::h264_enc::H264EncDsp,
+    src: &[S],
+    ss: usize,
+    pred: &[S],
+    ps: usize,
+    coeffs: &mut [i32; 16],
+) {
+    if let Some(f) = enc.sub_fdct4.filter(|_| S::BYTES == 1) {
+        // SAFETY: a one-byte `Sample` is `u8`.
+        let (s8, p8) = unsafe {
+            (
+                std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()),
+                std::slice::from_raw_parts(pred.as_ptr() as *const u8, pred.len()),
+            )
+        };
+        return f(s8, ss, p8, ps, coeffs);
+    }
+    let mut residual = [0i16; 16];
+    diff_block::<S, 4>(src, ss, pred, ps, &mut residual);
+    (enc.fdct4)(&residual, coeffs);
+}
+
+/// [`sub_fdct4`] for the 8x8 transform.
+#[inline]
+pub(crate) fn sub_fdct8<S: Sample>(
+    enc: &crate::dsp::h264_enc::H264EncDsp,
+    src: &[S],
+    ss: usize,
+    pred: &[S],
+    ps: usize,
+    coeffs: &mut [i32; 64],
+) {
+    if let Some(f) = enc.sub_fdct8.filter(|_| S::BYTES == 1) {
+        // SAFETY: a one-byte `Sample` is `u8`.
+        let (s8, p8) = unsafe {
+            (
+                std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()),
+                std::slice::from_raw_parts(pred.as_ptr() as *const u8, pred.len()),
+            )
+        };
+        return f(s8, ss, p8, ps, coeffs);
+    }
+    let mut residual = [0i16; 64];
+    diff_block::<S, 8>(src, ss, pred, ps, &mut residual);
+    (enc.fdct8)(&residual, coeffs);
+}
+
 pub(crate) fn code_block_8x8<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut Recon<S>,
@@ -388,10 +440,15 @@ pub(crate) fn code_block_8x8<S: Sample>(
     qp: i32,
     intra: bool,
 ) -> ([i16; 64], [u8; 4]) {
-    let mut residual = [0i16; 64];
-    diff_block::<S, 8>(src, src_stride, &rec.data[off..], rec.stride, &mut residual);
     let mut coeffs = [0i32; 64];
-    (ctx.enc.fdct8)(&residual, &mut coeffs);
+    sub_fdct8(
+        ctx.enc,
+        src,
+        src_stride,
+        &rec.data[off..],
+        rec.stride,
+        &mut coeffs,
+    );
     // `qbits8`, not `qbits4` + something: 8.5.13.1 dequantises an 8x8 by
     // `qP / 6 - 6` where 8.5.12.1 uses `qP / 6 - 4`, so the same
     // multiplier scale quantises with two bits more shift. The
@@ -517,10 +574,15 @@ pub(crate) fn code_block_4x4<S: Sample>(
     qp: i32,
     keep_dc: bool,
 ) -> ([i16; 16], u32, i32) {
-    let mut residual = [0i16; 16];
-    diff_block::<S, 4>(src, src_stride, &rec.data[off..], rec.stride, &mut residual);
     let mut coeffs = [0i32; 16];
-    (ctx.enc.fdct4)(&residual, &mut coeffs);
+    sub_fdct4(
+        ctx.enc,
+        src,
+        src_stride,
+        &rec.data[off..],
+        rec.stride,
+        &mut coeffs,
+    );
     let dc = coeffs[0];
     let m = (qp % 6) as usize;
     let qbits = qbits4(qp);
