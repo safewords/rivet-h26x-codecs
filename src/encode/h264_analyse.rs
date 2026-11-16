@@ -140,6 +140,25 @@ pub(crate) struct AnalysisCfg {
     /// 17,500 P searches and 25 of 18,300 B ones would have won the
     /// list's 16x16 after refinement.
     pub(crate) refine_ratio: f32,
+    /// I pictures quantise every candidate the comparison codes by the
+    /// trellis, not only the winner (as `trellis_rd` does in P and B
+    /// pictures): each block's mode is chosen against the reconstruction
+    /// the blocks after it will predict from, where the plain quantiser's
+    /// reconstruction was not the one the stream carries.
+    pub(crate) i_trellis_rd: bool,
+    /// I pictures: per Intra_4x4 / Intra_8x8 block, the modes whose
+    /// estimate (SATD plus mode bits) is within this factor of the best
+    /// are coded and compared on `SSD + lambda * R`, `R` the block's mode
+    /// and residual bins priced from the macroblock's context states ...
+    pub(crate) i_rd_ratio: f32,
+    /// ... at most this many of them (1: the estimate decides).
+    pub(crate) i_rd_modes: usize,
+    /// I pictures: the best this many Intra_16x16 modes by estimate are
+    /// coded and priced, not only the best one.
+    pub(crate) i_rd_i16: usize,
+    /// I pictures: the best this many chroma modes by estimate are priced
+    /// with the chosen luma (whole macroblock), not only the best one.
+    pub(crate) i_rd_chroma: usize,
 }
 
 impl AnalysisCfg {
@@ -202,6 +221,11 @@ impl AnalysisCfg {
         ref_lead: 1.2,
         bi_ratio: 1.05,
         refine_ratio: 1.5,
+        i_trellis_rd: true,
+        i_rd_ratio: 1.5,
+        i_rd_modes: 4,
+        i_rd_i16: 2,
+        i_rd_chroma: 2,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, and
@@ -263,6 +287,11 @@ impl AnalysisCfg {
         ref_lead: 0.0,
         bi_ratio: 1.05,
         refine_ratio: 0.0,
+        i_trellis_rd: false,
+        i_rd_ratio: 1.0,
+        i_rd_modes: 1,
+        i_rd_i16: 1,
+        i_rd_chroma: 1,
     };
 
     /// The most thorough tier: more references, refinement and candidates
@@ -316,6 +345,11 @@ impl AnalysisCfg {
         ref_lead: 0.0,
         bi_ratio: 1.05,
         refine_ratio: 0.0,
+        i_trellis_rd: true,
+        i_rd_ratio: 2.0,
+        i_rd_modes: 9,
+        i_rd_i16: 4,
+        i_rd_chroma: 4,
     };
 
     /// The tier for a preset.
@@ -676,6 +710,134 @@ fn mode_bits(mode: u8, predicted: u8) -> f32 {
     if mode == predicted { 1.0 } else { 4.0 }
 }
 
+/// The modes whose cost is at most `limit`, cheapest first, at most
+/// `max` of them, and how many.
+fn rd_modes<const N: usize>(costs: &[f32; N], limit: f32, max: usize) -> ([u8; N], usize) {
+    let mut idx = [0u8; N];
+    let mut n = 0;
+    for (m, &c) in costs.iter().enumerate() {
+        if c <= limit {
+            idx[n] = m as u8;
+            n += 1;
+        }
+    }
+    idx[..n].sort_by(|&a, &b| costs[a as usize].total_cmp(&costs[b as usize]));
+    (idx, n.min(max))
+}
+
+/// What a per-block rate-distortion choice of Intra_4x4 / Intra_8x8 modes
+/// prices with: the CABAC context states the macroblock starts from and
+/// the squared-error multiplier.
+#[derive(Clone, Copy)]
+struct BlockRd<'a> {
+    states: &'a [u8; 1024],
+    lam: f32,
+    /// Modes whose SATD estimate is within this factor of the best are
+    /// coded and priced ...
+    ratio: f32,
+    /// ... at most this many.
+    max: usize,
+}
+
+impl BlockRd<'_> {
+    #[inline]
+    fn bits(&self, ctx: usize, bin: u32) -> f32 {
+        crate::cabac_enc::state_bits(self.states[ctx], bin)
+    }
+
+    /// The bits of an Intra_NxN mode: `prev_intra_pred_mode_flag` (ctxIdx
+    /// 68) and, when the mode is not the predicted one, its three
+    /// `rem_intra_pred_mode` bins (ctxIdx 69), 9.3.3.1.1 / Table 9-34.
+    fn mode(&self, mode: u8, predicted: u8) -> f32 {
+        if mode == predicted {
+            self.bits(68, 1)
+        } else {
+            let rem = if mode < predicted { mode } else { mode - 1 };
+            self.bits(68, 0)
+                + (0..3)
+                    .map(|b| self.bits(69, (rem as u32 >> b) & 1))
+                    .sum::<f32>()
+        }
+    }
+
+    /// The bits of one frame-coded residual block of Intra_NxN luma —
+    /// ctxBlockCat 2 (4x4, `n` 16, with its `coded_block_flag` at
+    /// increment `cbf_inc`) or 5 (8x8, `n` 64) — levels in raster order,
+    /// priced bin by bin from the states (9.3.3.1.3; the bypass bins at
+    /// one bit each).
+    fn residual(&self, levels: &[i16], n: usize, cbf_inc: usize) -> f32 {
+        use crate::h264::tables::{ZIGZAG4X4, ZIGZAG8X8};
+        use crate::h264::tables_gen::{LAST_COEFF_8X8_CTX, SIG_COEFF_8X8_CTX};
+        let eight = n == 64;
+        let (sig, last, abs) = if eight {
+            (402, 417, 426)
+        } else {
+            (134, 195, 247)
+        };
+        let scan: &[u8] = if eight { &ZIGZAG8X8 } else { &ZIGZAG4X4 };
+        let mut at = [0i16; 64];
+        let mut lastpos = None;
+        for (i, &r) in scan.iter().enumerate() {
+            at[i] = levels[r as usize];
+            if at[i] != 0 {
+                lastpos = Some(i);
+            }
+        }
+        let mut b = 0.0;
+        let Some(lp) = lastpos else {
+            return if eight {
+                0.0
+            } else {
+                self.bits(93 + cbf_inc, 0)
+            };
+        };
+        if !eight {
+            b += self.bits(93 + cbf_inc, 1);
+        }
+        for (i, &l) in at.iter().enumerate().take((n - 1).min(lp + 1)) {
+            let (s, t) = if eight {
+                (
+                    sig + SIG_COEFF_8X8_CTX[0][i] as usize,
+                    last + LAST_COEFF_8X8_CTX[i] as usize,
+                )
+            } else {
+                (sig + i, last + i)
+            };
+            if l == 0 {
+                b += self.bits(s, 0);
+            } else {
+                b += self.bits(s, 1) + self.bits(t, (i == lp) as u32);
+            }
+        }
+        let (mut eq1, mut gt1) = (0usize, 0usize);
+        for &l in at[..=lp].iter().rev() {
+            if l == 0 {
+                continue;
+            }
+            let m = l.unsigned_abs() as u32 - 1;
+            let inc0 = if gt1 != 0 { 0 } else { (1 + eq1).min(4) };
+            b += 1.0; // the sign
+            if m == 0 {
+                b += self.bits(abs + inc0, 0);
+                eq1 += 1;
+                continue;
+            }
+            b += self.bits(abs + inc0, 1);
+            let inc = 5 + gt1.min(4);
+            let pre = m.min(14);
+            b += (pre - 1) as f32 * self.bits(abs + inc, 1);
+            if m < 14 {
+                b += self.bits(abs + inc, 0);
+            } else {
+                let v = m - 14;
+                b += (2 * (31 - (v + 1).leading_zeros()) + 1) as f32;
+            }
+            gt1 += 1;
+        }
+        b
+    }
+}
+
 /// Intra_4x4 over the macroblock: per block (decode order), each legal
 /// mode scored by SATD plus `lam` times its mode bits, the winner coded
 /// and reconstructed before the next block predicts from it. `None` when
@@ -691,6 +853,7 @@ fn i4x4<S: Sample>(
     nb: &Nb,
     lam: f32,
     budget: f32,
+    rd: Option<BlockRd>,
 ) -> Option<IntraCand> {
     let mb = nb.avail;
     let base = rec.offset(px as isize, py as isize);
@@ -724,6 +887,7 @@ fn i4x4<S: Sample>(
         let edge = Edge4::gather(rec, boff, rec.stride, av);
         let mut best = (f32::MAX, 2u8);
         let mut preds = [[S::default(); 16]; 9];
+        let mut costs = [f32::MAX; 9];
         for mode in 0..9u8 {
             if !mode_nxn_available(mode, av) {
                 continue;
@@ -732,6 +896,7 @@ fn i4x4<S: Sample>(
             let _ = pred_4x4(&edge, mode, av, ctx.bit_depth, pred);
             let c = (ctx.dist.satd)(&src[soff..], ss, pred, 4, 4, 4) as f32
                 + lam * mode_bits(mode, predicted);
+            costs[mode as usize] = c;
             if c < best.0 {
                 best = (c, mode);
             }
@@ -740,15 +905,69 @@ fn i4x4<S: Sample>(
         if est > budget {
             return None;
         }
-        chosen[raster] = best.1;
-        put_block::<S, 4>(rec, boff, &preds[best.1 as usize]);
-        let (lv, n, _) = code_block_4x4(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
+        let mut done = None;
+        if let Some(rd) = rd {
+            let (order, n) = rd_modes::<9>(&costs, best.0 * rd.ratio, rd.max);
+            if n > 1 {
+                // The survivors coded and priced: SSD plus lambda times the
+                // block's mode and residual bins.
+                let cbf_inc = {
+                    let a = if bx > 0 {
+                        dec.nz_luma[raster - 1] != 0
+                    } else {
+                        true
+                    };
+                    let b = if by > 0 {
+                        dec.nz_luma[raster - 4] != 0
+                    } else {
+                        true
+                    };
+                    a as usize + 2 * b as usize
+                };
+                let mut keep = (f32::MAX, 2u8, [0i16; 16], 0u32, [S::default(); 16]);
+                for &mode in &order[..n] {
+                    put_block::<S, 4>(rec, boff, &preds[mode as usize]);
+                    let (lv, nz, _) =
+                        code_block_4x4(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
+                    if nz != 0 {
+                        reconstruct_4x4(ctx, rec, boff, &lv, 0, ctx.qp_prime, None);
+                    }
+                    let d = (ctx.dist.ssd)(&src[soff..], ss, &rec.data[boff..], rec.stride, 4, 4);
+                    if d as f32 >= keep.0 {
+                        continue; // rate is never negative
+                    }
+                    let j = d as f32
+                        + rd.lam * (rd.mode(mode, predicted) + rd.residual(&lv, 16, cbf_inc));
+                    if j < keep.0 {
+                        let mut px4 = [S::default(); 16];
+                        for y in 0..4 {
+                            px4[y * 4..y * 4 + 4].copy_from_slice(
+                                &rec.data[boff + y * rec.stride..boff + y * rec.stride + 4],
+                            );
+                        }
+                        keep = (j, mode, lv, nz, px4);
+                    }
+                }
+                put_block::<S, 4>(rec, boff, &keep.4);
+                done = Some((keep.1, keep.2, keep.3));
+            }
+        }
+        let (m, lv, n) = match done {
+            Some(d) => d,
+            None => {
+                put_block::<S, 4>(rec, boff, &preds[best.1 as usize]);
+                let (lv, n, _) =
+                    code_block_4x4(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
+                if n != 0 {
+                    reconstruct_4x4(ctx, rec, boff, &lv, 0, ctx.qp_prime, None);
+                }
+                (best.1, lv, n)
+            }
+        };
+        chosen[raster] = m;
         dec.luma[raster] = lv;
         dec.nz_luma[raster] = n as u8;
-        if n != 0 {
-            reconstruct_4x4(ctx, rec, boff, &lv, 0, ctx.qp_prime, None);
-        }
-        dec.luma_pred[raster] = as_syntax(best.1, predicted);
+        dec.luma_pred[raster] = as_syntax(m, predicted);
     }
     dec.kind = MbKind::I4x4;
     for blk8 in 0..4 {
@@ -775,6 +994,7 @@ fn i8x8<S: Sample>(
     nb: &Nb,
     lam: f32,
     budget: f32,
+    rd: Option<BlockRd>,
 ) -> Option<IntraCand> {
     let mb = nb.avail;
     let base = rec.offset(px as isize, py as isize);
@@ -805,6 +1025,7 @@ fn i8x8<S: Sample>(
         let edge = Edge8::gather(rec, boff, rec.stride, av);
         let mut best = (f32::MAX, 2u8);
         let mut preds = [[S::default(); 64]; 9];
+        let mut costs = [f32::MAX; 9];
         for mode in 0..9u8 {
             if !mode_nxn_available(mode, av) {
                 continue;
@@ -813,6 +1034,7 @@ fn i8x8<S: Sample>(
             let _ = pred_8x8(&edge, mode, av, ctx.bit_depth, pred);
             let c = (ctx.dist.satd)(&src[soff..], ss, pred, 8, 8, 8) as f32
                 + lam * mode_bits(mode, predicted);
+            costs[mode as usize] = c;
             if c < best.0 {
                 best = (c, mode);
             }
@@ -821,14 +1043,51 @@ fn i8x8<S: Sample>(
         if est > budget {
             return None;
         }
-        put_block::<S, 8>(rec, boff, &preds[best.1 as usize]);
-        let (lv, counts) = code_block_8x8(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
-        reconstruct_8x8(ctx, rec, boff, &lv, 0, ctx.qp_prime);
+        let mut done = None;
+        if let Some(rd) = rd {
+            let (order, n) = rd_modes::<9>(&costs, best.0 * rd.ratio, rd.max);
+            if n > 1 {
+                let mut keep = (f32::MAX, 2u8, [0i16; 64], [0u8; 4], [S::default(); 64]);
+                for &mode in &order[..n] {
+                    put_block::<S, 8>(rec, boff, &preds[mode as usize]);
+                    let (lv, counts) =
+                        code_block_8x8(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
+                    reconstruct_8x8(ctx, rec, boff, &lv, 0, ctx.qp_prime);
+                    let d = (ctx.dist.ssd)(&src[soff..], ss, &rec.data[boff..], rec.stride, 8, 8);
+                    if d as f32 >= keep.0 {
+                        continue; // rate is never negative
+                    }
+                    let j =
+                        d as f32 + rd.lam * (rd.mode(mode, predicted) + rd.residual(&lv, 64, 0));
+                    if j < keep.0 {
+                        let mut px8 = [S::default(); 64];
+                        for y in 0..8 {
+                            px8[y * 8..y * 8 + 8].copy_from_slice(
+                                &rec.data[boff + y * rec.stride..boff + y * rec.stride + 8],
+                            );
+                        }
+                        keep = (j, mode, lv, counts, px8);
+                    }
+                }
+                put_block::<S, 8>(rec, boff, &keep.4);
+                done = Some((keep.1, keep.2, keep.3));
+            }
+        }
+        let (m, lv, counts) = match done {
+            Some(d) => d,
+            None => {
+                put_block::<S, 8>(rec, boff, &preds[best.1 as usize]);
+                let (lv, counts) =
+                    code_block_8x8(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
+                reconstruct_8x8(ctx, rec, boff, &lv, 0, ctx.qp_prime);
+                (best.1, lv, counts)
+            }
+        };
         dec.luma.as_flattened_mut()[blk8 * 64..blk8 * 64 + 64].copy_from_slice(&lv);
-        let syn = as_syntax(best.1, predicted);
+        let syn = as_syntax(m, predicted);
         for (sub, &r) in quad_rasters(blk8).iter().enumerate() {
             dec.nz_luma[r] = counts[sub];
-            chosen[r] = best.1;
+            chosen[r] = m;
             dec.luma_pred[r] = syn;
         }
         if counts.iter().any(|&n| n != 0) {
@@ -857,12 +1116,7 @@ fn best_i16<S: Sample>(
     lam: f32,
 ) -> (f32, u8) {
     let off = rec.offset(px as isize, py as isize);
-    let av = crate::h264::intra::IntraAvail {
-        top: mb.top,
-        left: mb.left,
-        top_left: mb.top_left,
-        top_right: false,
-    };
+    let av = i16_avail(mb);
     let stride = rec.stride;
     let mut best = (f32::MAX, 2u8);
     for mode in 0..4u8 {
@@ -879,6 +1133,41 @@ fn best_i16<S: Sample>(
     (best.0 + 2.0 * lam, best.1)
 }
 
+/// What an Intra_16x16 (or chroma) prediction may read.
+fn i16_avail(mb: MbAvail) -> crate::h264::intra::IntraAvail {
+    crate::h264::intra::IntraAvail {
+        top: mb.top,
+        left: mb.left,
+        top_left: mb.top_left,
+        top_right: false,
+    }
+}
+
+/// Every Intra_16x16 mode's SATD plus mode bits, cheapest first (the
+/// unavailable ones last, at `f32::MAX`), predicting into `rec`.
+fn i16_ranked<S: Sample>(
+    ctx: &IntraCtx<S>,
+    rec: &mut Recon<S>,
+    off: usize,
+    av: crate::h264::intra::IntraAvail,
+    src: &[S],
+    ss: usize,
+    lam: f32,
+) -> [(f32, u8); 4] {
+    let stride = rec.stride;
+    let mut r = [(f32::MAX, 0u8), (f32::MAX, 1), (f32::MAX, 2), (f32::MAX, 3)];
+    for mode in 0..4u8 {
+        if predict_16x16(rec, off, stride, mode, av, ctx.bit_depth).is_err() {
+            continue;
+        }
+        let c = (ctx.dist.satd)(src, ss, &rec.data[off..], stride, 16, 16) as f32
+            + lam * if mode == 2 { 1.0 } else { 2.0 };
+        r[mode as usize].0 = c;
+    }
+    r.sort_by(|a, b| a.0.total_cmp(&b.0));
+    r
+}
+
 /// The chroma prediction mode by SATD over both components, plus its
 /// bits; returns the mode.
 fn best_chroma_mode<S: Sample>(
@@ -890,6 +1179,37 @@ fn best_chroma_mode<S: Sample>(
     mb: MbAvail,
     lam: f32,
 ) -> u8 {
+    let r = chroma_costs(ctx, rec, mb_x, mb_y, src, mb, lam);
+    // The first cheapest in mode order.
+    r.iter().fold(r[0], |b, &c| if c.0 < b.0 { c } else { b }).1
+}
+
+/// Every chroma prediction mode's SATD over both components plus its
+/// bits, cheapest first (the unavailable ones last, at `f32::MAX`).
+fn chroma_ranked<S: Sample>(
+    ctx: &IntraCtx<S>,
+    rec: &mut [Recon<S>],
+    mb_x: usize,
+    mb_y: usize,
+    src: &SrcMb<S>,
+    mb: MbAvail,
+    lam: f32,
+) -> [(f32, u8); 4] {
+    let mut r = chroma_costs(ctx, rec, mb_x, mb_y, src, mb, lam);
+    r.sort_by(|a, b| a.0.total_cmp(&b.0));
+    r
+}
+
+/// [`chroma_ranked`] in mode order.
+fn chroma_costs<S: Sample>(
+    ctx: &IntraCtx<S>,
+    rec: &mut [Recon<S>],
+    mb_x: usize,
+    mb_y: usize,
+    src: &SrcMb<S>,
+    mb: MbAvail,
+    lam: f32,
+) -> [(f32, u8); 4] {
     let (cw, ch) = (8usize, ctx.chroma_h);
     let (cx, cy) = (mb_x * cw, mb_y * ch);
     let av = crate::h264::intra::IntraAvail {
@@ -898,7 +1218,7 @@ fn best_chroma_mode<S: Sample>(
         top_left: mb.top_left,
         top_right: false,
     };
-    let mut best = (f32::MAX, 0u8);
+    let mut r = [(f32::MAX, 0u8), (f32::MAX, 1), (f32::MAX, 2), (f32::MAX, 3)];
     for mode in 0..4u8 {
         let mut cost = lam * [1.0, 2.0, 3.0, 3.0][mode as usize];
         let mut ok = true;
@@ -930,11 +1250,11 @@ fn best_chroma_mode<S: Sample>(
                 ch,
             ) as f32;
         }
-        if ok && cost < best.0 {
-            best = (cost, mode);
+        if ok {
+            r[mode as usize] = (cost, mode);
         }
     }
-    best.1
+    r
 }
 
 /// The cheapest intra estimate this macroblock has — Intra_16x16's —
@@ -987,6 +1307,22 @@ pub(crate) fn intra_mb<S: Sample>(
     let lam1 = lambda_satd(ctx.qp);
     let lam2 = lambda_ssd(ctx.qp) as f64;
     let (px, py) = (mb_x * 16, mb_y * 16);
+    // An I picture's macroblock: decided by pricing, with the trellis
+    // handed over for the winner (a P or B macroblock priced here brings
+    // its trellis in `ctx` instead, and one decided on its estimates is
+    // not priced).
+    let ipic = cfg.rd && trellis.is_some() && !ctx.c444;
+    // Every candidate quantised by that trellis, not only the winner: each
+    // block's mode is then chosen against the reconstruction the next
+    // blocks will predict from.
+    let trd = ipic && cfg.i_trellis_rd;
+    let trd_store;
+    let ctx: &IntraCtx<S> = if trd {
+        trd_store = IntraCtx { trellis, ..*ctx };
+        &trd_store
+    } else {
+        ctx
+    };
     if ctx.c444 {
         // 4:4:4 codes its chroma luma-style with the luma's modes; the
         // established decision handles that coupling.
@@ -1011,12 +1347,19 @@ pub(crate) fn intra_mb<S: Sample>(
     }
     // Chroma first: one mode for every luma candidate.
     let mut chroma = MbDecision::default();
+    let mut chroma_r = [(f32::MAX, 0u8); 4];
+    let (k16, kc) = if ipic {
+        (cfg.i_rd_i16, cfg.i_rd_chroma)
+    } else {
+        (1, 1)
+    };
     if ctx.chroma_h != 0 && !cfg.rd {
         // Decided on the estimates, the winner coded again below: the
         // chroma mode is all the candidates need.
         chroma.chroma_mode = best_chroma_mode(ctx, rec, mb_x, mb_y, src, nb.avail, lam1);
     } else if ctx.chroma_h != 0 {
-        let mode = best_chroma_mode(ctx, rec, mb_x, mb_y, src, nb.avail, lam1);
+        chroma_r = chroma_ranked(ctx, rec, mb_x, mb_y, src, nb.avail, lam1);
+        let mode = chroma_r[0].1;
         let (cx, cy) = (mb_x * 8, mb_y * ctx.chroma_h);
         let co = cy * src.cs + cx;
         code_chroma(
@@ -1032,8 +1375,19 @@ pub(crate) fn intra_mb<S: Sample>(
         );
     }
     let sy = &src.y[py * src.ys + px..];
-    let (e16, m16) =
-        i16.unwrap_or_else(|| best_i16(ctx, &mut rec[0], px, py, sy, src.ys, nb.avail, lam1));
+    // An I picture pricing more than one Intra_16x16 mode ranks them all
+    // (`best_i16`'s estimate is the first's).
+    let i16r = if k16 > 1 && i16.is_none() {
+        let off = rec[0].offset(px as isize, py as isize);
+        i16_ranked(ctx, &mut rec[0], off, i16_avail(nb.avail), sy, src.ys, lam1)
+    } else {
+        [(f32::MAX, 0u8); 4]
+    };
+    let (e16, m16) = match i16 {
+        Some(e) => e,
+        None if k16 > 1 => (i16r[0].0 + 2.0 * lam1, i16r[0].1),
+        None => best_i16(ctx, &mut rec[0], px, py, sy, src.ys, nb.avail, lam1),
+    };
     // A candidate the caller compares against `bound` (with the chroma
     // error joined) and whose luma error alone already reaches it, or the
     // best one here, cannot win: rate is never negative and wins are
@@ -1086,8 +1440,27 @@ pub(crate) fn intra_mb<S: Sample>(
         budget = budget.min(bound as f32);
     }
     let mut floor = e16;
+    let block_rd = trellis
+        .filter(|_| ipic && cfg.i_rd_modes > 1)
+        .map(|t| BlockRd {
+            states: &t.ctx,
+            lam: lam2 as f32,
+            ratio: cfg.i_rd_ratio,
+            max: cfg.i_rd_modes,
+        });
     if ctx.t8x8
-        && let Some(mut c) = i8x8(ctx, &mut rec[0], px, py, sy, src.ys, nb, lam1, budget)
+        && let Some(mut c) = i8x8(
+            ctx,
+            &mut rec[0],
+            px,
+            py,
+            sy,
+            src.ys,
+            nb,
+            lam1,
+            budget,
+            block_rd,
+        )
     {
         floor = floor.min(c.est);
         with_chroma(&mut c.dec);
@@ -1096,7 +1469,7 @@ pub(crate) fn intra_mb<S: Sample>(
     }
     if cfg.i4x4 {
         let b = budget.min(floor * 1.15);
-        if let Some(mut c) = i4x4(ctx, &mut rec[0], px, py, sy, src.ys, nb, lam1, b) {
+        if let Some(mut c) = i4x4(ctx, &mut rec[0], px, py, sy, src.ys, nb, lam1, b, block_rd) {
             floor = floor.min(c.est);
             with_chroma(&mut c.dec);
             consider(c.dec, c.modes, c.est, rec, rate);
@@ -1113,13 +1486,63 @@ pub(crate) fn intra_mb<S: Sample>(
         }
         with_chroma(&mut d);
         consider(d, [2u8; 16], e16, rec, rate);
+        // An I picture's next-best Intra_16x16 modes by estimate, priced
+        // too.
+        for &(c, m) in i16r.iter().take(k16) {
+            if m == m16 || c == f32::MAX {
+                continue;
+            }
+            let mut d = MbDecision::default();
+            code_i16x16(ctx, &mut rec[0], px, py, sy, src.ys, m, nb.avail, &mut d);
+            with_chroma(&mut d);
+            consider(d, [2u8; 16], c + 2.0 * lam1, rec, rate);
+        }
     }
     let Some((j, mut dec, modes)) = best else {
         // Every candidate reached the bound: the caller keeps its own.
         debug_assert!(bound.is_finite(), "Intra_16x16 is always a candidate");
         return (MbDecision::default(), [2u8; 16], f64::INFINITY);
     };
-    match trellis {
+    if kc > 1 && ctx.chroma_h != 0 {
+        // The chroma mode again, by pricing: its prediction reads only the
+        // neighbours, so the luma decision stands.
+        let (cx, cy) = (mb_x * 8, mb_y * ctx.chroma_h);
+        let co = cy * src.cs + cx;
+        let csrc = [&src.c[0][co..], &src.c[1][co..]];
+        let csd = |rec: &[Recon<S>]| {
+            (ssd_mb(ctx, rec, src, mb_x, mb_y) - ssd_luma(ctx, rec, src, mb_x, mb_y)) as f64
+        };
+        let mut cbest = csd(rec) + lam2 * rate(&dec);
+        let mut last = dec.chroma_mode;
+        for &(c, m) in chroma_r.iter().take(kc) {
+            if m == dec.chroma_mode || c == f32::MAX {
+                continue;
+            }
+            let mut cm = MbDecision::default();
+            code_chroma(ctx, rec, cx, cy, &csrc, src.cs, m, nb.avail, &mut cm);
+            last = m;
+            let mut d2 = dec.clone();
+            d2.chroma_mode = cm.chroma_mode;
+            d2.cbp_chroma = cm.cbp_chroma;
+            d2.chroma_dc = cm.chroma_dc;
+            d2.chroma_ac = cm.chroma_ac;
+            d2.nz_chroma = cm.nz_chroma;
+            let residual = d2.kind == MbKind::I16x16 || d2.cbp_luma != 0 || d2.cbp_chroma != 0;
+            d2.qp_delta = delta(ctx.qp, qp_pred, residual);
+            let jc = csd(rec) + lam2 * rate(&d2);
+            if jc < cbest {
+                cbest = jc;
+                dec = d2;
+            }
+        }
+        if last != dec.chroma_mode {
+            // The winner's samples back, for the macroblocks after.
+            let mut cm = MbDecision::default();
+            let mode = dec.chroma_mode;
+            code_chroma(ctx, rec, cx, cy, &csrc, src.cs, mode, nb.avail, &mut cm);
+        }
+    }
+    match trellis.filter(|_| !trd) {
         Some(t) => {
             let tctx = IntraCtx {
                 trellis: Some(t),
