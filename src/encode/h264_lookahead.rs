@@ -62,6 +62,8 @@ pub(crate) struct Lookahead<S: Sample> {
     /// `(picture, ref0, ref1)`: one list (`ref1 == u64::MAX`) or two.
     costs: HashMap<(u64, u64, u64), Vec<BlockCost>>,
     dist: DistortionDsp<S>,
+    /// The encode table's four-way SAD, for 8-bit pictures.
+    sad_x4: Option<crate::dsp::h264_enc::SadX4Fn>,
 }
 
 impl<S: Sample> Lookahead<S> {
@@ -74,6 +76,9 @@ impl<S: Sample> Lookahead<S> {
             pics: BTreeMap::new(),
             costs: HashMap::new(),
             dist: DistortionDsp::new(crate::dsp::Cpu::detect_honouring_env()),
+            sad_x4: crate::dsp::h264_enc::H264EncDsp::new(crate::dsp::Cpu::detect_honouring_env())
+                .sad_x4
+                .filter(|_| S::BYTES == 1),
         }
     }
 
@@ -243,6 +248,45 @@ impl<S: Sample> Lookahead<S> {
             (self.dist.sad)(src, cur.stride, &refp.data[o..], refp.stride, 8, 8)
                 + 2 * (mx.unsigned_abs() + my.unsigned_abs()).min(64)
         };
+        // The SADs of up to eight points, in order: four at a time where
+        // the four-way kernel is (the same sums), one at a time otherwise.
+        let sads = |pts: &[(i32, i32)], out: &mut [u32; 8]| {
+            let n = pts.len();
+            match self.sad_x4 {
+                Some(f) if n > 1 => {
+                    // SAFETY: `sad_x4` is set only for a one-byte `Sample`,
+                    // which is `u8`.
+                    let as8 = |v: &[S]| unsafe {
+                        std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len())
+                    };
+                    let at = |k: usize| {
+                        let (mx, my) = pts[k.min(n - 1)];
+                        as8(&refp.data[refp.offset((x + mx) as isize, (y + my) as isize)..])
+                    };
+                    let mut k = 0;
+                    while k < n {
+                        let d = f(
+                            as8(src),
+                            cur.stride,
+                            [at(k), at(k + 1), at(k + 2), at(k + 3)],
+                            refp.stride,
+                            8,
+                            8,
+                        );
+                        for j in 0..4.min(n - k) {
+                            let (mx, my) = pts[k + j];
+                            out[k + j] = d[j] + 2 * (mx.unsigned_abs() + my.unsigned_abs()).min(64);
+                        }
+                        k += 4;
+                    }
+                }
+                _ => {
+                    for (o, &(mx, my)) in out.iter_mut().zip(pts) {
+                        *o = sad(mx, my);
+                    }
+                }
+            }
+        };
         let mut best = (sad(0, 0), (0, 0));
         for &(cx, cy) in cands {
             let (cx, cy) = ((cx as i32).clamp(lx, hx), (cy as i32).clamp(ly, hy));
@@ -275,18 +319,21 @@ impl<S: Sample> Lookahead<S> {
                     (r | r >> 6 | r >> 12) & 0x3f
                 }
             };
+            let (mut pts, mut dir, mut n) = ([(0, 0); 8], [0usize; 8], 0);
             for (k, &(dx, dy)) in HEX.iter().enumerate() {
-                if live >> k & 1 == 0 {
-                    continue;
-                }
                 let (mx, my) = (c.0 + dx, c.1 + dy);
-                if mx < lx || mx > hx || my < ly || my > hy {
+                if live >> k & 1 == 0 || mx < lx || mx > hx || my < ly || my > hy {
                     continue;
                 }
-                let s = sad(mx, my);
-                if s < best.0 {
-                    best = (s, (mx, my));
-                    step = Some(k);
+                (pts[n], dir[n]) = ((mx, my), k);
+                n += 1;
+            }
+            let mut sc = [0u32; 8];
+            sads(&pts[..n], &mut sc);
+            for j in 0..n {
+                if sc[j] < best.0 {
+                    best = (sc[j], pts[j]);
+                    step = Some(dir[j]);
                 }
             }
             if best.1 == c {
@@ -295,6 +342,7 @@ impl<S: Sample> Lookahead<S> {
             from = step;
         }
         let c = best.1;
+        let (mut pts, mut n) = ([(0, 0); 8], 0);
         for (dx, dy) in [
             (-1, -1),
             (0, -1),
@@ -309,9 +357,14 @@ impl<S: Sample> Lookahead<S> {
             if mx < lx || mx > hx || my < ly || my > hy {
                 continue;
             }
-            let s = sad(mx, my);
-            if s < best.0 {
-                best = (s, (mx, my));
+            pts[n] = (mx, my);
+            n += 1;
+        }
+        let mut sc = [0u32; 8];
+        sads(&pts[..n], &mut sc);
+        for j in 0..n {
+            if sc[j] < best.0 {
+                best = (sc[j], pts[j]);
             }
         }
         let (mx, my) = best.1;
