@@ -64,6 +64,11 @@ pub(crate) struct SubBlockTables {
     ctx4: [[u8; 16]; 3],
     /// Inverse sub-block scan: `[scan_idx][log2_sb][yS * w + xS]` = index.
     pub(crate) inv_sb: [[[u8; 64]; 4]; 3],
+    /// The whole-block scan position of every raster index, sub-block
+    /// major (`16 * sub-block + position within it`, the order the
+    /// writer codes in reverse): `[scan_idx][log2 - 2][y * n + x]`. The
+    /// last significant coefficient is the nonzero one of greatest key.
+    pub(crate) key: [[[u16; 1024]; 4]; 3],
 }
 
 pub(crate) fn sub_block_tables() -> &'static SubBlockTables {
@@ -75,6 +80,7 @@ pub(crate) fn sub_block_tables() -> &'static SubBlockTables {
             inv4: [[0; 16]; 3],
             ctx4: [[0; 16]; 3],
             inv_sb: [[[0; 64]; 4]; 3],
+            key: [[[0; 1024]; 4]; 3],
         };
         for scan in 0..3 {
             for log2_sb in 0..4 {
@@ -125,6 +131,16 @@ pub(crate) fn sub_block_tables() -> &'static SubBlockTables {
                         }
                         _ => 2,
                     };
+                }
+            }
+            for log2_sb in 0..4 {
+                let n = 4usize << log2_sb;
+                for y in 0..n {
+                    for x in 0..n {
+                        let sb = t.inv_sb[scan][log2_sb][((y >> 2) << log2_sb) + (x >> 2)];
+                        let p = t.inv4[scan][((y & 3) << 2) + (x & 3)];
+                        t.key[scan][log2_sb][y * n + x] = u16::from(sb) * 16 + u16::from(p);
+                    }
                 }
             }
         }
@@ -771,25 +787,22 @@ pub(crate) fn write_residual(
     let sb_w = 1usize << log2_sb;
     let tabs = sub_block_tables();
     let scan = p.scan_idx as usize;
-    let mut last_x = 0usize;
-    let mut last_y = 0usize;
-    let mut best = -1i32;
-    for y in 0..n {
-        for x in 0..n {
-            if coeffs[y * n + x] != 0 {
-                let sb =
-                    tabs.inv_sb[scan][log2_sb as usize][((y >> 2) << log2_sb) + (x >> 2)] as i32;
-                let pos = tabs.inv4[scan][((y & 3) << 2) + (x & 3)] as i32;
-                let key = sb * 16 + pos;
-                if key > best {
-                    best = key;
-                    last_x = x;
-                    last_y = y;
-                }
-            }
-        }
-    }
+    // The greatest key of a nonzero coefficient, as a plain maximum over
+    // the block (no branch on the values), and its coordinates back from
+    // the key.
+    let best = coeffs[..n * n]
+        .iter()
+        .zip(&tabs.key[scan][log2_sb as usize][..n * n])
+        .map(|(&c, &k)| if c != 0 { k as i16 } else { -1 })
+        .max()
+        .unwrap_or(-1);
     debug_assert!(best >= 0, "residual_coding cannot spell an all-zero block");
+    let best = best.max(0) as usize;
+    let (last_x, last_y) = {
+        let (xs, ys) = scan_pos(p.scan_idx, log2_sb, best >> 4);
+        let (xp, yp) = tabs.pos[scan][best & 15];
+        ((xs << 2) + xp as usize, (ys << 2) + yp as usize)
+    };
 
     // last_sig_coeff_{x,y}: the reader swaps x and y *after* reading for a
     // vertical scan, so the writer swaps before writing. Both prefixes come
@@ -936,11 +949,12 @@ pub(crate) fn write_residual(
         while nn > 0 {
             let sig = coeffs[coord(xs, ys, nn as usize)] != 0;
             e.encode_decision(&mut cx.c[ctx_of[nn as usize] as usize], sig as u32);
-            if sig {
-                sig_pos[n_sig] = nn as u8;
-                n_sig += 1;
-                infer_sb_dc_sig = false;
-            }
+            // Collected without a branch on the value: the slot is
+            // written whatever `sig`, and kept only if it is. At most 15
+            // positions precede this one, so the slot is in range.
+            sig_pos[n_sig] = nn as u8;
+            n_sig += sig as usize;
+            infer_sb_dc_sig &= !sig;
             nn -= 1;
         }
         if nn == 0 {

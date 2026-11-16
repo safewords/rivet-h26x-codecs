@@ -280,23 +280,34 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
         _ => half,
     });
     levels[..n * n].fill(0);
-    // Nothing reaches half a step: every level rounds to zero, and the
-    // search below could only confirm it.
-    let peak = coeffs[..n * n]
-        .iter()
-        .map(|c| c.unsigned_abs())
-        .max()
-        .unwrap_or(0);
-    if i64::from(peak) * scale < half {
+    // The last scan position whose coefficient reaches `lastq`, found in
+    // raster order (the scan position of each raster index, the greatest
+    // taken) so the pass is a plain vector maximum: `|c| * scale >=
+    // lastq` is `|c| >= ceil(lastq / scale)` for an integer `|c|`. With
+    // none — nothing reaches even half a step when `lastq` is half, and
+    // `lastq` is never less — every level rounds to zero.
+    let raster = raster_of(b.scan_idx, b.log2);
+    let thr = (lastq + scale - 1) / scale;
+    if thr > i64::from(u16::MAX) {
         return 0;
     }
-    let raster = raster_of(b.scan_idx, b.log2);
-    let Some(last) = raster
+    let thr = thr as u16;
+    let last = coeffs[..n * n]
         .iter()
-        .rposition(|&r| i64::from(coeffs[r as usize].unsigned_abs()) * scale >= lastq)
-    else {
+        .zip(&tabs.key[b.scan_idx as usize][(b.log2 - 2) as usize][..n * n])
+        .map(|(c, &k)| {
+            if c.unsigned_abs() >= thr {
+                k as i16
+            } else {
+                -1
+            }
+        })
+        .max()
+        .unwrap_or(-1);
+    if last < 0 {
         return 0;
-    };
+    }
+    let last = last as usize;
     for (k, &r) in raster[..=last].iter().enumerate() {
         let idx = r as usize;
         let scaled = i64::from(coeffs[idx].unsigned_abs()) * scale;
@@ -327,7 +338,19 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     let mut sb_cost_coded = [0f64; 64];
     let mut sb_cost_zero = [0f64; 64];
     for sb in (0..=last_sb).rev() {
+        // The group's sums, in the order the positions are visited.
+        let (mut cost_coded, mut cost_zero) = (0f64, 0f64);
         let (xs, ys) = scan_pos(b.scan_idx, log2_sb, sb);
+        if sb != 0 && sb != last_sb && csbf[ys * sb_w + xs] == 0 {
+            // Nothing rounds up to a level here, so every level stays
+            // zero and the level state passes through untouched; step 2
+            // then finds the group empty and costs it at its zero
+            // distortion without reading what would have been summed.
+            for p in &mut pos[sb * 16..sb * 16 + 16] {
+                p.coded = p.zero;
+            }
+            continue;
+        }
         let mut prev_csbf = 0usize;
         if xs < sb_w - 1 {
             prev_csbf += csbf[ys * sb_w + xs + 1] as usize;
@@ -362,6 +385,16 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             let sig0 = f64::from(state_bits(sig_ctx, 0));
             let sig1 = f64::from(state_bits(sig_ctx, 1));
             let rounded = ((at.scaled + (step >> 1)) >> qbits) as i32;
+            if rounded == 0 && !is_last {
+                // Only a zero to weigh: its significance flag and its
+                // distortion. (`as_last` is never read for a zero level.)
+                let zero = at.zero + lambda * sig0;
+                pos[k].level = 0;
+                pos[k].coded = zero;
+                cost_coded += zero;
+                cost_zero += at.zero;
+                continue;
+            }
             let mut best_level = 0;
             let mut best = at.zero + lambda * sig0;
             let mut best_last = f64::INFINITY;
@@ -397,13 +430,15 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
                 best
             };
             pos[k].as_last = best_last;
-            sb_cost_coded[sb] += if best_level > 0 {
+            cost_coded += if best_level > 0 {
                 best
             } else {
                 at.zero + lambda * sig0
             };
-            sb_cost_zero[sb] += at.zero;
+            cost_zero += at.zero;
         }
+        sb_cost_coded[sb] = cost_coded;
+        sb_cost_zero[sb] = cost_zero;
         c1_after_prev = if st.count > 0 {
             Some(st.c1)
         } else {
@@ -452,10 +487,12 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     }
 
     let mut sb_any = [false; 64];
+    let mut sb_mask = 0u64;
     for (sb, a) in sb_any.iter_mut().enumerate().take(last_sb + 1) {
         *a = pos[sb * 16..(sb * 16 + 16).min(last + 1)]
             .iter()
             .any(|p| p.level != 0);
+        sb_mask |= u64::from(*a) << sb;
     }
 
     // 3. The last position. `before` is the cost of everything ahead of a
@@ -492,23 +529,23 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     });
     for k in (0..=last).rev() {
         let p = &pos[k];
-        if p.level > 0 {
-            let (xc, yc) = (p.idx & (n - 1), p.idx >> b.log2);
-            let (lx, ly) = if b.scan_idx == 2 {
-                (yc as u32, xc as u32)
-            } else {
-                (xc as u32, yc as u32)
-            };
-            let cost = p.before
-                + p.as_last
-                + after
-                + cbf1
-                + lambda * (last_x[last_prefix(lx) as usize] + last_y[last_prefix(ly) as usize]);
-            if cost < best_cost {
-                best_cost = cost;
-                best_last = k;
-            }
-        }
+        // Every position priced, a zero level's price never taken: a
+        // select rather than a branch on the level, which no predictor
+        // learns.
+        let (xc, yc) = (p.idx & (n - 1), p.idx >> b.log2);
+        let (lx, ly) = if b.scan_idx == 2 {
+            (yc as u32, xc as u32)
+        } else {
+            (xc as u32, yc as u32)
+        };
+        let cost = p.before
+            + p.as_last
+            + after
+            + cbf1
+            + lambda * (last_x[last_prefix(lx) as usize] + last_y[last_prefix(ly) as usize]);
+        let take = p.level > 0 && cost < best_cost;
+        best_cost = if take { cost } else { best_cost };
+        best_last = if take { k } else { best_last };
         after += p.zero;
     }
     // Nothing coded at all: every position's zero distortion and a clear
@@ -518,15 +555,16 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     {
         return 0;
     }
+    // Every position up to the last written, a zero over the zero the
+    // block was cleared to: no branch on the level.
     let mut nz = 0u32;
-    for p in pos.iter().take(best_last + 1) {
-        if p.level > 0 {
-            levels[p.idx] = if coeffs[p.idx] < 0 { -p.level } else { p.level } as i16;
-            nz += 1;
-        }
+    for p in &pos[..=best_last] {
+        let l = p.level as i16;
+        levels[p.idx] = if coeffs[p.idx] < 0 { -l } else { l };
+        nz += u32::from(p.level > 0);
     }
     if b.sign_hiding && nz > 1 {
-        nz = hide_signs_at(b, coeffs, levels, nz, best_last);
+        nz = hide_signs_at(b, coeffs, levels, nz, best_last, sb_mask);
     }
     nz
 }
@@ -585,12 +623,21 @@ pub(crate) fn hide_signs(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u
     let Some(last_k) = (0..n_sb * 16).rev().find(|&k| levels[idx[k] as usize] != 0) else {
         return 0;
     };
-    hide_signs_at(b, coeffs, levels, nz, last_k)
+    hide_signs_at(b, coeffs, levels, nz, last_k, !0)
 }
 
 /// [`hide_signs`] for levels whose nonzero count `nz` (at least 2) and
-/// last significant scan position `last_k` the caller knows.
-fn hide_signs_at(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], nz: u32, last_k: usize) -> u32 {
+/// last significant scan position `last_k` the caller knows. A sub-block
+/// whose bit in `sb_mask` is clear is known to hold no level and is
+/// passed over without reading it (`!0` when nothing is known).
+fn hide_signs_at(
+    b: &Block<'_>,
+    coeffs: &[i16],
+    levels: &mut [i16],
+    nz: u32,
+    last_k: usize,
+    sb_mask: u64,
+) -> u32 {
     let scale = i64::from(crate::dsp::hevc_enc::quant_scale((b.qp % 6) as usize));
     let qbits = crate::dsp::hevc_enc::qbits(b.qp, b.log2, b.bit_depth);
     let step = 1i64 << qbits;
@@ -614,6 +661,9 @@ fn hide_signs_at(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], nz: u32, las
         }
     };
     for sb in 0..=last_k / 16 {
+        if sb_mask >> sb & 1 == 0 {
+            continue;
+        }
         let base = sb * 16;
         let mut first = None;
         let mut lastp = None;
