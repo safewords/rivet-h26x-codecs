@@ -277,44 +277,24 @@ impl Trellis {
         // Built element by element: a zeroed array first was a call to
         // `memset` per 8x8 block.
         let (coeffs, mf) = (&coeffs[..N], &mf[..N]);
-        let xr: [f32; N] =
-            std::array::from_fn(|i| (coeffs[i].unsigned_abs() as f32) * mf[i] as f32 * scale);
-        // A block the plain inter quantiser (a dead zone rounding at 1/6)
-        // leaves all zero is not trellised: it codes nothing. Of such blocks
-        // the trellis itself kept a level in 2 % (park_joy, veryfast and
-        // medium), and leaving them zero measured better at medium and
-        // slow and next to no worse at veryfast (BD-rate Y against x264:
-        // +0.39 -> +0.23 %, +1.38 -> +1.25 %, -2.80 -> -2.66 %) for 3 %
-        // fewer instructions. Most of
-        // the blocks are below a half (44 % of the calls) and cost nothing
-        // either way; the rest (a fifth of the calls) were a whole trellis
-        // pass each. Found from the largest exact level before the scan is
-        // gathered: the magnitudes are non-negative, so their bit patterns
-        // order as they do (an integer maximum, one vector reduction). An
-        // AC block's raster position 0 is outside its scan.
-        let mx = xr[start..].iter().map(|v| v.to_bits()).max().unwrap_or(0);
-        if f32::from_bits(mx) < DEAD_ZONE {
-            return 0;
-        }
-        // Built element by element (no zeroing pass first: for an 8x8 that
-        // was two calls into `memset`); an AC block's sixteenth is unused.
-        let x: [f32; N] = std::array::from_fn(|i| {
-            if i < count {
-                xr[scan[start + i] as usize & (N - 1)]
-            } else {
-                0.0
+        #[cfg(target_arch = "aarch64")]
+        let (x, top, last, top_max) = if self.simd {
+            // SAFETY: NEON is baseline on AArch64; the lengths are `N`.
+            match unsafe { prepass_neon::<N>(coeffs, mf, scale, start) } {
+                Some(p) => p,
+                None => return 0,
             }
-        });
-        let top: [u32; N] = std::array::from_fn(|i| (x[i] + 0.5) as u32);
-        let mut last = usize::MAX;
-        let mut top_max = 0;
-        for (i, &t) in top.iter().enumerate().take(count) {
-            top_max = top_max.max(t);
-            last = if t != 0 { i } else { last };
-        }
-        if last == usize::MAX {
+        } else {
+            match prepass::<N>(coeffs, mf, scale, scan, start, count) {
+                Some(p) => p,
+                None => return 0,
+            }
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let Some((x, top, last, top_max)) = prepass::<N>(coeffs, mf, scale, scan, start, count)
+        else {
             return 0;
-        }
+        };
         let (sig_base, last_base, abs_base, cbf_base) = kind.bases();
         // lambda in this block's level units: squared error scales with its
         // own step (chroma's differs from luma's).
@@ -596,6 +576,202 @@ impl Trellis {
             lane = (e >> 24) as usize;
         }
         nz
+    }
+}
+
+/// [`Trellis::quant_n`]'s first pass, from a block's coefficients in
+/// raster order: each position's exact level in scan order (`x`, past
+/// the scan zero), its rounded magnitude (`top`), the last position
+/// rounding to a level, and the largest rounded level — or `None` for a
+/// block the trellis leaves all zero.
+#[inline(always)]
+fn prepass<const N: usize>(
+    coeffs: &[i32],
+    mf: &[i32],
+    scale: f32,
+    scan: &[u8],
+    start: usize,
+    count: usize,
+) -> Option<([f32; N], [u32; N], usize, u32)> {
+    // In raster order first, where the arithmetic is one vector
+    // expression, then taken into the scan.
+    // Built element by element: a zeroed array first was a call to
+    // `memset` per 8x8 block.
+    let xr: [f32; N] =
+        std::array::from_fn(|i| (coeffs[i].unsigned_abs() as f32) * mf[i] as f32 * scale);
+    // A block the plain inter quantiser (a dead zone rounding at 1/6)
+    // leaves all zero is not trellised: it codes nothing. Of such blocks
+    // the trellis itself kept a level in 2 % (park_joy, veryfast and
+    // medium), and leaving them zero measured better at medium and
+    // slow and next to no worse at veryfast (BD-rate Y against x264:
+    // +0.39 -> +0.23 %, +1.38 -> +1.25 %, -2.80 -> -2.66 %) for 3 %
+    // fewer instructions. Most of
+    // the blocks are below a half (44 % of the calls) and cost nothing
+    // either way; the rest (a fifth of the calls) were a whole trellis
+    // pass each. Found from the largest exact level before the scan is
+    // gathered: the magnitudes are non-negative, so their bit patterns
+    // order as they do (an integer maximum, one vector reduction). An
+    // AC block's raster position 0 is outside its scan.
+    let mx = xr[start..].iter().map(|v| v.to_bits()).max().unwrap_or(0);
+    if f32::from_bits(mx) < DEAD_ZONE {
+        return None;
+    }
+    // Built element by element (no zeroing pass first: for an 8x8 that
+    // was two calls into `memset`); an AC block's sixteenth is unused.
+    let x: [f32; N] = std::array::from_fn(|i| {
+        if i < count {
+            xr[scan[start + i] as usize & (N - 1)]
+        } else {
+            0.0
+        }
+    });
+    let top: [u32; N] = std::array::from_fn(|i| (x[i] + 0.5) as u32);
+    let mut last = usize::MAX;
+    let mut top_max = 0;
+    for (i, &t) in top.iter().enumerate().take(count) {
+        top_max = top_max.max(t);
+        last = if t != 0 { i } else { last };
+    }
+    if last == usize::MAX {
+        return None;
+    }
+    Some((x, top, last, top_max))
+}
+
+/// [`prepass`]'s scan gathers as byte lookups: for each scan position's
+/// four bytes, where they sit among a block's raster `f32`s (0xff past the
+/// scan, which reads as zero). The 4x4 scan from position 0 and from 1
+/// (the AC blocks'), each four vectors.
+#[cfg(target_arch = "aarch64")]
+static GATHER4: [[[u8; 16]; 4]; 2] = {
+    let mut t = [[[0xffu8; 16]; 4]; 2];
+    let mut st = 0;
+    while st < 2 {
+        let mut i = 0;
+        while i + st < 16 {
+            let r = ZIGZAG4X4[st + i] as usize;
+            let mut b = 0;
+            while b < 4 {
+                t[st][i / 4][(i % 4) * 4 + b] = (4 * r + b) as u8;
+                b += 1;
+            }
+            i += 1;
+        }
+        st += 1;
+    }
+    t
+};
+
+/// The 8x8 scan's: sixteen vectors, each looked up in the four 64-byte
+/// quarters of the block in turn (an index outside a quarter is out of
+/// range there, and leaves what an earlier quarter found).
+#[cfg(target_arch = "aarch64")]
+static GATHER8: [[[u8; 16]; 4]; 16] = {
+    let mut t = [[[0xffu8; 16]; 4]; 16];
+    let mut i = 0;
+    while i < 64 {
+        let r = ZIGZAG8X8[i] as usize;
+        let mut b = 0;
+        while b < 4 {
+            let byte = 4 * r + b;
+            t[i / 4][byte / 64][(i % 4) * 4 + b] = (byte % 64) as u8;
+            b += 1;
+        }
+        i += 1;
+    }
+    t
+};
+
+/// [`prepass`] in NEON: the same values (each lane's arithmetic is the
+/// scalar one's, and the conversions round alike), the scan gathered by
+/// table lookups, and the last position and the largest level found from
+/// a mask and a reduction rather than a pass over the positions.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn prepass_neon<const N: usize>(
+    coeffs: &[i32],
+    mf: &[i32],
+    scale: f32,
+    start: usize,
+) -> Option<([f32; N], [u32; N], usize, u32)> {
+    use std::arch::aarch64::*;
+    debug_assert!(coeffs.len() >= N && mf.len() >= N && (N == 16 || N == 64));
+    unsafe {
+        // Every array below is written whole before it is read, so none
+        // is zeroed first (for an 8x8 a zeroing is a call to `memset`).
+        let mut xr = std::mem::MaybeUninit::<[f32; N]>::uninit();
+        let xp = xr.as_mut_ptr() as *mut f32;
+        let mut mx = vdupq_n_u32(0);
+        for k in 0..N / 4 {
+            let c = vreinterpretq_u32_s32(vabsq_s32(vld1q_s32(coeffs.as_ptr().add(4 * k))));
+            let m = vcvtq_f32_s32(vld1q_s32(mf.as_ptr().add(4 * k)));
+            let v = vmulq_n_f32(vmulq_f32(vcvtq_f32_u32(c), m), scale);
+            vst1q_f32(xp.add(4 * k), v);
+            mx = vmaxq_u32(mx, vreinterpretq_u32_f32(v));
+        }
+        if start != 0 {
+            // An AC block's raster position 0 is outside its scan.
+            let v = vreinterpretq_u32_f32(vld1q_f32(xp));
+            let mut m = vsetq_lane_u32::<0>(0, v);
+            for k in 1..N / 4 {
+                m = vmaxq_u32(m, vreinterpretq_u32_f32(vld1q_f32(xp.add(4 * k))));
+            }
+            mx = m;
+        }
+        if f32::from_bits(vmaxvq_u32(mx)) < DEAD_ZONE {
+            return None;
+        }
+        let p = xp as *const u8;
+        let mut x = std::mem::MaybeUninit::<[f32; N]>::uninit();
+        let mut top = std::mem::MaybeUninit::<[u32; N]>::uninit();
+        let (xo, to) = (x.as_mut_ptr() as *mut f32, top.as_mut_ptr() as *mut u32);
+        let half = vdupq_n_f32(0.5);
+        let mut tmax = vdupq_n_u32(0);
+        let mut nz = std::mem::MaybeUninit::<[u8; N]>::uninit();
+        let nzp = nz.as_mut_ptr() as *mut u8;
+        let gather = |k: usize| -> uint8x16_t {
+            if N == 16 {
+                let g = &GATHER4[start];
+                vqtbl4q_u8(vld1q_u8_x4(p), vld1q_u8(g[k].as_ptr()))
+            } else {
+                let g = &GATHER8[k];
+                let mut v = vqtbl4q_u8(vld1q_u8_x4(p), vld1q_u8(g[0].as_ptr()));
+                v = vqtbx4q_u8(v, vld1q_u8_x4(p.add(64)), vld1q_u8(g[1].as_ptr()));
+                v = vqtbx4q_u8(v, vld1q_u8_x4(p.add(128)), vld1q_u8(g[2].as_ptr()));
+                vqtbx4q_u8(v, vld1q_u8_x4(p.add(192)), vld1q_u8(g[3].as_ptr()))
+            }
+        };
+        for k in 0..N / 4 {
+            let v = vreinterpretq_f32_u8(gather(k));
+            vst1q_f32(xo.add(4 * k), v);
+            let t = vcvtq_u32_f32(vaddq_f32(v, half));
+            vst1q_u32(to.add(4 * k), t);
+            tmax = vmaxq_u32(tmax, t);
+            // Whether each rounds to a level, a byte per position.
+            let n = vmovn_u16(vcombine_u16(vmovn_u32(vtstq_u32(t, t)), vdup_n_u16(0)));
+            vst1_lane_u32::<0>(nzp.add(4 * k) as *mut u32, vreinterpret_u32_u8(n));
+        }
+        // The positions' bytes to bits: the last one set is `last`.
+        const W: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let w = vld1q_u8(W.as_ptr());
+        let mut mask = 0u64;
+        for q in 0..N / 16 {
+            let m = vandq_u8(vld1q_u8(nzp.add(16 * q)), w);
+            let bits =
+                (vaddv_u8(vget_low_u8(m)) as u64) | ((vaddv_u8(vget_high_u8(m)) as u64) << 8);
+            mask |= bits << (16 * q);
+        }
+        // A block past the dead zone has a level that rounds to one.
+        debug_assert!(mask != 0);
+        if mask == 0 {
+            return None;
+        }
+        Some((
+            x.assume_init(),
+            top.assume_init(),
+            63 - mask.leading_zeros() as usize,
+            vmaxvq_u32(tmax),
+        ))
     }
 }
 
