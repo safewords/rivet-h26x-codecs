@@ -45,10 +45,11 @@
 #   X264=path     x264 (default: on PATH). Built with every bit depth and
 #                 without libavformat input: `./configure --bit-depth=all
 #                 --disable-lavf --disable-ffms --disable-swscale`. The set
-#                 was recorded with x264 0.165 r3223 0480cb0.
+#                 was recorded with x264 0.165 r3222 b35605a (Homebrew, arm64).
 #   X265=path     x265 (default: on PATH), 8-bit; X265_10 / X265_12 the
 #                 10- and 12-bit builds (default: X265, which serves for a
-#                 multilib build). Recorded with x265 4.2.
+#                 multilib build). Recorded with x265 4.2+1-e444744 (Homebrew,
+#                 arm64); the stream MD5s depend on the build — tools/README.md.
 # Both write their build into the SEI of every stream, so a fixture names
 # what made it.
 OUT=${1:-$H26X_WORK}

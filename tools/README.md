@@ -59,9 +59,30 @@ The fixtures are not vendored either, and the golden list is.
 settings — 53 streams, 1.8 MB — and `tools/golden.txt` holds what the
 verified decoder decodes each to. Regenerate the set with the script, run
 `check.sh` on all of it against the reference decoders, and only then
-`record_golden.sh`. The current set (2026-10, x264 r3223, x265 4.2)
-matches JM and HM in every frame of all 53, `x265_cu_lossless.265`
-included.
+`record_golden.sh`. The current set (2026-11, macOS arm64, Homebrew
+x264 0.165 r3222 b35605a and x265 4.2+1-e444744) matches JM and HM 19.0
+in every frame of all 53, `x265_cu_lossless.265` included.
+
+A fixture set is a property of the encoder *build*, not just its version,
+so `tools/fixtures.md5` only reproduces on a machine like the one that
+recorded it. Both encoders write their build into a user-data SEI in every
+stream: x264 its revision, x265 its version, OS, compiler and `cpuid` (the
+SIMD it used). That SEI changes no decoded sample, but it changes every
+stream's MD5. Moving the recording from the 2026-10 Linux set (x264 r3223,
+x265 4.2) to macOS arm64 changed all 53 stream MD5s, yet 50 decoded
+exactly as before. The source clips were not the cause: `synth_source.py`
+had not changed, and a different source could not have left those 50
+outputs untouched. Three x265 streams changed in their coded data too:
+`x265_ctu16_tlayers`, `x265_odd_size_ctu32` and `x265_gray`. x265 does not
+make the same coding decisions on every platform. With `--no-asm` on the
+same machine (C primitives instead of NEON), `x265_odd_size_ctu32` decodes
+to its 2026-10 golden again. The other two come out the same with or
+without NEON, so their difference lies elsewhere in the platform or build:
+compiler, floating point, or the one commit past 4.2. All three were
+checked against HM before re-recording, like the rest. If a regeneration
+here changes MD5s, compare the decoded output (`verify.sh`) before
+concluding anything changed. Then compare the encoder's SEI line
+(`strings x.265 | grep -m1 x265`) with the one in this paragraph.
 
 The suites, and what "accepted" means for each:
 
