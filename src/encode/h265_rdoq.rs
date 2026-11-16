@@ -660,25 +660,38 @@ fn hide_signs_at(
             _ => 0.5,
         }
     };
+    // Each move's rate term, by the level class `bits_up` reads (0, 1,
+    // more) and the move's direction: the same expression per move,
+    // evaluated once per block rather than once per candidate.
+    let rate = |db: f64| -> i64 {
+        if b.lambda > 0.0 {
+            ((b.lambda * RATE_WEIGHT * db) / es) as i64
+        } else {
+            0
+        }
+    };
+    let rate_up = [rate(bits_up(0)), rate(bits_up(1)), rate(bits_up(2))];
+    let rate_down = [rate(-bits_up(0)), rate(-bits_up(1)), rate(-bits_up(2))];
     for sb in 0..=last_k / 16 {
         if sb_mask >> sb & 1 == 0 {
             continue;
         }
         let base = sb * 16;
-        let mut first = None;
-        let mut lastp = None;
+        // The sub-block's significant positions as a mask and its level
+        // sum, with no branch on the levels; the first and last
+        // significant positions are the mask's lowest and highest bits.
+        let mut mask = 0u32;
         let mut sum = 0i32;
         for p in 0..16 {
             let l = levels[at(base + p)];
-            if l != 0 {
-                first.get_or_insert(p);
-                lastp = Some(p);
-                sum += i32::from(l.unsigned_abs());
-            }
+            mask |= u32::from(l != 0) << p;
+            sum += i32::from(l.unsigned_abs());
         }
-        let (Some(first), Some(lastp)) = (first, lastp) else {
+        if mask == 0 {
             continue;
-        };
+        }
+        let first = mask.trailing_zeros() as usize;
+        let lastp = 31 - mask.leading_zeros() as usize;
         if lastp - first <= 3 {
             continue;
         }
@@ -704,11 +717,12 @@ fn hide_signs_at(
                 if nl < 0 || (nl == 0 && (p == first || base + p == last_k)) {
                     continue;
                 }
-                let mut cost = err(nl) - err(l);
-                if b.lambda > 0.0 {
-                    let db = if delta > 0 { bits_up(l) } else { -bits_up(nl) };
-                    cost += ((b.lambda * RATE_WEIGHT * db) / es) as i64;
-                }
+                let cost = err(nl) - err(l)
+                    + if delta > 0 {
+                        rate_up[l.min(2) as usize]
+                    } else {
+                        rate_down[nl.min(2) as usize]
+                    };
                 if best.is_none_or(|b| cost < b.0) {
                     best = Some((cost, i, delta));
                 }
