@@ -1050,17 +1050,7 @@ fn add_residual_4x4<S: Sample>(
         return;
     }
     let m = (qp % 6) as usize;
-    let scale = &ctx.dequant.scale4[list][m];
-    let q6 = qp / 6;
-    let mut coefs = [0i32; 16];
-    for i in 0..16 {
-        let c = levels[i] as i32 * scale[i];
-        coefs[i] = if qp >= 24 {
-            c << (q6 - 4)
-        } else {
-            (c + (1 << (3 - q6))) >> (4 - q6)
-        };
-    }
+    let coefs = crate::encode::h264_intra::dequant4(levels, &ctx.dequant.scale4[list][m], qp);
     (ctx.dsp.residual4)(
         &mut rec.data[off..],
         rec.stride,

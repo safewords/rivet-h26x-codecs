@@ -378,6 +378,28 @@ pub(crate) fn diff_block<S: Sample, const N: usize>(
     }
 }
 
+/// A 4x4 block's levels scaled for the inverse transform (8.5.12.1):
+/// `level * scale` shifted up by `qP / 6 - 4`, or down with rounding
+/// below quantiser 24 — the shift chosen once, so each arm is one vector
+/// loop rather than a branch per coefficient.
+#[inline]
+pub(crate) fn dequant4(levels: &[i16; 16], scale: &[i32; 16], qp: i32) -> [i32; 16] {
+    let q6 = qp / 6;
+    let mut out = [0i32; 16];
+    if qp >= 24 {
+        let s = q6 - 4;
+        for i in 0..16 {
+            out[i] = (levels[i] as i32 * scale[i]) << s;
+        }
+    } else {
+        let (r, s) = (1 << (3 - q6), 4 - q6);
+        for i in 0..16 {
+            out[i] = (levels[i] as i32 * scale[i] + r) >> s;
+        }
+    }
+    out
+}
+
 /// `src - pred` (`N` = 4) forward transformed: in one pass through the
 /// encode table's fused kernel for 8-bit samples where it has one, else
 /// the difference and then [`H264EncDsp::fdct4`].
@@ -625,17 +647,7 @@ pub(crate) fn reconstruct_4x4<S: Sample>(
     dc: Option<i32>,
 ) {
     let m = (qp % 6) as usize;
-    let scale = &ctx.dequant.scale4[list][m];
-    let q6 = qp / 6;
-    let mut coefs = [0i32; 16];
-    for i in 0..16 {
-        let c = levels[i] as i32 * scale[i];
-        coefs[i] = if qp >= 24 {
-            c << (q6 - 4)
-        } else {
-            (c + (1 << (3 - q6))) >> (4 - q6)
-        };
-    }
+    let coefs = dequant4(levels, &ctx.dequant.scale4[list][m], qp);
     (ctx.dsp.residual4)(
         &mut rec.data[off..],
         rec.stride,
@@ -1187,17 +1199,7 @@ pub(crate) fn code_chroma<S: Sample>(
         for blk in 0..blocks {
             let (bx, by) = (blk % 2, blk / 2);
             let boff = off + by * 4 * plane.stride + bx * 4;
-            let scale = &ctx.dequant.scale4[list][m];
-            let q6 = qp / 6;
-            let mut coefs = [0i32; 16];
-            for i in 0..16 {
-                let c = levels[blk][i] as i32 * scale[i];
-                coefs[i] = if qp >= 24 {
-                    c << (q6 - 4)
-                } else {
-                    (c + (1 << (3 - q6))) >> (4 - q6)
-                };
-            }
+            let coefs = dequant4(&levels[blk], &ctx.dequant.scale4[list][m], qp);
             (ctx.dsp.residual4)(
                 &mut plane.data[boff..],
                 plane.stride,
