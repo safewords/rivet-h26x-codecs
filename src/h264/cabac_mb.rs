@@ -2116,6 +2116,81 @@ fn enc_cbf_ctx_inc(
     }
 }
 
+/// [`enc_cbf_ctx_inc`] for every 4x4-category block of a luma-style plane
+/// at once (`cat` 1, 2, 7, 8, 11 or 12): the condition terms of the blocks
+/// left of and above each one, read once — the current macroblock's
+/// nonzero flags gated by its coded block pattern, the neighbours' edge
+/// counts or the current macroblock's intra flag where one is missing —
+/// instead of re-deriving both for each of the sixteen.
+fn plane_cbf_incs(
+    cur: &CurMbResidual,
+    left: Option<&WrittenMb>,
+    above: Option<&WrittenMb>,
+    p: usize,
+) -> [u8; 16] {
+    let nz = cur.nz_plane(p);
+    let own: [u8; 16] = std::array::from_fn(|blk| {
+        let b8 = (blk / 8) * 2 + (blk % 4) / 2;
+        (cur.cbp_luma & (1 << b8) != 0 && nz[blk] != 0) as u8
+    });
+    let edge = |m: Option<&WrittenMb>, i: usize| -> u8 {
+        match m {
+            None => cur.intra as u8,
+            Some(m) => {
+                let nz = if p == 0 {
+                    &m.nz_luma
+                } else {
+                    &m.nz_chroma[p - 1]
+                };
+                (nz[i] != 0) as u8
+            }
+        }
+    };
+    let l: [u8; 4] = std::array::from_fn(|y| edge(left, y * 4 + 3));
+    let a: [u8; 4] = std::array::from_fn(|x| edge(above, 12 + x));
+    std::array::from_fn(|blk| {
+        let (bx, by) = (blk % 4, blk / 4);
+        let ca = if bx > 0 { own[blk - 1] } else { l[by] };
+        let cb = if by > 0 { own[blk - 4] } else { a[bx] };
+        ca + 2 * cb
+    })
+}
+
+/// [`enc_cbf_ctx_inc`] for every chroma AC block of component `comp` at
+/// once (`rows` block rows: 2 for 4:2:0, 4 for 4:2:2).
+fn chroma_ac_cbf_incs(
+    cur: &CurMbResidual,
+    left: Option<&WrittenMb>,
+    above: Option<&WrittenMb>,
+    rows: usize,
+    comp: usize,
+) -> [u8; 8] {
+    let own = |i: usize| (cur.nz_chroma[comp][i] != 0) as u8;
+    let edge = |m: Option<&WrittenMb>, i: usize| -> u8 {
+        match m {
+            None => cur.intra as u8,
+            Some(m) => (m.nz_chroma[comp][i] != 0) as u8,
+        }
+    };
+    std::array::from_fn(|blk| {
+        if blk >= 2 * rows {
+            return 0;
+        }
+        let (cx, cy) = (blk % 2, blk / 2);
+        let ca = if cx > 0 {
+            own(blk - 1)
+        } else {
+            edge(left, cy * 2 + 1)
+        };
+        let cb = if cy > 0 {
+            own(blk - 2)
+        } else {
+            edge(above, (rows - 1) * 2 + cx)
+        };
+        ca + 2 * cb
+    })
+}
+
 /// Decode one residual block's coefficients: the levels of scan positions
 /// `0..max_coeff` are written to `out[scan[start + pos]]` (`out` is the
 /// block in raster order, zero where nothing is written — the macroblock
@@ -2954,6 +3029,13 @@ fn write_plane_residual_cabac(
         let inc = enc_cbf_ctx_inc(cur, left, above, rows, cat_dc, 0, 0, 0, 0);
         write_residual_block_cabac(e, st, field, cat_dc, Some(inc), &dc[..], scan4, 0, 16);
     }
+    // The 4x4 categories' coded_block_flag increments, all sixteen at once
+    // (the 8x8 and DC categories ask other questions and keep theirs).
+    let incs = if cur.transform_8x8 {
+        [0; 16]
+    } else {
+        plane_cbf_incs(cur, left, above, p)
+    };
     for blk8 in 0..4 {
         let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
         if cur.cbp_luma & (1 << blk8) == 0 {
@@ -3013,7 +3095,11 @@ fn write_plane_residual_cabac(
                 dc.is_none() || buf[0] == 0,
                 "I_16x16 AC keeps position 0 free"
             );
-            let inc = enc_cbf_ctx_inc(cur, left, above, rows, cat, bx, by, 0, 0);
+            let inc = incs[raster] as usize;
+            debug_assert_eq!(
+                inc,
+                enc_cbf_ctx_inc(cur, left, above, rows, cat, bx, by, 0, 0)
+            );
             let n = write_residual_block_cabac(
                 e,
                 st,
@@ -3121,10 +3207,15 @@ fn write_residual_walk_cabac(
     }
     if cbp_chroma == 2 {
         for comp in 0..2 {
+            let incs = chroma_ac_cbf_incs(cur, left, above, rows, comp);
             for blk in 0..2 * rows {
                 let buf = &chroma_ac[comp][blk];
                 debug_assert!(buf[0] == 0, "chroma AC keeps position 0 free");
-                let inc = enc_cbf_ctx_inc(cur, left, above, rows, CAT_CHROMA_AC, 0, 0, comp, blk);
+                let inc = incs[blk] as usize;
+                debug_assert_eq!(
+                    inc,
+                    enc_cbf_ctx_inc(cur, left, above, rows, CAT_CHROMA_AC, 0, 0, comp, blk)
+                );
                 let n = write_residual_block_cabac(
                     e,
                     st,
