@@ -163,32 +163,71 @@ one loaded Apple M-series machine, summed over the four rate points:
 
 | `--preset` | clip | BD-rate Y | BD-rate avg | time vs x264 |
 |---|---|---:|---:|---:|
-| veryfast | foreman CIF | +3.27 % | +3.06 % | 2.55x |
-| | mobile CIF | -6.82 % | -8.25 % | 2.48x |
-| | akiyo CIF | -6.14 % | -5.84 % | 2.50x |
-| | ducks_take_off 720p | -11.12 % | -13.29 % | 2.32x |
-| | park_joy 720p | -2.58 % | -2.94 % | 2.39x |
-| | **mean** | **-4.68 %** | **-5.45 %** | **2.37x** |
-| medium | foreman CIF | +0.65 % | +0.75 % | 1.94x |
-| | mobile CIF | +1.82 % | +1.42 % | 2.12x |
-| | akiyo CIF | -4.39 % | -4.27 % | 2.03x |
-| | ducks_take_off 720p | -1.12 % | -4.56 % | 2.03x |
-| | park_joy 720p | +2.54 % | +2.64 % | 2.13x |
-| | **mean** | **-0.10 %** | **-0.80 %** | **2.07x** |
-| slow | foreman CIF | +2.32 % | +2.40 % | 1.67x |
-| | mobile CIF | +2.06 % | +1.47 % | 1.26x |
-| | akiyo CIF | -1.85 % | -1.56 % | 1.84x |
-| | ducks_take_off 720p | +1.97 % | -2.54 % | 1.31x |
-| | park_joy 720p | +2.51 % | +2.45 % | 1.33x |
-| | **mean** | **+1.40 %** | **+0.44 %** | **1.33x** |
+| veryfast | foreman CIF | +3.27 % | +3.06 % | 2.06x |
+| | mobile CIF | -6.82 % | -8.25 % | 2.39x |
+| | akiyo CIF | -6.14 % | -5.84 % | 2.49x |
+| | ducks_take_off 720p | -11.12 % | -13.29 % | 2.25x |
+| | park_joy 720p | -2.58 % | -2.94 % | 2.35x |
+| | **mean** | **-4.68 %** | **-5.45 %** | **2.30x** |
+| medium | foreman CIF | +1.35 % | +1.50 % | 1.67x |
+| | mobile CIF | +2.19 % | +1.79 % | 1.60x |
+| | akiyo CIF | -4.29 % | -4.15 % | 1.79x |
+| | ducks_take_off 720p | -0.76 % | -4.26 % | 1.65x |
+| | park_joy 720p | +3.07 % | +3.17 % | 1.82x |
+| | **mean** | **+0.31 %** | **-0.39 %** | **1.72x** |
+| slow | foreman CIF | +2.32 % | +2.40 % | 1.60x |
+| | mobile CIF | +2.06 % | +1.47 % | 1.20x |
+| | akiyo CIF | -1.85 % | -1.56 % | 1.79x |
+| | ducks_take_off 720p | +1.97 % | -2.54 % | 1.26x |
+| | park_joy 720p | +2.51 % | +2.45 % | 1.29x |
+| | **mean** | **+1.40 %** | **+0.44 %** | **1.28x** |
 
-(Fourth round, 2026-11-15, rivet at --jobs 4 against the cached x264
-times. The third round's tree, 835d779, timed in the same session:
--4.68 % / 2.47x, +0.27 % / 2.28x, +1.76 % / 1.50x. Cycles at QP 27 over
-the five clips, `/usr/bin/time -l`: 9.22G / 22.88G / 33.87G before,
-8.88G / 20.71G / 30.53G after — -4 % / -9 % / -10 %.)
+(Fifth round, 2026-11-15, rivet at --jobs 4 against the cached x264
+times; veryfast and slow streams are byte-identical to the fourth
+round's. The fourth round's tree, 3b2cc06, timed in the same session:
+2.32x / 2.04x / 1.33x. Cycles at QP 27 over the five clips,
+`/usr/bin/time -l`: 8.76G / 20.74G / 30.52G before, 8.53G / 17.17G /
+29.50G after, -3 % / -17 % / -3 %; instructions 40.0G / 100.5G / 150.5G
+to 39.0G / 81.4G / 141.7G. x264 at CRF 23 on the same clips: 3.40G /
+9.85G / 20.99G cycles, 12.1G / 34.4G / 74.7G instructions.)
 
-What the fourth round did:
+What the fifth round did:
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| trellis: a block whose rounded levels are all zero or one (61 % of the trellised blocks in a park_joy medium encode) in four lanes, not eight — no path reaches a larger level's nodes (byte-identical) | -0.5 % ins | -1.5 % cycles | -1.7 % cycles |
+| integer search: start candidates, hexagon / diamond steps and the square refinement scored four at a time (`H264EncDsp::sad_x4`, NEON) then taken in the old order (byte-identical) | -1 % ins | -2 % ins | -2 % ins |
+| a coded candidate whose squared error alone reaches the best cost is not priced; intra candidates against the caller's bound (byte-identical) | | -0.5 % | |
+| medium: a second inter shape only within 1.03x of the best estimate (was 1.1), B partitions only within 0.98x (was 1.02) | | +0.41 % BD, -13 % cycles | |
+
+Where the time goes, measured by running each piece twice and counting
+the cycles that adds (the fourth round's tree, QP 27, five clips): the
+CABAC estimator's pricing of coded candidates 9 % / 7 % / 7 %
+(veryfast / medium / slow), the motion search (integer descent and
+sub-sample refinement, not the B pair refinement) 7 % / 24 % / 25 %, the
+trellis 6 % / 16 % / 17 %. Timed per phase of a park_joy macroblock
+(medium): search 35 %, coding and pricing the inter candidates 42 %,
+intra 15 %. A search averages 18 SADs and 18 SATDs, half of them on 8x8
+and smaller partitions; a trellised block averages 15 scan positions, 7
+of them nonzero, and 44 % of the calls find nothing to quantise.
+
+Tried and dropped in the fifth round (BD-rate Y against x264, cycles at
+QP 27): medium with the trellis only on the winner, +1.17 % for -14 %;
+one inter shape, +0.97 % for -17 %; intra to 1.2x, +0.57 % for -5 %;
+early skip's error ceiling 0.05 / 0.15, +1.18 / +1.26 % for -4 / -6 %;
+intra candidates analysed without the trellis and the winner
+re-quantised, 1 % fewer instructions and no fewer cycles; intra types
+chosen on their estimates with only the winner priced, +0.77 % for
+-1 %; partitions' search range 2 on top of the kept pair, +0.13 % for
+-1.5 %. Slow at a second-shape ratio of 1.1 / 1.05, +0.16 / +0.26 % for
+-6 / -11 %, and with the B gate at 1.0 / 0.98, +0.39 / +0.48 % for
+-6 / -11 % — good rates, but past slow's +1.5 % ceiling from +1.40 %.
+Veryfast: early skip's error ceiling 0.12 with a descent range of 8,
++0.12 % for -2.3 % (within the rate, inside the noise, not taken); the
+trellis in non-reference B pictures, -0.95 % for +2.3 %.
+
+The fourth round, for the record (its table, 3b2cc06: 2.37x / 2.07x /
+1.33x at -4.68 / -0.10 / +1.40 %):
 
 | change | veryfast | medium | slow |
 |---|---:|---:|---:|
@@ -368,7 +407,15 @@ reference B picture's colocated motion or duplicate list 0; per-partition
 reference choice (rivet binds the macroblock to one per list) and the
 implicit weighting between unequal distances are what is left of that.
 Also missing: slow's RD refinement of vectors and intra modes (x264's
-subme 8). The time gap is still implementation efficiency: after the
+subme 8). The time gap is still implementation efficiency, now 2.3x / 1.7x /
+1.3x after the fifth round: rivet runs 3.2x / 2.4x / 1.9x x264's
+instructions at a higher IPC. The fifth round's profile is flat — no
+piece over a quarter — so what is left is many kernels each a few per
+cent (the trellis's eight-lane state machine compiled scalar, SATD of
+every sub-sample candidate, the estimator re-pricing a whole macroblock
+per candidate, decision records copied by value) and, in veryfast, the
+rate-distortion decision x264 veryfast does not make (it decides on
+SATD at subme 2 without the trellis, and is 4.7 % behind for it). After the
 fourth round a medium park_joy profile is a quarter trellis (4.2 million
 blocks in 30 pictures, at about 125 ns each — the eight-lane gathers are
 compiled scalar, and the remaining cost is the per-position dependency
@@ -939,7 +986,7 @@ compares (280 identical, 0 moved) — so this is speed and nothing else.
 encode-side tables scalar for a measurement; `H26X_MAX_SIMD` caps the
 ladder as it does for the decoders. Neither encoder is threaded yet:
 `--threads` is accepted and unused. Against x264 at matched tiers see
-"H.264 compression against x264" above: 2.2x to 3.3x x264's single-thread
+"H.264 compression against x264" above: 1.3x to 2.3x x264's single-thread
 time, the gap in rivet's scalar candidate pricing, residual coding and
 search control flow rather than in how much it searches.
 
