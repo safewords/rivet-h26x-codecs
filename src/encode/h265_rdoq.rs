@@ -529,23 +529,23 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     });
     for k in (0..=last).rev() {
         let p = &pos[k];
-        // Every position priced, a zero level's price never taken: a
-        // select rather than a branch on the level, which no predictor
-        // learns.
-        let (xc, yc) = (p.idx & (n - 1), p.idx >> b.log2);
-        let (lx, ly) = if b.scan_idx == 2 {
-            (yc as u32, xc as u32)
-        } else {
-            (xc as u32, yc as u32)
-        };
-        let cost = p.before
-            + p.as_last
-            + after
-            + cbf1
-            + lambda * (last_x[last_prefix(lx) as usize] + last_y[last_prefix(ly) as usize]);
-        let take = p.level > 0 && cost < best_cost;
-        best_cost = if take { cost } else { best_cost };
-        best_last = if take { k } else { best_last };
+        if p.level > 0 {
+            let (xc, yc) = (p.idx & (n - 1), p.idx >> b.log2);
+            let (lx, ly) = if b.scan_idx == 2 {
+                (yc as u32, xc as u32)
+            } else {
+                (xc as u32, yc as u32)
+            };
+            let cost = p.before
+                + p.as_last
+                + after
+                + cbf1
+                + lambda * (last_x[last_prefix(lx) as usize] + last_y[last_prefix(ly) as usize]);
+            if cost < best_cost {
+                best_cost = cost;
+                best_last = k;
+            }
+        }
         after += p.zero;
     }
     // Nothing coded at all: every position's zero distortion and a clear
