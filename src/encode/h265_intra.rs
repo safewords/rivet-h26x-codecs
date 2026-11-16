@@ -2061,6 +2061,13 @@ fn code_residual<S: Sample>(
         lambda: ssd_lambda(ctx.qp, ctx.bit_depth),
         cx: ctx.rdoq.unwrap_or(no_contexts()),
         sign_hiding: ctx.sign_hiding,
+        // The flag's context at transform depth 0, where most intra
+        // blocks sit; deeper blocks are priced at it as an estimate.
+        cbf_ctx: Some(if c_idx == 0 {
+            crate::hevc::tables_gen::CBF_LUMA_OFFSET + 1
+        } else {
+            crate::hevc::tables_gen::CBF_CB_CR_OFFSET
+        }),
     };
     let nz = if ctx.rdoq.is_some() {
         super::h265_rdoq::quantise(&block, &work, levels)

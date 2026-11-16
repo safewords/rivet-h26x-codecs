@@ -228,17 +228,21 @@ impl Tune {
             // veryfast -9.11% at 1.22x against -9.98% at 1.41x).
             inter_tu_split_max: 3,
             // Every tier quantises by RDOQ (round 3, 2026-11-15, x265
-            // parity): the luma of inter units, and intra units whole.
-            // RDOQ on the chroma of inter units lost at every tier (medium
-            // -8.78% BD-rate with it, -10.38% without; slow +2.52% /
-            // +0.79%), and a chroma Lagrangian scaled by the chroma
-            // quantiser's step did not recover it (-8.44% / +2.70%). At
+            // parity). RDOQ on the chroma of inter units lost at every
+            // tier in round 3 (medium -8.78% BD-rate with it, -10.38%
+            // without) because the quantiser could not leave a block
+            // empty: its last position was forced to a level. Round 5
+            // (2026-11-15) weighs every block against coding nothing
+            // (`h265_rdoq::Block::cbf_ctx`) and prices the coefficient
+            // group flags in the last-position search; with both, inter
+            // chroma by RDOQ wins (slow -2.56% -> -3.28%, medium -13.12%
+            // -> -14.25%, veryfast -12.54% -> -13.76%, PSNR-Y). At
             // medium and veryfast the pictures nothing references skip
             // it: -10.28% against -10.38% at medium for a twentieth less
             // CPU; veryfast -9.11% -> -11.76% (ducks +0.50% -> -11.03%)
             // at 1.15x the CPU.
             rdoq: true,
-            rdoq_inter_chroma: false,
+            rdoq_inter_chroma: true,
             rdoq_nonref: false,
             // No SAO in the pictures nothing references (round 3,
             // 2026-11-15, x265 parity): veryfast -11.76% -> -12.06%

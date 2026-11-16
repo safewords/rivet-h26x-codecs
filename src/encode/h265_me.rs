@@ -2476,6 +2476,7 @@ impl<S: Sample> InterPicture<S> {
                 &src[(y - y0) * y_stride + (x - x0)..],
                 y_stride,
                 &mut out.luma[i * q..(i + 1) * q],
+                1,
             );
             out.cbf_luma_tu[i] = nz != 0;
             any |= nz != 0;
@@ -2515,6 +2516,7 @@ impl<S: Sample> InterPicture<S> {
                         &srcp[py * c_stride + px..],
                         c_stride,
                         &mut out.chroma[comp][i * qc..(i + 1) * qc],
+                        1,
                     );
                     out.cbf_chroma_tu[comp][i] = nz != 0;
                     any |= nz != 0;
@@ -2557,6 +2559,7 @@ impl<S: Sample> InterPicture<S> {
             src,
             y_stride,
             &mut out.luma,
+            0,
         );
         let mut nz_c = 0u32;
         let cctx = &self.chroma_ctx(ctx);
@@ -2598,6 +2601,7 @@ impl<S: Sample> InterPicture<S> {
                         &srcp[soff..],
                         c_stride,
                         levels,
+                        0,
                     );
                     if t == 0 {
                         out.cbf_chroma[comp] = nz != 0;
@@ -4523,21 +4527,22 @@ fn code_residual_inter<S: Sample>(
     src: &[S],
     src_stride: usize,
     levels: &mut [i16],
+    tdepth: u32,
 ) -> u32 {
     // The scratch sized to the block: zeroing a 32x32 one for every 4x4
     // block was a measurable share of an encode.
     match log2 {
         2 => code_residual_inter_n::<S, 16>(
-            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels, tdepth,
         ),
         3 => code_residual_inter_n::<S, 64>(
-            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels, tdepth,
         ),
         4 => code_residual_inter_n::<S, 256>(
-            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels, tdepth,
         ),
         _ => code_residual_inter_n::<S, 1024>(
-            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels,
+            ctx, plane, x, y, log2, c_idx, qp, src, src_stride, levels, tdepth,
         ),
     }
 }
@@ -4554,6 +4559,7 @@ fn code_residual_inter_n<S: Sample, const N: usize>(
     src: &[S],
     src_stride: usize,
     levels: &mut [i16],
+    tdepth: u32,
 ) -> u32 {
     let n = 1usize << log2;
     debug_assert_eq!(n * n, N);
@@ -4597,6 +4603,11 @@ fn code_residual_inter_n<S: Sample, const N: usize>(
                 lambda: ssd_lambda(ctx.qp, ctx.bit_depth),
                 cx,
                 sign_hiding: ctx.sign_hiding,
+                cbf_ctx: Some(if c_idx == 0 {
+                    crate::hevc::tables_gen::CBF_LUMA_OFFSET + usize::from(tdepth == 0)
+                } else {
+                    crate::hevc::tables_gen::CBF_CB_CR_OFFSET + tdepth as usize
+                }),
             },
             &work,
             levels,
@@ -4621,6 +4632,7 @@ fn code_residual_inter_n<S: Sample, const N: usize>(
                         lambda: 0.0,
                         cx: ctx.rdoq.unwrap_or(super::h265_intra::no_contexts()),
                         sign_hiding: true,
+                        cbf_ctx: None,
                     },
                     &work,
                     levels,

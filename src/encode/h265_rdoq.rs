@@ -26,8 +26,14 @@
 //!    plus a `coded_sub_block_flag` of 0 is dropped.
 //! 3. **The last position**: every significant position is costed as the
 //!    last one — its last-position prefix and suffix bits, the chosen
-//!    costs before it, the zero distortion after it — and the cheapest
-//!    kept.
+//!    costs before it (the `coded_sub_block_flag` of every group between
+//!    the first and its own included, an empty group's significance flags
+//!    not), the zero distortion after it — and the cheapest kept, unless
+//!    coding nothing at all (a clear coded block flag, where the caller
+//!    names its context) is cheaper still. Without that last test a
+//!    block whose one significant coefficient sits just above half a
+//!    step was always coded, which is what made RDOQ lose on inter
+//!    chroma until round 5.
 //!
 //! The distortion is measured in the transform domain and converted to the
 //! sample domain by the transform's scale: the HEVC forward transform
@@ -75,6 +81,9 @@ pub(crate) struct Block<'a> {
     pub cx: &'a Contexts,
     /// Whether the PPS hides signs.
     pub sign_hiding: bool,
+    /// The context of the block's coded block flag, where the block may
+    /// be left empty: the levels are then weighed against coding nothing.
+    pub cbf_ctx: Option<usize>,
 }
 
 /// What one coefficient position contributes, as decided.
@@ -385,10 +394,14 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
         };
     }
 
-    // 2. Per coefficient group, between the first and the last.
+    // 2. Per coefficient group, between the first and the last. A group
+    // left empty codes a clear flag and none of its significance flags.
+    let mut sb_flag = [[0f64; 2]; 64];
     for sb in 1..last_sb {
         if pos[sb * 16..sb * 16 + 16].iter().all(|p| p.level == 0) {
-            continue;
+            for p in &mut pos[sb * 16..sb * 16 + 16] {
+                p.coded = p.zero;
+            }
         }
         let (xs, ys) = scan_pos(b.scan_idx, log2_sb, sb);
         let mut inc = 0usize;
@@ -404,6 +417,13 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             2 + inc.min(1)
         };
         let flag = cx_state(b.cx, SIGNIFICANT_COEFF_GROUP_FLAG_OFFSET + inc);
+        sb_flag[sb] = [
+            lambda * f64::from(state_bits(flag, 0)),
+            lambda * f64::from(state_bits(flag, 1)),
+        ];
+        if pos[sb * 16..sb * 16 + 16].iter().all(|p| p.level == 0) {
+            continue;
+        }
         let keep = sb_cost_coded[sb] + lambda * f64::from(state_bits(flag, 1));
         let drop = sb_cost_zero[sb] + lambda * f64::from(state_bits(flag, 0));
         if drop < keep {
@@ -414,10 +434,23 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
         }
     }
 
+    let mut sb_any = [false; 64];
+    for (sb, a) in sb_any.iter_mut().enumerate().take(last_sb + 1) {
+        *a = pos[sb * 16..(sb * 16 + 16).min(last + 1)]
+            .iter()
+            .any(|p| p.level != 0);
+    }
+
     // 3. The last position. `before` is the cost of everything ahead of a
     // candidate, as decided; `after` the distortion of everything beyond.
     let mut run = 0f64;
-    for p in &mut pos[..=last] {
+    for (k, p) in pos[..=last].iter_mut().enumerate() {
+        // Entering sub-block `s`: the flag of the one before it, which a
+        // last position here or beyond codes (the first's is inferred).
+        if k % 16 == 0 && k >= 32 {
+            let s = k / 16 - 1;
+            run += sb_flag[s][usize::from(sb_any[s])];
+        }
         p.before = run;
         run += p.coded;
     }
@@ -437,6 +470,9 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     let mut after = 0f64;
     let mut best_last = last;
     let mut best_cost = f64::INFINITY;
+    let cbf1 = b.cbf_ctx.map_or(0.0, |c| {
+        lambda * f64::from(state_bits(cx_state(b.cx, c), 1))
+    });
     for k in (0..=last).rev() {
         let p = &pos[k];
         if p.level > 0 {
@@ -449,6 +485,7 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             let cost = p.before
                 + p.as_last
                 + after
+                + cbf1
                 + lambda * (last_x[last_prefix(lx) as usize] + last_y[last_prefix(ly) as usize]);
             if cost < best_cost {
                 best_cost = cost;
@@ -456,6 +493,13 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
             }
         }
         after += p.zero;
+    }
+    // Nothing coded at all: every position's zero distortion and a clear
+    // coded block flag.
+    if let Some(c) = b.cbf_ctx
+        && after + lambda * f64::from(state_bits(cx_state(b.cx, c), 0)) <= best_cost
+    {
+        return 0;
     }
     let mut nz = 0u32;
     for p in pos.iter().take(best_last + 1) {
@@ -649,6 +693,7 @@ mod tests {
                             lambda: 0.85 * (f64::from(qp - 12) / 3.0).exp2(),
                             cx: &cx,
                             sign_hiding: sdh,
+                            cbf_ctx: None,
                         };
                         let coeffs: Vec<i16> = (0..n * n)
                             .map(|i| {
