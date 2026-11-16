@@ -538,35 +538,42 @@ impl<'a> CabacEncoder<'a> {
 /// [`CabacEncoder::new`]'s bits by a faster route, for the slice writers
 /// that only ever finish a slice: rather than the standard's
 /// bit-at-a-time `PutBit` with its outstanding-bits counter, `low` keeps
-/// the bits that leave its ten-bit window above it and hands them to the
-/// writer a byte at a time, a carry out of the window incrementing the one
-/// byte that can still take it (and turning the `0xff` bytes after it to
-/// `0x00`) — the same codeword, since the outstanding bits are exactly the
-/// run a carry would flip. The module's round trip holds the two to the
-/// same bytes.
+/// the bits that leave its ten-bit window above it, and they go out
+/// thirty-two at a time into a byte buffer of the writer's own, a carry
+/// out of them incrementing the bytes already there (the last, and the
+/// `0xff` run before it, which it turns to `0x00`) — the same codeword,
+/// since the outstanding bits are exactly the run a carry would flip. The
+/// buffer joins the caller's [`BitWriter`] when the slice ends. The
+/// module's round trip holds the two coders to the same bytes.
+///
+/// A word at a time, a bin checks a threshold it crosses about once in
+/// thirty bins, and what it then does has no branch on the data but the
+/// carry's (rare): a byte at a time, with the pending byte and its `0xff`
+/// run kept apart for a carry, the check was crossed every eight or so
+/// bins at a point the data decides, and its out-of-line path cost more
+/// than the bins between.
 pub(crate) struct CabacWriter<'a> {
     w: &'a mut BitWriter,
     /// The registers every bin touches, kept apart so a hot loop can hold
     /// them by value ([`BinEnc::split`]).
     core: WCore,
-    /// The byte that a carry may still increment (`-1`: none yet), ...
-    pend: i32,
-    /// ... and the `0xff` bytes after it, which a carry turns to `0x00`.
-    ffs: u32,
+    /// The codeword's bytes so far, all but the first bit
+    /// (`firstBitFlag`'s), which ...
+    buf: Vec<u8>,
+    /// ... is still among the queued bits while this is 1.
+    lead: u32,
 }
 
 /// [`CabacWriter`]'s per-bin state.
 #[derive(Clone, Copy)]
 pub(crate) struct WCore {
-    /// `codILow`, with [`WCore::queued`] bits above its window.
-    low: u32,
+    /// `codILow`, with [`WCore::queued`] bits above its window (and, past
+    /// those, a carry not yet handed on).
+    low: u64,
     /// `codIRange`.
     range: u32,
-    /// How many bits `low` holds above its ten-bit window ...
+    /// How many bits `low` holds above its ten-bit window.
     queued: u32,
-    /// ... and how many make a byte to hand on: nine for the first, whose
-    /// leading bit is the implicit one `firstBitFlag` drops, eight after.
-    need: u32,
 }
 
 impl<'a> CabacWriter<'a> {
@@ -579,62 +586,48 @@ impl<'a> CabacWriter<'a> {
                 low: 0,
                 range: 510,
                 queued: 0,
-                need: 9,
             },
-            pend: -1,
-            ffs: 0,
+            buf: Vec::with_capacity(1 << 12),
+            lead: 1,
         }
     }
 
-    /// [`WCore::settle`]'s byte, out of line: one bin in several gets
-    /// here. The core goes in and comes back by value, so the caller's
-    /// copy never has to live in memory.
+    /// One added to the bytes written: a carry out of the queued bits.
+    #[cold]
     #[inline(never)]
-    fn fast_out(&mut self, mut c: WCore) -> WCore {
-        let need = c.need;
-        let shift = 10 + c.queued - need;
-        let v = c.low >> shift;
-        c.low &= (1 << shift) - 1;
-        c.queued -= need;
-        let (carry, byte) = if need == 9 {
-            c.need = 8;
-            debug_assert!(v < 0x100, "a carry past the codeword's first bit");
-            (0, v & 0xff)
-        } else {
-            (v >> 8, v & 0xff)
-        };
-        self.fast_byte(carry, byte);
-        c
+    fn carry(&mut self) {
+        for b in self.buf.iter_mut().rev() {
+            *b = b.wrapping_add(1);
+            if *b != 0 {
+                return;
+            }
+        }
+        debug_assert!(false, "a carry past the codeword's first bit");
     }
 
-    #[inline]
-    fn fast_byte(&mut self, carry: u32, byte: u32) {
-        let w = &mut *self.w;
-        if carry != 0 {
-            debug_assert!(self.pend >= 0, "a carry with no byte to take it");
-            w.bits(8, (self.pend as u32 + 1) & 0xff);
-            for _ in 0..self.ffs {
-                w.bits(8, 0);
-            }
-            self.pend = -1;
-            self.ffs = 0;
+    /// [`WCore::settle`]'s word: the top thirty-two queued bits (and, the
+    /// first time, the codeword's first bit above them, dropped) out to
+    /// the buffer, a carry above them into the bytes before.
+    #[inline(always)]
+    fn word_out(&mut self, low: u64, queued: u32) -> (u64, u32) {
+        let take = 32 + self.lead;
+        let shift = 10 + queued - take;
+        let v = low >> shift;
+        debug_assert!(
+            self.lead == 0 || v >> take == 0,
+            "a carry past the codeword's first bit"
+        );
+        if v >> take != 0 {
+            self.carry();
         }
-        if byte == 0xff {
-            self.ffs += 1;
-        } else {
-            if self.pend >= 0 {
-                w.bits(8, self.pend as u32);
-            }
-            for _ in 0..self.ffs {
-                w.bits(8, 0xff);
-            }
-            self.pend = byte as i32;
-            self.ffs = 0;
-        }
+        self.buf.extend_from_slice(&(v as u32).to_be_bytes());
+        self.lead = 0;
+        (low & ((1 << shift) - 1), queued - take)
     }
 
     /// [`CabacWriter`]'s `EncodeFlush`: the window's top three bits, the
-    /// last forced to one, join the queue, and everything left goes out.
+    /// last forced to one, join the queue, everything goes to the buffer
+    /// and the buffer to the writer, the bits short of a byte last.
     fn fast_flush(&mut self) {
         let mut c = self.core;
         c.range = 2;
@@ -642,24 +635,38 @@ impl<'a> CabacWriter<'a> {
         c.low |= 0x80;
         c.low <<= 3;
         c.queued += 3;
-        c.settle(self);
-        c.settle(self);
-        // Nothing can carry any more: the pending byte and its run go out
-        // as they stand, then the bits short of a byte.
+        // Whole bytes, the first (when nothing has gone yet) with the
+        // leading bit above it.
+        while c.queued >= 8 + self.lead {
+            let need = 8 + self.lead;
+            let shift = 10 + c.queued - need;
+            let v = c.low >> shift;
+            c.low &= (1 << shift) - 1;
+            c.queued -= need;
+            if v >> need != 0 {
+                self.carry();
+            }
+            self.buf.push(v as u8);
+            self.lead = 0;
+        }
         let mut rest = c.queued;
-        let mut v = c.low >> 10;
-        if c.need == 9 {
+        let mut v = (c.low >> 10) as u32;
+        if self.lead == 1 {
             // Never reached a byte: drop the leading bit here.
             debug_assert!(rest >= 1);
             rest -= 1;
             v &= (1 << rest) - 1;
-            c.need = 8;
+            self.lead = 0;
         }
-        // A carry out of the last bits still reaches the pending byte.
-        self.fast_byte(v >> rest, 0);
-        // `fast_byte` queued a zero byte as pending; drop it.
-        self.pend = -1;
+        // A carry out of the last bits still reaches the bytes.
+        if v >> rest != 0 {
+            self.carry();
+        }
         let w = &mut *self.w;
+        for &b in &self.buf {
+            w.bits(8, b as u32);
+        }
+        self.buf.clear();
         if rest > 0 {
             w.bits(rest, v & ((1 << rest) - 1));
         }
@@ -670,16 +677,22 @@ impl<'a> CabacWriter<'a> {
 }
 
 impl WCore {
-    /// Move a whole byte from above the window to the writer, when there
-    /// is one.
+    /// How many bits may wait above the window before a word goes out
+    /// (thirty-two of them, or thirty-three the first time): with the
+    /// eight a bin can add and the carry above them, the window's ten and
+    /// the queue stay inside `low`'s sixty-four.
+    const BATCH: u32 = 33;
+
+    /// Move a word from above the window to the buffer, when enough bits
+    /// have gathered.
     #[inline(always)]
     fn settle(&mut self, out: &mut CabacWriter<'_>) {
-        if self.queued >= self.need {
-            *self = out.fast_out(*self);
+        if self.queued >= Self::BATCH {
+            (self.low, self.queued) = out.word_out(self.low, self.queued);
         }
     }
 
-    /// The renormalisation: one shift, then whole bytes out.
+    /// The renormalisation: one shift, then a word out when there is one.
     #[inline(always)]
     fn renorm(&mut self, out: &mut CabacWriter<'_>) {
         if self.range < 256 {
@@ -708,7 +721,7 @@ impl<'a> BinCore<CabacWriter<'a>> for WCore {
         // range has 23 leading zeros) rather than branches.
         let rmps = self.range - lps;
         let is_lps = bin != mps;
-        self.low += if is_lps { rmps } else { 0 };
+        self.low += if is_lps { rmps as u64 } else { 0 };
         let range = if is_lps { lps } else { rmps };
         *ctx = EST_NEXT[((state as usize) << 1 | bin as usize) & 255];
         let s = range.leading_zeros() - 23;
@@ -720,7 +733,7 @@ impl<'a> BinCore<CabacWriter<'a>> for WCore {
 
     #[inline(always)]
     fn bypass(&mut self, out: &mut CabacWriter<'a>, bin: u32) {
-        self.low = (self.low << 1) + (self.range & 0u32.wrapping_sub((bin != 0) as u32));
+        self.low = (self.low << 1) + (self.range & 0u32.wrapping_sub((bin != 0) as u32)) as u64;
         self.queued += 1;
         self.settle(out);
     }
@@ -757,7 +770,7 @@ impl<'a> BinEnc for CabacWriter<'a> {
     fn encode_terminate(&mut self, bin: u32) {
         self.core.range -= 2;
         if bin != 0 {
-            self.core.low += self.core.range;
+            self.core.low += self.core.range as u64;
             self.fast_flush();
         } else {
             let mut c = self.core;

@@ -3659,6 +3659,37 @@ mod residual_round_trip {
         w.align_zero();
         let data = w.into_rbsp();
 
+        // The slice writers' coder ([`crate::cabac_enc::CabacWriter`]) must
+        // write the very same bytes and leave the same states.
+        let mut fast_st = CabacState::new(SliceType::I, 0, 26);
+        let mut fw = BitWriter::new();
+        {
+            let mut e = crate::cabac_enc::CabacWriter::new(&mut fw);
+            let n = write_residual_block_cabac(
+                &mut e,
+                &mut fast_st,
+                field,
+                cat,
+                cbf_inc,
+                levels,
+                &scan,
+                0,
+                max_coeff,
+            );
+            assert_eq!(n, n_enc);
+            e.encode_terminate(1);
+        }
+        fw.align_zero();
+        assert_eq!(
+            fw.into_rbsp(),
+            data,
+            "cat={cat} field={field}: the slice writer's bytes"
+        );
+        assert_eq!(
+            fast_st.ctx, enc_st.ctx,
+            "cat={cat} field={field}: the slice writer's states"
+        );
+
         let mut dec_st = CabacState::new(SliceType::I, 0, 26);
         let mut c = Cabac::new(&data);
         let mut out = vec![0i32; max_coeff];
@@ -3801,6 +3832,108 @@ mod residual_round_trip {
                 for levels in &cases {
                     round_trip(cat, max_coeff, cbf_inc, field, levels);
                 }
+            }
+        }
+    }
+
+    /// Many blocks in one codeword, as a slice writes them: the slice
+    /// writers' coder against the standard's, byte for byte and state for
+    /// state, and the reader recovering every block — over every category,
+    /// both scans, all-zero blocks, runs of ones, twos, larger levels and
+    /// escapes, so that the bytes go out in many words, carries included.
+    #[test]
+    fn slice_writer_matches_over_many_blocks() {
+        #[rustfmt::skip]
+        let shapes: [(usize, usize, Option<usize>); 7] = [
+            (0, 16, Some(0)), (1, 15, Some(1)), (2, 16, Some(1)), (3, 4, Some(2)),
+            (3, 8, Some(0)), (4, 15, Some(3)), (5, 64, None),
+        ];
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rnd = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        for field in [false, true] {
+            let mut blocks: Vec<(usize, usize, Option<usize>, Vec<i32>)> = Vec::new();
+            for k in 0..3000 {
+                let (cat, max_coeff, cbf) = shapes[rnd(shapes.len() as u64) as usize];
+                let density = 1 + rnd(6);
+                let big = k % 7 == 0;
+                let mut v = vec![0i32; 64];
+                for slot in v.iter_mut().take(max_coeff) {
+                    if rnd(density + 1) == 0 {
+                        let m = match rnd(10) {
+                            0..=5 => 1,
+                            6 | 7 => 2,
+                            8 => 3 + rnd(12) as i32,
+                            _ if big => 15 + rnd(3000) as i32,
+                            _ => 1,
+                        };
+                        *slot = if rnd(2) == 0 { m } else { -m };
+                    }
+                }
+                if cbf.is_none() && v.iter().all(|&x| x == 0) {
+                    v[rnd(max_coeff as u64) as usize] = 1;
+                }
+                blocks.push((cat, max_coeff, cbf, v));
+            }
+            let scan: Vec<u8> = (0..64).map(|i| i as u8).collect();
+            let mut want = BitWriter::new();
+            let mut got = BitWriter::new();
+            let mut st_a = CabacState::new(SliceType::P, 0, 30);
+            let mut st_b = CabacState::new(SliceType::P, 0, 30);
+            {
+                let mut a = CabacEncoder::new(&mut want);
+                let mut b = crate::cabac_enc::CabacWriter::new(&mut got);
+                for (cat, max_coeff, cbf, v) in &blocks {
+                    let na = write_residual_block_cabac(
+                        &mut a,
+                        &mut st_a,
+                        field,
+                        *cat,
+                        *cbf,
+                        &v[..],
+                        &scan,
+                        0,
+                        *max_coeff,
+                    );
+                    let nb = write_residual_block_cabac(
+                        &mut b,
+                        &mut st_b,
+                        field,
+                        *cat,
+                        *cbf,
+                        &v[..],
+                        &scan,
+                        0,
+                        *max_coeff,
+                    );
+                    assert_eq!(na, nb);
+                    // A bin of another kind between blocks, as a slice has.
+                    a.encode_terminate(0);
+                    b.encode_terminate(0);
+                }
+                a.encode_terminate(1);
+                b.encode_terminate(1);
+            }
+            assert_eq!(want.position(), got.position(), "field={field}: length");
+            assert_eq!(st_a.ctx, st_b.ctx, "field={field}: states");
+            want.align_zero();
+            got.align_zero();
+            let data = want.into_rbsp();
+            assert_eq!(got.into_rbsp(), data, "field={field}: bytes");
+            let mut c = Cabac::new(&data);
+            let mut st = CabacState::new(SliceType::P, 0, 30);
+            for (cat, max_coeff, cbf, v) in &blocks {
+                let mut out = vec![0i32; *max_coeff];
+                residual_block_cabac(
+                    &mut c, &mut st, field, *cat, *cbf, &mut out, &scan, 0, *max_coeff, None,
+                )
+                .expect("the reader rejected the slice");
+                assert_eq!(&out[..], &v[..*max_coeff]);
+                assert_eq!(c.terminate(), 0);
             }
         }
     }
