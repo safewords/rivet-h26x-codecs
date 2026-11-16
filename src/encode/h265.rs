@@ -1365,7 +1365,10 @@ impl<S: Sample> Core<S> {
                     cus.extend(pic.code_ctu_tree(&ictx, &want, max_depth, cxu, cy, &src));
                     if let Some((lcx, ltc)) = live.as_mut() {
                         let first = *ctu_start.last().unwrap_or(&0);
-                        let mut e = CabacEncoder::estimating();
+                        // Only the contexts' moves are wanted here: the
+                        // estimator makes the same ones as an estimating
+                        // encoder, in integer adds.
+                        let mut e = crate::cabac_enc::CabacEstimator::new();
                         write_tree(
                             &mut e,
                             lcx,
@@ -2013,7 +2016,10 @@ impl<S: Sample> Core<S> {
                     cus.extend(pic.code_ctu_tree(&mctx, &want, max_depth, refs, cxu, cy, &src));
                     if let Some((lcx, ltc)) = live.as_mut() {
                         let first = *ctu_start.last().unwrap_or(&0);
-                        let mut e = CabacEncoder::estimating();
+                        // Only the contexts' moves are wanted here: the
+                        // estimator makes the same ones as an estimating
+                        // encoder, in integer adds.
+                        let mut e = crate::cabac_enc::CabacEstimator::new();
                         write_tree(
                             &mut e,
                             lcx,
@@ -3106,23 +3112,25 @@ impl TreeCtx {
 /// A leaf writer for [`write_tree`]: the unit, its left and above
 /// neighbours' `cu_skip_flag` where available, and the `CuQpDeltaVal` to
 /// spell in it.
-type LeafWriter<'a, D> = dyn FnMut(&mut CabacEncoder<'_>, &mut Contexts, &TreeCu<D>, Option<bool>, Option<bool>, Option<i32>)
-    + 'a;
+type LeafWriter<'a, E, D> =
+    dyn FnMut(&mut E, &mut Contexts, &TreeCu<D>, Option<bool>, Option<bool>, Option<i32>) + 'a;
 
 /// Write one CTB's coding quadtree: every node's `split_cu_flag` in the
 /// reader's order with the reader's neighbour-depth context, each unit
 /// through `leaf`, and the quantiser chain walked alongside. Returns how
-/// many `cu_qp_delta`s were spelled.
+/// many `cu_qp_delta`s were spelled. Generic over the coder: the
+/// serialising encoder, or the estimator that carries the live pricing
+/// contexts along (the same context transitions, nothing written).
 #[allow(clippy::too_many_arguments)]
-fn write_tree<D: CodedUnit>(
-    e: &mut CabacEncoder,
+fn write_tree<E: crate::cabac_enc::BinEnc, D: CodedUnit>(
+    e: &mut E,
     cx: &mut Contexts,
     ctu: &[TreeCu<D>],
     at: (usize, usize),
     log2_ctb: u32,
     tc: &mut TreeCtx,
     mut chain: Option<&mut QgChain>,
-    leaf: &mut LeafWriter<'_, D>,
+    leaf: &mut LeafWriter<'_, E, D>,
 ) -> u64 {
     let mut deltas = 0;
     for step in tree_steps(ctu, at, log2_ctb, tc.pic) {
