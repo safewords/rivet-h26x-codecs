@@ -652,6 +652,86 @@ against round 10B's tree unless said otherwise):
   whose second index exists only in list 0 of non-reference B
   pictures.
 
+#### Round 11B: the CABAC estimator's residual walk
+
+(2026-11-16. The other half of the eleventh round: speed alone, every
+stream byte-identical, so the BD-rates are round 11A's to the digit at
+all three presets.)
+
+The estimator prices every candidate's residual blocks and was the one
+piece of the residual coding rounds 10A and 10B left as it was. Its bins
+are two table loads each; what cost was the walk around them. Cycles and
+instructions at QP 27 over the five clips, minimum of three runs,
+interleaved in one batch, each change against the tree before it:
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| a 4x4-class block's significance map priced at once in NEON: each position has its own significance and last contexts, so the bins are independent — sixteen lanes of each, a bin's price and next state looked up by its key (`state ^ bin`, `pStateIdx` and whether it is the LPS) in four 128-byte planes, the price's three bytes summed apart; no loop, so no exit to mispredict (`BinCore::sig_map_distinct`) | -0.3 % cycles (-0.19 % ins) | -0.4 % (-0.47 %) | -0.6 % (-0.47 %) |
+| a level's prefix of ones on one context priced from a table, `ONES[state][n]` the run's price and the state it leaves — one load where the bins were a chain of dependent ones through memory (`BinCore::ones`) | -0.0 % (-0.01 %) | -0.6 % (-0.06 %) | -0.5 % (-0.06 %) |
+| an 8x8 block's significance bins first, then the last bins of its significant positions only: the last contexts run four to sixteen positions each, and selecting a state that did not move at every position between two significant ones chained them all | -0.4 % (-0.14 %) | -0.7 % (-0.46 %) | -0.9 % (-0.45 %) |
+| **all three, on round 11A's tree** (4.78G / 11.25G / 18.59G before) | **-0.8 %** (-0.27 %) | **-2.0 %** (-1.00 %) | **-1.8 %** (-1.00 %) |
+
+The estimator's prices are integers in fixed point, so summing them in
+another order gives the same total, and the significance and last
+contexts are disjoint sets, so pricing one set before the other moves
+every context as the walk a bin at a time does (unit-tested against
+that walk over random states, masks and lengths). The NEON path takes
+the `h264_enc` table's gate (`H26X_ENC_NO_SIMD`), so the identity check
+compares it with the walk.
+
+On x264's ladder (`frontier.py`, x264 timed again in the same shuffled
+batch, four at a time, minimum of three runs; BD-rate Y against x264
+medium):
+
+| rivet | BD-rate Y | CPU | x264's CPU at this BD-rate | rivet's time at equal BD-rate |
+|---|---:|---:|---:|---:|
+| veryfast, round 11A (a54852c) | +13.09 % | 0.509x | 0.492x | 1.04x |
+| veryfast, now | +13.09 % | 0.505x | 0.492x | **1.03x** |
+| medium, round 11A | -0.58 % | 1.172x | 1.129x | 1.04x |
+| medium, now | -0.58 % | 1.146x | 1.129x | **1.02x** |
+| slow, round 11A | -3.38 % | 1.921x | 2.022x | 0.95x |
+| slow, now | -3.38 % | 1.893x | 2.022x | **0.94x** |
+
+(Round 11A's own run of its tree read 1.04x / 1.04x / 0.96x.) H.265 is
+untouched: 18 streams (three CIF clips, three presets, QP 22 and 37)
+are byte-identical before and after. The decoder is untouched: 56
+streams (the 53 fixtures and `tests/data`) decode to the same MD5s with
+round 11A's decoder and this one.
+
+Where the time goes (park_joy, medium, sampled, before this round): the
+trellis 17 % (its general path, blocks with a level above one, 9 %: a
+general 8x8 block averages 54 scan positions, a 4x4 13), the SAD / SATD
+kernels together about a fifth, the motion search's own code 12 %, the
+estimator 9 % (its 8x8 significance loop 2 %, the levels 3 %), the final
+writer 5 %. At veryfast the final writer is 13 %.
+
+Tried and dropped (byte-identical unless said otherwise):
+
+- The trellis's level-one and level-two steps as one path, a two's
+  candidates made infinite where the level rounds to one (no branch on
+  which, as good as random between a general block's positions): -0.5 /
+  0.0 / +0.2 % cycles for +0.7 / +0.9 / +0.9 % instructions. The
+  mispredictions it removes cost about what the second level's
+  candidates and the larger tree add to every one-step.
+- Intra_4x4 and Intra_8x8's directional modes (3..=8) from tables:
+  the edge line's three-tap and two-tap filters built once a call, and
+  each sample of a mode an index into them, in place of the formulas a
+  sample at a time (same predictions, tested over every mode,
+  availability and bit depth): +1.6 / +1.8 / +1.3 % cycles, +2.5 to
+  +2.9 % instructions. The compiler already turns the formulas' loops
+  into straight-line code, and the filters, built again for each mode
+  the analysis tries, cost more than they save. Building them once a
+  block would need the analysis loops changed.
+- Not tried, measured: the trellis's sum of the squared errors past the
+  last level (0.8 % of veryfast, 0.9 % of medium) is one dependent chain
+  of float adds a position, up to sixty in an 8x8 block, ahead of the
+  trellis's own chain; any other order rounds differently, and it
+  leads every path's cost. The final writer's residual walk was left to
+  round 10A's analysis (the range's chain, not the walk, binds it).
+  The SATD kernels are at round 10B's floor: the four-point Hadamard's
+  last stage is already folded into a maximum, and transposes merged
+  with the butterflies come to the same count of vector operations.
+
 The eighth round, for the record (its frontier: 1.15x / 1.45x / 1.46x).
 
 What the eighth round did (BD-rate Y against x264 at the same preset,
