@@ -53,7 +53,8 @@
 //! of them moves by one — the change whose distortion grows least, never
 //! the change that would empty the sub-block's first or the block's last
 //! position — which costs far less than the sign bit it saves on average.
-//! [`hide_signs`] does that after either quantiser.
+//! Where the block carries a Lagrangian the move's rough change in bins
+//! counts too. [`hide_signs`] does that after either quantiser.
 
 use crate::cabac_enc::state_bits;
 use crate::hevc::ctx::{
@@ -580,6 +581,22 @@ fn hide_signs_at(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], nz: u32, las
     let idx = raster_of(b.scan_idx, b.log2);
     let at = |k: usize| idx[k] as usize;
     let mut nz = nz;
+    // A move's rate, roughly: the bins a level gains or sheds when it
+    // crosses zero, one and two, weighed against its distortion in the
+    // sample domain wherever the caller gives a Lagrangian. Weighed at 0.6
+    // of it (round 5, 2026-11-15, x265 parity at slow): -5.51% -> -5.85%
+    // BD-rate, ducks +0.43% -> -0.03%; at 1.0 -5.85%, at 1.6 -5.51%, at
+    // 0.35 -5.89%.
+    let tshift = 15 - b.bit_depth as i32 - b.log2 as i32;
+    let es = 1.0 / (scale as f64 * scale as f64) * (-2.0 * f64::from(tshift)).exp2();
+    const RATE_WEIGHT: f64 = 0.6;
+    let bits_up = |l: i32| -> f64 {
+        match l {
+            0 => 3.0,
+            1 => 1.0,
+            _ => 0.5,
+        }
+    };
     for sb in 0..=last_k / 16 {
         let base = sb * 16;
         let mut first = None;
@@ -621,7 +638,11 @@ fn hide_signs_at(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], nz: u32, las
                 if nl < 0 || (nl == 0 && (p == first || base + p == last_k)) {
                     continue;
                 }
-                let cost = err(nl) - err(l);
+                let mut cost = err(nl) - err(l);
+                if b.lambda > 0.0 {
+                    let db = if delta > 0 { bits_up(l) } else { -bits_up(nl) };
+                    cost += ((b.lambda * RATE_WEIGHT * db) / es) as i64;
+                }
                 if best.is_none_or(|b| cost < b.0) {
                     best = Some((cost, i, delta));
                 }
