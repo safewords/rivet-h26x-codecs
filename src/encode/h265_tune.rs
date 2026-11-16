@@ -146,6 +146,10 @@ pub(crate) struct Tune {
     /// The intra offset is `i_adapt_k * (mean - i_adapt_m0)`, rounded.
     pub i_adapt_k: f32,
     pub i_adapt_m0: f32,
+    /// References per list in a B slice (`h265_me::MAX_B_REFS` at most).
+    pub b_refs: usize,
+    /// `h265_me::InterPicture::b_limit_refs`.
+    pub b_limit_refs: bool,
 }
 
 impl Tune {
@@ -186,6 +190,8 @@ impl Tune {
         i_adapt_min: -6,
         i_adapt_k: 4.0,
         i_adapt_m0: -1.4,
+        b_refs: 1,
+        b_limit_refs: false,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -279,7 +285,15 @@ impl Tune {
             // the 720p clips wanting it lower still). With the intra
             // offset above, both: -0.59% -> -2.30% at 0.93x (-2.09% at
             // a Lagrangian of 0.8).
+            // Round 5 (2026-11-15, x265 parity): two references per list
+            // in B slices, the further one searched below the top of the
+            // tree only where the enclosing unit chose it: -4.75% ->
+            // -5.51% BD-rate (mobile -1.08% -> -5.02%) at 1.06x the CPU;
+            // searched everywhere -5.75% at 1.17x; four per list, limited,
+            // -5.71% at 1.09x. Medium gained -0.4% for 1.05-1.09x.
             Preset::Slow => Tune {
+                b_refs: 2,
+                b_limit_refs: true,
                 lambda: [0.7; 4],
                 bi_refine: 1,
                 // Refinement only where the unrefined pair comes within

@@ -278,6 +278,9 @@ pub type MeCtx<'a, S> = IntraCtx<'a, S>;
 /// (`five_minus_max_num_merge_cand` = 0).
 pub const MAX_MERGE_CAND: usize = 5;
 
+/// The most references a B slice's list holds (`Config::max_refs` caps it).
+pub const MAX_B_REFS: usize = 4;
+
 /// Full-sample search confinement around the best seed, in luma samples.
 /// Kept well inside the frame's `LUMA_PAD` (80) so every full-sample SAD
 /// reads the padded plane directly.
@@ -696,6 +699,12 @@ pub struct InterPicture<S: Sample> {
     tree_bits: Option<f64>,
     /// The slice is B (the initial contexts a rate falls back to).
     pub slice_b: bool,
+    /// The reference each list of the last whole B unit searched chose,
+    /// by depth, for [`Self::b_ref_searched`].
+    b_ref_pick: [Option<(u32, u32, [u8; 2])>; 4],
+    /// Under it, a B unit below the top of the tree searches a list's
+    /// further references only where the unit enclosing it chose one.
+    pub b_limit_refs: bool,
     /// Whether the chroma of an inter unit is quantised by RDOQ where the
     /// context asks for it (`MeCtx::rdoq`); otherwise only its luma is,
     /// the chroma by the plain quantiser. Intra units are not affected.
@@ -940,6 +949,8 @@ impl<S: Sample> InterPicture<S> {
             tree_bits: None,
             rdoq_chroma: true,
             slice_b: false,
+            b_ref_pick: [None; 4],
+            b_limit_refs: false,
         }
     }
 
@@ -1007,10 +1018,10 @@ impl<S: Sample> InterPicture<S> {
         }
     }
 
-    /// The reference-list context for a B slice referencing `poc0` in
-    /// list 0 and `poc1` in list 1, one active entry each — what the
-    /// header this stream carries declares (`num_ref_idx_active_override`
-    /// 0 over PPS defaults of 0, which the reader resolves as [1, 1]).
+    /// The reference-list context for a B slice whose `RefPicList0` is
+    /// `l0` and `RefPicList1` is `l1` — the counts the header declares
+    /// (`num_ref_idx_active_override` over PPS defaults of one each), with
+    /// the nearest future picture collocated.
     ///
     /// `no_backward_pred` is **derived** exactly as `decoder.rs` derives
     /// `NoBackwardPredFlag` — every reference POC at or before the current
@@ -1018,20 +1029,23 @@ impl<S: Sample> InterPicture<S> {
     /// hardcodes true because a P slice's single reference is always in
     /// the past. For a B between two anchors it comes out false, and it
     /// reaches `merge_candidate` through `RefCtx`.
-    fn ref_ctx_b<'a>(&self, poc0: i32, poc1: i32, col: &'a Frame<S>) -> RefCtx<'a, S> {
-        let no_backward_pred = [poc0, poc1].iter().all(|&p| p <= self.cur_poc);
+    fn ref_ctx_b<'a>(&self, l0: &[&Frame<S>], l1: &[&'a Frame<S>]) -> RefCtx<'a, S> {
+        let pocs0: Vec<i32> = l0.iter().map(|f| f.poc).collect();
+        let pocs1: Vec<i32> = l1.iter().map(|f| f.poc).collect();
+        let no_backward_pred = pocs0.iter().chain(&pocs1).all(|&p| p <= self.cur_poc);
         RefCtx {
-            pocs: [vec![poc0], vec![poc1]],
-            long_term: [vec![false], vec![false]],
-            col: self.tmvp.then_some(col),
+            long_term: [vec![false; pocs0.len()], vec![false; pocs1.len()]],
+            num_ref_idx: [pocs0.len(), pocs1.len()],
+            pocs: [pocs0, pocs1],
+            col: self.tmvp.then_some(l1[0]),
             cur_poc: self.cur_poc,
             no_backward_pred,
             tmvp: self.tmvp,
             max_merge_cand: MAX_MERGE_CAND,
             log2_par_mrg_level: 2,
             is_b: true,
-            num_ref_idx: [1, 1],
-            // The collocated picture is list 1's (the future anchor).
+            // The collocated picture is list 1's first (the nearest future
+            // anchor).
             col_from_l0: false,
         }
     }
@@ -1336,7 +1350,7 @@ impl<S: Sample> InterPicture<S> {
                     },
                     false,
                     pu,
-                    nref,
+                    [nref, 0],
                 )
             };
             let cost = satd as f32 + lam * bits;
@@ -1369,7 +1383,7 @@ impl<S: Sample> InterPicture<S> {
                         },
                         false,
                         pu,
-                        nref,
+                        [nref, 0],
                     )
                 }
             };
@@ -1448,8 +1462,8 @@ impl<S: Sample> InterPicture<S> {
     pub fn code_ctu_b(
         &mut self,
         ctx: &MeCtx<'_, S>,
-        ref0: &Frame<S>,
-        ref1: &Frame<S>,
+        l0: &[&Frame<S>],
+        l1: &[&Frame<S>],
         cu_x: usize,
         cu_y: usize,
         src_y: &[S],
@@ -1462,8 +1476,8 @@ impl<S: Sample> InterPicture<S> {
         let mut out = InterCuDecision::default();
         self.code_cu_b_into(
             ctx,
-            ref0,
-            ref1,
+            l0,
+            l1,
             cu_x * n,
             cu_y * n,
             self.log2_ctb,
@@ -1485,8 +1499,8 @@ impl<S: Sample> InterPicture<S> {
     pub fn code_cu_b_into(
         &mut self,
         ctx: &MeCtx<'_, S>,
-        ref0: &Frame<S>,
-        ref1: &Frame<S>,
+        l0: &[&Frame<S>],
+        l1: &[&Frame<S>],
         x0: usize,
         y0: usize,
         log2_cu: u32,
@@ -1517,7 +1531,7 @@ impl<S: Sample> InterPicture<S> {
         };
         let lam = lambda(ctx.qp) * satd_lambda_scale(ctx.bit_depth);
         let rate = Rate::new_at(ctx.qp, true, log2_cu, depth);
-        let pick = self.pick_pu_b(ctx, ref0, ref1, &pu, src_y, y_stride, &rate, lam);
+        let pick = self.pick_pu_b(ctx, l0, l1, &pu, src_y, y_stride, &rate, lam);
         if self.gate_now
             && pick.merge_idx.is_none()
             && self
@@ -1529,7 +1543,7 @@ impl<S: Sample> InterPicture<S> {
         }
         let parts = self.pick_parts(
             ctx,
-            TreeRefs::B(ref0, ref1),
+            TreeRefs::B(l0, l1),
             x0,
             y0,
             log2_cu,
@@ -1543,7 +1557,7 @@ impl<S: Sample> InterPicture<S> {
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
             self.code_parts(
                 ctx,
-                TreeRefs::B(ref0, ref1),
+                TreeRefs::B(l0, l1),
                 out,
                 part,
                 pus,
@@ -1560,7 +1574,7 @@ impl<S: Sample> InterPicture<S> {
         }
         self.code_whole(
             ctx,
-            TreeRefs::B(ref0, ref1),
+            TreeRefs::B(l0, l1),
             out,
             pick,
             x0,
@@ -1577,14 +1591,16 @@ impl<S: Sample> InterPicture<S> {
     /// [`Self::pick_pu`] for one prediction unit of a B CU: merge over the
     /// decoder's own candidates (both lists, the combined bi pairs and the
     /// bi zero candidates a B slice adds) against AMVP in list 0, list 1 or
-    /// both, each list searched on its own and the bi trial scored at the
-    /// two winners. Writes no decoder-grade state either.
+    /// both. Each list searches each of its references on its own and
+    /// keeps the one whose vector and `ref_idx` cost least; the bi trial
+    /// is scored at the two lists' winners, then refined. Writes no
+    /// decoder-grade state either.
     #[allow(clippy::too_many_arguments)]
     fn pick_pu_b(
         &mut self,
         ctx: &MeCtx<'_, S>,
-        ref0: &Frame<S>,
-        ref1: &Frame<S>,
+        l0: &[&Frame<S>],
+        l1: &[&Frame<S>],
         pu: &PuPos,
         src_y: &[S],
         y_stride: usize,
@@ -1594,141 +1610,153 @@ impl<S: Sample> InterPicture<S> {
         let (x0, y0) = (pu.x_pb as usize, pu.y_pb as usize);
         let wh = (pu.w as usize, pu.h as usize);
         let whole = pu.w == pu.n_cb && pu.h == pu.n_cb;
-        let refs = self.ref_ctx_b(ref0.poc, ref1.poc, ref1);
+        let lists: [&[&Frame<S>]; 2] = [l0, l1];
+        let nref = [l0.len() as u32, l1.len() as u32];
+        let refs = self.ref_ctx_b(l0, l1);
         let merge: [Cand; MAX_MERGE_CAND] = merge_candidates(&self.info, &self.recon, &refs, pu);
-        let mvp: [[Mv; 2]; 2] = [
-            [
-                amvp(&self.info, &self.recon, &refs, pu, 0, 0, 0),
-                amvp(&self.info, &self.recon, &refs, pu, 0, 0, 1),
-            ],
-            [
-                amvp(&self.info, &self.recon, &refs, pu, 1, 0, 0),
-                amvp(&self.info, &self.recon, &refs, pu, 1, 0, 1),
-            ],
-        ];
-
-        let src = &src_y[y0 * y_stride + x0..];
-
-        // Per-list search. Each list is seeded from the zero vector, its
-        // own two AMVP predictors, and every merge candidate that uses it.
-        let mut uni = [(Mv::ZERO, u32::MAX); 2];
-        for list in 0..2usize {
-            let plane = if list == 0 { &ref0.y } else { &ref1.y };
-            let mut seeds = [Mv::ZERO; 3 + MAX_MERGE_CAND + 1];
-            let mut ns = 3;
-            (seeds[1], seeds[2]) = (mvp[list][0], mvp[list][1]);
-            for c in merge.iter().filter(|c| c.ref_idx[list] == 0) {
-                seeds[ns] = c.mv[list];
-                ns += 1;
+        // AMVP predictors per list and reference: the derivation scales a
+        // neighbour's vector by the POC distance to the reference named.
+        let mut mvp = [[[Mv::ZERO; 2]; MAX_B_REFS]; 2];
+        for (list, l) in lists.iter().enumerate() {
+            for (r, m) in mvp[list].iter_mut().enumerate().take(l.len()) {
+                *m = [
+                    amvp(&self.info, &self.recon, &refs, pu, list, r as i8, 0),
+                    amvp(&self.info, &self.recon, &refs, pu, list, r as i8, 1),
+                ];
             }
-            // Whole samples are searched on the weighted reference where the
-            // list is weighted (`search_b`), the sub-sample rings below on
-            // the reference itself under the weighted scoring.
-            if let Some(p) = self.parent_seed(pu, list, 0) {
-                seeds[ns] = p;
-                ns += 1;
-            }
-            let seeds = &seeds[..ns];
-            let full = self.search_full(
-                ctx,
-                self.search_b[list].as_ref().unwrap_or(plane),
-                x0,
-                y0,
-                wh,
-                src,
-                y_stride,
-                seeds,
-                lam,
-                mvp[list],
-            );
-            // Scored under the weighting a one-list prediction from this
-            // list carries, so the vector is chosen for the prediction
-            // that will be made.
-            let wp = self.wp_b[list][0];
-            let half = self.half_for(if list == 0 { ref0.poc } else { ref1.poc });
-            uni[list] = self.refine_subpel(
-                ctx,
-                plane,
-                half.as_deref(),
-                wp,
-                list,
-                x0,
-                y0,
-                wh,
-                src,
-                y_stride,
-                full,
-                lam,
-                mvp[list],
-            );
-            self.note_seed(pu, list, 0, uni[list].0);
         }
 
-        // The three AMVP shapes. `inter_pred_idc` costs two bins for a uni
-        // shape and one for BI (the reader stops after a set first bin),
-        // on top of merge_flag, rqt_root_cbf and a mvp_flag per used list
-        // — the same approximate-bin-count placeholder policy as the rest
-        // of this module.
+        let src = &src_y[y0 * y_stride + x0..];
         let mvd_for = |mv: Mv, p: Mv| Mv::new(mv.x.wrapping_sub(p.x), mv.y.wrapping_sub(p.y));
         // A whole CU's AMVP syntax, or one unit's of two.
-        let amvp_bits = |idc: u8, mvd: [Mv; 2], fl: [u8; 2]| {
+        let amvp_bits = |idc: u8, mvd: [Mv; 2], fl: [u8; 2], ri: [i8; 2]| {
             if whole {
-                rate.amvp_b(idc, mvd, fl, true)
+                rate.amvp_b(idc, mvd, fl, ri, nref, true)
             } else {
                 rate.pu(
                     &PuPick {
                         idc,
                         mvd,
                         mvp_flag: fl,
+                        ref_idx: ri,
                         ..PuPick::default()
                     },
                     true,
                     pu,
-                    1,
+                    nref,
                 )
             }
         };
-        let mut best_mvd = [Mv::ZERO; 2];
-        let mut best_flag = [0u8; 2];
+
+        // Per list and reference: search, then the cheaper predictor. A
+        // list's winner is its reference of least SATD plus the bits of
+        // its one-list AMVP syntax.
+        // (vector, satd, ref, mvd, mvp flag, cost)
+        let mut uni = [(Mv::ZERO, u32::MAX, 0usize, Mv::ZERO, 0u8, f32::INFINITY); 2];
         for list in 0..2usize {
-            let a = mvd_for(uni[list].0, mvp[list][0]);
-            let b = mvd_for(uni[list].0, mvp[list][1]);
-            let idc_for = |l: usize| if l == 0 { 0u8 } else { 1 };
-            let one = |m: Mv, f: u8| {
-                let mut mvd = [Mv::ZERO; 2];
-                mvd[list] = m;
-                let mut fl = [0u8; 2];
-                fl[list] = f;
-                amvp_bits(idc_for(list), mvd, fl)
-            };
-            let pick1 = one(b, 1) < one(a, 0);
-            best_flag[list] = u8::from(pick1);
-            best_mvd[list] = if pick1 { b } else { a };
+            for (r, rf) in lists[list].iter().enumerate() {
+                if r > 0 && !self.b_ref_searched(pu, list) {
+                    continue;
+                }
+                let plane = &rf.y;
+                let mut seeds = [Mv::ZERO; 3 + MAX_MERGE_CAND + 1];
+                let mut ns = 3;
+                (seeds[1], seeds[2]) = (mvp[list][r][0], mvp[list][r][1]);
+                for c in merge.iter().filter(|c| c.ref_idx[list] == r as i8) {
+                    seeds[ns] = c.mv[list];
+                    ns += 1;
+                }
+                if let Some(p) = self.parent_seed(pu, list, r) {
+                    seeds[ns] = p;
+                    ns += 1;
+                }
+                let seeds = &seeds[..ns];
+                // Whole samples are searched on the weighted reference
+                // where the list is weighted (`search_b`, reference 0
+                // only: a weighted slice has one per list), the sub-sample
+                // rings on the reference itself under the weighted
+                // scoring.
+                let full = self.search_full(
+                    ctx,
+                    self.search_b[list].as_ref().unwrap_or(plane),
+                    x0,
+                    y0,
+                    wh,
+                    src,
+                    y_stride,
+                    seeds,
+                    lam,
+                    mvp[list][r],
+                );
+                let wp = self.wp_b[list][0];
+                let half = self.half_for(rf.poc);
+                let (mv, satd) = self.refine_subpel(
+                    ctx,
+                    plane,
+                    half.as_deref(),
+                    wp,
+                    list,
+                    x0,
+                    y0,
+                    wh,
+                    src,
+                    y_stride,
+                    full,
+                    lam,
+                    mvp[list][r],
+                );
+                self.note_seed(pu, list, r, mv);
+                let mut ri = [-1i8; 2];
+                ri[list] = r as i8;
+                let one = |m: Mv, f: u8| {
+                    let mut mvd = [Mv::ZERO; 2];
+                    mvd[list] = m;
+                    let mut fl = [0u8; 2];
+                    fl[list] = f;
+                    amvp_bits(list as u8, mvd, fl, ri)
+                };
+                let a = mvd_for(mv, mvp[list][r][0]);
+                let b = mvd_for(mv, mvp[list][r][1]);
+                let (ba, bb) = (one(a, 0), one(b, 1));
+                let (mvd, fl, bits) = if bb < ba { (b, 1, bb) } else { (a, 0, ba) };
+                let cost = satd as f32 + lam * bits;
+                if cost < uni[list].5 {
+                    uni[list] = (mv, satd, r, mvd, fl, cost);
+                }
+            }
         }
-        // idc 0 / 1: one list, its mvd and mvp_flag.
+        let d = self.depth_of(pu);
+        if d < 4 && whole {
+            self.b_ref_pick[d] = Some((
+                pu.x_cb as u32,
+                pu.y_cb as u32,
+                [uni[0].2 as u8, uni[1].2 as u8],
+            ));
+        }
+
+        // idc 0 / 1: one list.
         let mut best: Option<(u8, u32)> = None; // (idc, satd)
         let mut best_cost = f32::INFINITY;
         for (list, u) in uni.iter().enumerate() {
-            let mut mvd = [Mv::ZERO; 2];
-            mvd[list] = best_mvd[list];
-            let mut fl = [0u8; 2];
-            fl[list] = best_flag[list];
-            let bits = amvp_bits(list as u8, mvd, fl);
-            let cost = u.1 as f32 + lam * bits;
-            if cost < best_cost {
-                best_cost = cost;
+            if u.5 < best_cost {
+                best_cost = u.5;
                 best = Some((list as u8, u.1));
             }
         }
+        let bi_ref = [uni[0].2, uni[1].2];
+        let bi_ri = [bi_ref[0] as i8, bi_ref[1] as i8];
+        let planes = [&lists[0][bi_ref[0]].y, &lists[1][bi_ref[1]].y];
         // idc 2: the bi trial at the two winners — not for an 8x4 or 4x8
         // unit, which the reader gives no PRED_BI spelling (its
         // `inter_pred_idc` codes one bin, L0 or L1, where `w + h == 12`).
+        // A weighted slice's bi weighting is reference 0's of each list,
+        // which is the only reference such a slice has.
         let bi_ok = pu.w + pu.h != 12;
         let mut bi_satd = if bi_ok {
             self.satd_bi_at(
                 ctx,
-                &ref0.y,
-                &ref1.y,
+                planes[0],
+                planes[1],
                 x0,
                 y0,
                 wh,
@@ -1742,9 +1770,9 @@ impl<S: Sample> InterPicture<S> {
             u32::MAX
         };
         let mut bi_mv = [uni[0].0, uni[1].0];
-        let (mut bi_mvd, mut bi_flag) = (best_mvd, best_flag);
+        let (mut bi_mvd, mut bi_flag) = ([uni[0].3, uni[1].3], [uni[0].4, uni[1].4]);
         if bi_ok {
-            let mut cost = bi_satd as f32 + lam * amvp_bits(2, bi_mvd, bi_flag);
+            let mut cost = bi_satd as f32 + lam * amvp_bits(2, bi_mvd, bi_flag, bi_ri);
             let default_wp = [0, 1, 2]
                 .iter()
                 .all(|&i| matches!(self.wp_b[i][0], Weighting::Default));
@@ -1752,10 +1780,13 @@ impl<S: Sample> InterPicture<S> {
                 // The list whose own search did worse is re-searched first,
                 // against the better one's prediction.
                 let first = usize::from(uni[0].1 < uni[1].1);
-                let planes = [&ref0.y, &ref1.y];
-                let halves = [self.half_for(ref0.poc), self.half_for(ref1.poc)];
+                let halves = [
+                    self.half_for(lists[0][bi_ref[0]].poc),
+                    self.half_for(lists[1][bi_ref[1]].poc),
+                ];
                 for it in 0..2 * self.bi_refine as usize {
                     let list = (first + it) % 2;
+                    let p = mvp[list][bi_ref[list]];
                     let mv = self.refine_bi(
                         ctx,
                         planes,
@@ -1768,7 +1799,7 @@ impl<S: Sample> InterPicture<S> {
                         y_stride,
                         bi_mv,
                         lam,
-                        mvp[list],
+                        p,
                     );
                     if mv == bi_mv[list] {
                         if it > 0 {
@@ -1778,24 +1809,24 @@ impl<S: Sample> InterPicture<S> {
                     }
                     let mut trial = bi_mv;
                     trial[list] = mv;
-                    let a = mvd_for(mv, mvp[list][0]);
-                    let b = mvd_for(mv, mvp[list][1]);
+                    let a = mvd_for(mv, p[0]);
+                    let b = mvd_for(mv, p[1]);
                     let mut mvd = bi_mvd;
                     let mut fl = bi_flag;
                     mvd[list] = a;
                     fl[list] = 0;
-                    let bits_a = amvp_bits(2, mvd, fl);
+                    let bits_a = amvp_bits(2, mvd, fl, bi_ri);
                     mvd[list] = b;
                     fl[list] = 1;
-                    let bits_b = amvp_bits(2, mvd, fl);
+                    let bits_b = amvp_bits(2, mvd, fl, bi_ri);
                     if bits_a <= bits_b {
                         mvd[list] = a;
                         fl[list] = 0;
                     }
                     let satd = self.satd_bi_at(
                         ctx,
-                        &ref0.y,
-                        &ref1.y,
+                        planes[0],
+                        planes[1],
                         x0,
                         y0,
                         wh,
@@ -1835,11 +1866,12 @@ impl<S: Sample> InterPicture<S> {
                 continue;
             }
             seen.push(key);
+            let plane = |list: usize| &lists[list][cand.ref_idx[list] as usize].y;
             let satd = match (cand.ref_idx[0] >= 0, cand.ref_idx[1] >= 0) {
                 (true, true) => self.satd_bi_at(
                     ctx,
-                    &ref0.y,
-                    &ref1.y,
+                    plane(0),
+                    plane(1),
                     x0,
                     y0,
                     wh,
@@ -1851,7 +1883,7 @@ impl<S: Sample> InterPicture<S> {
                 ),
                 (true, false) => self.satd_at_weighted(
                     ctx,
-                    &ref0.y,
+                    plane(0),
                     x0,
                     y0,
                     wh,
@@ -1863,7 +1895,7 @@ impl<S: Sample> InterPicture<S> {
                 ),
                 (false, true) => self.satd_at_weighted(
                     ctx,
-                    &ref1.y,
+                    plane(1),
                     x0,
                     y0,
                     wh,
@@ -1885,7 +1917,7 @@ impl<S: Sample> InterPicture<S> {
                     },
                     true,
                     pu,
-                    1,
+                    nref,
                 )
             };
             let cost = satd as f32 + lam * bits;
@@ -1909,22 +1941,20 @@ impl<S: Sample> InterPicture<S> {
             _ => {
                 // The motion the winner carries, as `ref_idx` pairs the
                 // decoder would store.
-                let r: [i8; 2] = match best_idc {
-                    0 => [0, -1],
-                    1 => [-1, 0],
-                    _ => [0, 0],
-                };
-                let (mvd, mvp_flag, mv) = if best_idc == 2 {
-                    (bi_mvd, bi_flag, bi_mv)
-                } else {
-                    (
-                        best_mvd,
-                        best_flag,
-                        [
-                            if r[0] >= 0 { uni[0].0 } else { Mv::ZERO },
-                            if r[1] >= 0 { uni[1].0 } else { Mv::ZERO },
-                        ],
-                    )
+                let (r, mvd, mvp_flag, mv) = match best_idc {
+                    0 => (
+                        [bi_ri[0], -1],
+                        [uni[0].3, Mv::ZERO],
+                        [uni[0].4, 0],
+                        [uni[0].0, Mv::ZERO],
+                    ),
+                    1 => (
+                        [-1, bi_ri[1]],
+                        [Mv::ZERO, uni[1].3],
+                        [0, uni[1].4],
+                        [Mv::ZERO, uni[1].0],
+                    ),
+                    _ => (bi_ri, bi_mvd, bi_flag, bi_mv),
                 };
                 PuPick {
                     merge_idx: None,
@@ -2135,13 +2165,7 @@ impl<S: Sample> InterPicture<S> {
             if pick.ref_idx[list] >= 0 {
                 let poc = match refs {
                     TreeRefs::P(l0) => l0[pick.ref_idx[0] as usize].poc,
-                    TreeRefs::B(r0, r1) => {
-                        if list == 0 {
-                            r0.poc
-                        } else {
-                            r1.poc
-                        }
-                    }
+                    TreeRefs::B(l0, l1) => [l0, l1][list][pick.ref_idx[list] as usize].poc,
                 };
                 mi.ref_delta[list] =
                     (self.cur_poc - poc).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
@@ -2226,8 +2250,8 @@ impl<S: Sample> InterPicture<S> {
                     );
                 }
                 TreeRefs::B(r0, r1) => {
-                    let a = (pk.ref_idx[0] >= 0).then_some((r0, pk.mv[0]));
-                    let b = (pk.ref_idx[1] >= 0).then_some((r1, pk.mv[1]));
+                    let a = (pk.ref_idx[0] >= 0).then(|| (r0[pk.ref_idx[0] as usize], pk.mv[0]));
+                    let b = (pk.ref_idx[1] >= 0).then(|| (r1[pk.ref_idx[1] as usize], pk.mv[1]));
                     let wp = self.wp_b_for(pk.ref_idx);
                     predict_block(
                         ctx.dsp,
@@ -2791,8 +2815,8 @@ impl<S: Sample> InterPicture<S> {
                 );
             }
             TreeRefs::B(r0, r1) => {
-                let a = (pick.ref_idx[0] >= 0).then_some((r0, pick.mv[0]));
-                let b = (pick.ref_idx[1] >= 0).then_some((r1, pick.mv[1]));
+                let a = (pick.ref_idx[0] >= 0).then(|| (r0[pick.ref_idx[0] as usize], pick.mv[0]));
+                let b = (pick.ref_idx[1] >= 0).then(|| (r1[pick.ref_idx[1] as usize], pick.mv[1]));
                 let wp = self.wp_b_for(pick.ref_idx);
                 predict_block(
                     ctx.dsp,
@@ -3024,8 +3048,8 @@ impl<S: Sample> InterPicture<S> {
             return (coded, ssd, bits);
         }
         let (nref, is_b) = match refs {
-            TreeRefs::P(l0) => (l0.len() as u32, false),
-            TreeRefs::B(..) => (1, true),
+            TreeRefs::P(l0) => ([l0.len() as u32, 0], false),
+            TreeRefs::B(l0, l1) => ([l0.len() as u32, l1.len() as u32], true),
         };
         let saved = self.take_save(x0, y0, n);
         // A cheap look first: the best intra mode's SATD cost against the
@@ -3172,8 +3196,8 @@ impl<S: Sample> InterPicture<S> {
             _ => return (coded, ssd, bits),
         };
         let (nref, is_b) = match refs {
-            TreeRefs::P(l0) => (l0.len() as u32, false),
-            TreeRefs::B(..) => (1, true),
+            TreeRefs::P(l0) => ([l0.len() as u32, 0], false),
+            TreeRefs::B(l0, l1) => ([l0.len() as u32, l1.len() as u32], true),
         };
         let n = 1usize << log2;
         let saved = self.take_save(x0, y0, n);
@@ -3241,7 +3265,7 @@ impl<S: Sample> InterPicture<S> {
                     src.c_stride,
                     &mut d,
                 );
-                (l0.len() as u32, false)
+                ([l0.len() as u32, 0], false)
             }
             TreeRefs::B(r0, r1) => {
                 self.code_cu_b_into(
@@ -3259,7 +3283,7 @@ impl<S: Sample> InterPicture<S> {
                     src.c_stride,
                     &mut d,
                 );
-                (1, true)
+                ([r0.len() as u32, r1.len() as u32], true)
             }
         };
         if self.gated {
@@ -3486,6 +3510,28 @@ impl<S: Sample> InterPicture<S> {
                 let inside =
                     (pu.x_cb as u32).wrapping_sub(px) < n && (pu.y_cb as u32).wrapping_sub(py) < n;
                 !inside || pr as usize == r
+            }
+            None => true,
+        }
+    }
+
+    /// [`Self::ref_searched`] for list `list` of a B unit: reference 0
+    /// always, a further one under [`Self::b_limit_refs`] only where the
+    /// enclosing unit chose a further one.
+    fn b_ref_searched(&self, pu: &PuPos, list: usize) -> bool {
+        if !self.b_limit_refs {
+            return true;
+        }
+        let d = self.depth_of(pu);
+        if d == 0 {
+            return true;
+        }
+        match self.b_ref_pick[d - 1] {
+            Some((px, py, pr)) => {
+                let n = (pu.n_cb as u32) * 2;
+                let inside =
+                    (pu.x_cb as u32).wrapping_sub(px) < n && (pu.y_cb as u32).wrapping_sub(py) < n;
+                !inside || pr[list] > 0
             }
             None => true,
         }
@@ -4077,8 +4123,9 @@ fn weighted_search_plane<S: Sample>(
 pub enum TreeRefs<'r, S: Sample> {
     /// A P slice's `RefPicList0`, nearest first.
     P(&'r [&'r Frame<S>]),
-    /// A B slice's list-0 and list-1 anchors.
-    B(&'r Frame<S>, &'r Frame<S>),
+    /// A B slice's `RefPicList0` (the past, nearest first) and
+    /// `RefPicList1` (the future, nearest first).
+    B(&'r [&'r Frame<S>], &'r [&'r Frame<S>]),
 }
 
 impl<S: Sample> Clone for TreeRefs<'_, S> {
@@ -4374,14 +4421,22 @@ impl Rate {
     /// `merge_idx` or its AMVP syntax, exactly as `write_prediction_unit`
     /// spells it for the unit `pu`, in a B slice or a P slice of `nref`
     /// active list-0 references.
-    pub(crate) fn pu(&self, sig: &PuPick, is_b: bool, pu: &PuPos, nref: u32) -> f32 {
+    pub(crate) fn pu(&self, sig: &PuPick, is_b: bool, pu: &PuPos, nref: [u32; 2]) -> f32 {
         self.count(|e, cx| write_prediction_unit(e, cx, sig, is_b, pu.w, pu.h, self.depth, nref))
     }
 
     /// B-slice AMVP: `inter_pred_idc`, then per list — interleaved as
     /// `prediction_unit` reads them — the `mvd` and `mvp_lX_flag` of each
     /// list the shape uses.
-    pub(crate) fn amvp_b(&self, idc: u8, mvd: [Mv; 2], mvp_flag: [u8; 2], root_cbf: bool) -> f32 {
+    pub(crate) fn amvp_b(
+        &self,
+        idc: u8,
+        mvd: [Mv; 2],
+        mvp_flag: [u8; 2],
+        ref_idx: [i8; 2],
+        nref: [u32; 2],
+        root_cbf: bool,
+    ) -> f32 {
         let n = 1i32 << self.log2_cu;
         self.count(|e, cx| {
             self.prefix(e, cx, false);
@@ -4397,6 +4452,9 @@ impl Rate {
                 };
                 if !uses {
                     continue;
+                }
+                if nref[list] > 1 {
+                    write_ref_idx(e, cx, nref[list], ref_idx[list].max(0) as u32);
                 }
                 write_mvd(e, cx, mvd[list]);
                 write_mvp_flag(e, cx, mvp_flag[list] != 0);
@@ -4423,7 +4481,7 @@ pub(crate) fn write_prediction_unit(
     w: i32,
     h: i32,
     depth: u32,
-    nref: u32,
+    nref: [u32; 2],
 ) {
     if let Some(idx) = pu.merge_idx {
         write_merge_flag(e, cx, true);
@@ -4448,8 +4506,8 @@ pub(crate) fn write_prediction_unit(
         if !uses {
             continue;
         }
-        if list == 0 && !is_b && nref > 1 {
-            write_ref_idx(e, cx, nref, u32::from(pu.ref_idx[0].max(0) as u8));
+        if nref[list] > 1 {
+            write_ref_idx(e, cx, nref[list], u32::from(pu.ref_idx[list].max(0) as u8));
         }
         write_mvd(e, cx, pu.mvd[list]);
         write_mvp_flag(e, cx, pu.mvp_flag[list] != 0);
@@ -5393,8 +5451,18 @@ mod tests {
         let mut decisions = Vec::new();
         for cy in 0..h / n {
             for cx in 0..w / n {
-                decisions
-                    .push(pic.code_ctu_b(&ctx, &ref0, &ref1, cx, cy, &sy, w, &scb, &scr, c_stride));
+                decisions.push(pic.code_ctu_b(
+                    &ctx,
+                    &[&ref0],
+                    &[&ref1],
+                    cx,
+                    cy,
+                    &sy,
+                    w,
+                    &scb,
+                    &scr,
+                    c_stride,
+                ));
             }
         }
         assert_invariants(&decisions, cat);

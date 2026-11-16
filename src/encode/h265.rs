@@ -1674,16 +1674,33 @@ impl<S: Sample> Core<S> {
         // the SPS sized the decoded picture buffer to hold. Nearest first
         // is not cosmetic — it is the order the reader builds the list in
         // from the reference picture set, so index 0 must be the nearest.
-        // A B picture takes one past reference: its second list is the
-        // future anchor, and `max_refs` names the P choice only.
+        // A B picture takes up to `Tune::b_refs` past references in list 0
+        // and as many future ones in list 1, nearest first (one each under
+        // a weighted table, whose B entries this encoder fits for
+        // reference 0 alone).
+        let b_refs = if self.pps_opts.weighted_bipred {
+            1
+        } else {
+            super::h265_tune::Tune::of(&self.cfg)
+                .b_refs
+                .clamp(1, crate::encode::h265_me::MAX_B_REFS)
+        };
         let mut l0: Vec<&crate::hevc::frame::Frame<S>> =
             self.refs.iter().filter(|f| f.poc < cur).collect();
         l0.sort_by_key(|f| -f.poc);
         l0.truncate(if c.kind == Kind::B {
-            1
+            b_refs
         } else {
             (self.cfg.max_refs.max(1) as usize).min(l0.len())
         });
+        let mut l1: Vec<&crate::hevc::frame::Frame<S>> = if c.kind == Kind::B {
+            self.refs.iter().filter(|f| f.poc > cur).collect()
+        } else {
+            Vec::new()
+        };
+        l1.sort_by_key(|f| f.poc);
+        l1.truncate(b_refs);
+        let nref = [l0.len() as u32, l1.len() as u32];
         let past = *l0.first().ok_or_else(|| {
             Error::bitstream("H.265 encode: an inter picture with no past reference")
         })?;
@@ -1697,7 +1714,6 @@ impl<S: Sample> Core<S> {
                 "H.265 encode: a B picture with no future reference",
             ));
         }
-        let future_poc = future.map(|f| f.poc);
 
         let cpu = Cpu::detect_honouring_env();
         let dsp = HevcDsp::<S>::new(cpu);
@@ -1744,6 +1760,7 @@ impl<S: Sample> Core<S> {
         pic.split_gate = tune.split_gate;
         pic.split_gate_above = tune.split_gate_above;
         pic.slice_b = c.kind == Kind::B;
+        pic.b_limit_refs = tune.b_limit_refs;
         // SAO in a picture nothing references improves only that picture,
         // and under the tiers not by enough to pay for its decision.
         let sao_on = self.cfg.sao && (c.reference || tune.sao_nonref);
@@ -1858,10 +1875,7 @@ impl<S: Sample> Core<S> {
 
         // The pictures this slice predicts from: every picture in
         // RefPicList0, and for a B picture the future anchor.
-        let mut used: Vec<i32> = l0.iter().map(|f| f.poc).collect();
-        if let (Some(f), Kind::B) = (future_poc, c.kind) {
-            used.push(f);
-        }
+        let used: Vec<i32> = l0.iter().chain(&l1).map(|f| f.poc).collect();
         let mut w = BitWriter::with_capacity(cw * ch / 4);
         syn::write_slice_header(
             &syn::SliceHeader {
@@ -1945,7 +1959,7 @@ impl<S: Sample> Core<S> {
             c_stride: ccw,
         };
         let refs = match future {
-            Some(r1) if c.kind == Kind::B => TreeRefs::B(past, r1),
+            Some(_) if c.kind == Kind::B => TreeRefs::B(&l0, &l1),
             _ => TreeRefs::P(&l0),
         };
         // Decisions price their bins at the contexts the picture has
@@ -1985,7 +1999,7 @@ impl<S: Sample> Core<S> {
                                     cat,
                                     bypass,
                                     None,
-                                    l0.len() as u32,
+                                    nref,
                                     cu.depth,
                                     c.kind == Kind::B,
                                 ),
@@ -2004,8 +2018,8 @@ impl<S: Sample> Core<S> {
                     ..mctx
                 };
                 let d = match future {
-                    Some(r1) if c.kind == Kind::B => {
-                        pic.code_ctu_b(&cctx, past, r1, cxu, cy, &py, cw, &pcb, &pcr, ccw)
+                    Some(_) if c.kind == Kind::B => {
+                        pic.code_ctu_b(&cctx, &l0, &l1, cxu, cy, &py, cw, &pcb, &pcr, ccw)
                     }
                     _ => pic.code_ctu(&cctx, &l0, cxu, cy, &py, cw, &pcb, &pcr, ccw),
                 };
@@ -2067,8 +2081,8 @@ impl<S: Sample> Core<S> {
                 let (plain, weighted) = match refs {
                     TreeRefs::B(r0, r1) => pic.weighting_gain_b(
                         &mctx,
-                        r0,
-                        r1,
+                        r0[0],
+                        r1[0],
                         cu.x0,
                         cu.y0,
                         cu.log2,
@@ -2113,7 +2127,6 @@ impl<S: Sample> Core<S> {
             // neighbours and split_cu_flag's counts deeper ones; the tree
             // context carries both, per 4x4, as the units are written.
             let mut tc = TreeCtx::new(&g);
-            let nref = l0.len() as u32;
             let start = e.position();
             for cy in 0..hc {
                 for cxu in 0..wc {
@@ -3212,7 +3225,7 @@ pub(crate) fn p_cu_bits(
     qp: i32,
     pps_bypass: bool,
     is_b: bool,
-    nref: u32,
+    nref: [u32; 2],
     depth: u32,
 ) -> f32 {
     let mut cx = initial_contexts(if is_b { 2 } else { 1 }, qp);
@@ -3363,7 +3376,7 @@ impl KindCensus {
                         InterCuKind::UseIntra => unreachable!("replaced by the intra decision"),
                     }
                     c.bi += u64::from(d.ref_idx >= 0 && d.ref_idx_l1 >= 0);
-                    c.ref_older += u64::from(d.ref_idx >= 1);
+                    c.ref_older += u64::from(d.ref_idx >= 1 || d.ref_idx_l1 >= 1);
                 }
             }
         }
@@ -3562,7 +3575,7 @@ fn write_cu_inter(
     cat: u32,
     pps_bypass: bool,
     qp_delta: Option<i32>,
-    nref: u32,
+    nref: [u32; 2],
     depth: u32,
     is_b: bool,
 ) {
@@ -3583,7 +3596,7 @@ fn write_cu_inter_head(
     above_skip: Option<bool>,
     pps_bypass: bool,
     qp_delta: Option<i32>,
-    nref: u32,
+    nref: [u32; 2],
     depth: u32,
     is_b: bool,
 ) -> bool {
@@ -3593,7 +3606,8 @@ fn write_cu_inter_head(
         "a bypass CU is unspellable unless the PPS enables the flag"
     );
     debug_assert!(
-        u32::from(d.ref_idx.max(0) as u8) < nref.max(1),
+        u32::from(d.ref_idx.max(0) as u8) < nref[0].max(1)
+            && u32::from(d.ref_idx_l1.max(0) as u8) < nref[1].max(1),
         "a CU naming a reference beyond the active list"
     );
     // The unit's `split_cu_flag`, and the quadtree above it, are the
@@ -3658,8 +3672,8 @@ fn write_cu_inter_head(
             // single-reference stream writes nothing here and is
             // unchanged. `nref` is the count the slice header derived
             // from its own reference picture set.
-            if nref > 1 {
-                write_ref_idx(e, cx, nref, u32::from(d.ref_idx.max(0) as u8));
+            if nref[0] > 1 {
+                write_ref_idx(e, cx, nref[0], u32::from(d.ref_idx.max(0) as u8));
             }
             write_mvd(e, cx, mvd);
             write_mvp_flag(e, cx, mvp_flag != 0);
@@ -3670,10 +3684,10 @@ fn write_cu_inter_head(
         }
         InterCuKind::BAmvp { idc, mvd, mvp_flag } => {
             write_merge_flag(e, cx, false);
-            // inter_pred_idc, then per list -- L0's mvd and mvp_flag, then
-            // L1's, interleaved as `prediction_unit` reads them rather
-            // than grouped by element. No ref_idx in either list: each
-            // declares exactly one active reference. See
+            // inter_pred_idc, then per list -- L0's ref_idx (where the
+            // list has more than one entry), mvd and mvp_flag, then L1's,
+            // interleaved as `prediction_unit` reads them rather than
+            // grouped by element. See
             // `write_inter_pred_idc`'s docblock for the `w + h != 12`
             // reading; a 2Nx2N unit of 8x8 or more is never 12, and the
             // first bin's context is the unit's CtDepth.
@@ -3687,6 +3701,10 @@ fn write_cu_inter_head(
                 };
                 if !uses {
                     continue;
+                }
+                if nref[list] > 1 {
+                    let r = if list == 0 { d.ref_idx } else { d.ref_idx_l1 };
+                    write_ref_idx(e, cx, nref[list], u32::from(r.max(0) as u8));
                 }
                 write_mvd(e, cx, mvd[list]);
                 write_mvp_flag(e, cx, mvp_flag[list] != 0);
@@ -3724,7 +3742,7 @@ pub(crate) fn p_cu_bits_with_tree(
     qp: i32,
     pps_bypass: bool,
     is_b: bool,
-    nref: u32,
+    nref: [u32; 2],
     depth: u32,
     tree: f64,
 ) -> f32 {
@@ -5586,7 +5604,19 @@ mod tests {
                 0,
                 false,
             );
-            write_cu_inter(&mut e, &mut cx, d, None, None, 1, false, None, 1, 0, false);
+            write_cu_inter(
+                &mut e,
+                &mut cx,
+                d,
+                None,
+                None,
+                1,
+                false,
+                None,
+                [1, 0],
+                0,
+                false,
+            );
             e.fractional_bits() as f32
         };
 
