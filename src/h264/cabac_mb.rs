@@ -2555,14 +2555,38 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc, L: Level>(
         // significant coefficient that is as good as random.)
         let top = 63 - mask.leading_zeros() as usize;
         let end = if top == last { last } else { top + 1 };
-        for i in 0..end {
-            let b = ((mask >> i) & 1) as u32;
-            c.decision(out, &mut ctx[(sig_base + sig_off[i] as usize) & M], b);
-            c.decision_if(
+        // Every position its own pair of contexts (the 4x4-class blocks):
+        // all of them priced at once, where the coder can.
+        let distinct = max_coeff <= 16 && core::ptr::eq(sig_off, &IDENTITY_OFF[..]);
+        if distinct {
+            c.sig_map_distinct(out, ctx, sig_base, last_base, mask, top, end);
+        }
+        // Otherwise (an 8x8 block, whose positions share contexts) the
+        // significance bins first, then the last bins of the significant
+        // positions only: the two sets of contexts are apart, so the
+        // price and the states are the interleaved walk's, and a last
+        // context's state is no longer carried through every position
+        // between two significant ones (a chain of selects through
+        // memory, one link a position).
+        for i in 0..if distinct { 0 } else { end } {
+            c.decision(
                 out,
-                &mut ctx[(last_base + last_off[i] as usize) & M],
-                (i == top) as u32,
-                b != 0,
+                &mut ctx[(sig_base + sig_off[i] as usize) & M],
+                ((mask >> i) & 1) as u32,
+            );
+        }
+        let mut rest = if distinct {
+            0
+        } else {
+            mask & !(u64::MAX << end)
+        };
+        while rest != 0 {
+            let p = rest.trailing_zeros() as usize;
+            rest &= rest - 1;
+            c.decision(
+                out,
+                &mut ctx[(last_base + last_off[p] as usize) & M],
+                (p == top) as u32,
             );
         }
     } else {
@@ -2623,9 +2647,10 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc, L: Level>(
             // The reader counts from one and stops at fourteen without
             // consuming a terminator, so a capped prefix writes ones only.
             let prefix = abs_m1.min(14);
-            for _ in 1..prefix {
-                c.decision(out, c1, 1);
-            }
+            // The ones after the first bin, on one context: the
+            // estimator prices the run from a table (a chain of dependent
+            // bins otherwise).
+            c.ones(out, c1, prefix - 1);
             if prefix < 14 {
                 c.decision(out, c1, 0);
             } else {

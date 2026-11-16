@@ -45,6 +45,7 @@ use std::sync::LazyLock;
 
 use crate::bitwriter::BitWriter;
 use crate::cabac::{Ctx, LPS_RANGE, NEXT_STATE_LPS, NEXT_STATE_MPS};
+use crate::h264::cabac_mb::NUM_CTX;
 
 /// `log2(range_before / range_after)` for every context-coded bin the
 /// coder can meet, tabulated.
@@ -797,6 +798,55 @@ pub(crate) trait BinCore<O: ?Sized>: Copy {
             self.decision(out, ctx, bin);
         }
     }
+    /// `n` (at most [`ONES_MAX`]) context-coded ones in a row on one
+    /// context: a level's unary prefix.
+    #[inline(always)]
+    fn ones(&mut self, out: &mut O, ctx: &mut Ctx, n: u32) {
+        for _ in 0..n {
+            self.decision(out, ctx, 1);
+        }
+    }
+    /// A significance map whose positions each have their own
+    /// significance and last contexts (`sig + i`, `last + i`): for each
+    /// position before `end`, its bit of `mask`, then — where that is set
+    /// — whether it is `top`. The walk a position at a time; the
+    /// estimator's prices every position at once.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn sig_map_distinct(
+        &mut self,
+        out: &mut O,
+        ctx: &mut [Ctx; NUM_CTX],
+        sig: usize,
+        last: usize,
+        mask: u64,
+        top: usize,
+        end: usize,
+    ) {
+        sig_map_walk(self, out, ctx, sig, last, mask, top, end);
+    }
+}
+
+/// [`BinCore::sig_map_distinct`] a position at a time, each last bin
+/// priced or not by a mask rather than a branch ([`BinCore::decision_if`]).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn sig_map_walk<O: ?Sized, C: BinCore<O>>(
+    c: &mut C,
+    out: &mut O,
+    ctx: &mut [Ctx; NUM_CTX],
+    sig: usize,
+    last: usize,
+    mask: u64,
+    top: usize,
+    end: usize,
+) {
+    const M: usize = NUM_CTX - 1;
+    for i in 0..end {
+        let b = ((mask >> i) & 1) as u32;
+        c.decision(out, &mut ctx[(sig + i) & M], b);
+        c.decision_if(out, &mut ctx[(last + i) & M], (i == top) as u32, b != 0);
+    }
 }
 
 /// The bin-level interface the macroblock writers code through, so one
@@ -901,6 +951,97 @@ static EST_COST_FX: [u32; 256] = {
     t
 };
 
+/// [`EST_COST_FX`] and [`EST_NEXT`] by a bin's *key*, `state ^ bin` —
+/// `pStateIdx << 1` with whether the bin is the LPS, all a bin's price
+/// depends on — as four 128-byte planes for byte table lookups: the
+/// price's three bytes, lowest first, and the next state with `valMPS`
+/// still to be xored in (a state's next state is the same bits whatever
+/// its `valMPS`, but for that bit). [`sig_map_neon`]'s tables.
+#[cfg(target_arch = "aarch64")]
+static KEY_PLANES: [[u8; 128]; 4] = {
+    let mut t = [[0u8; 128]; 4];
+    let mut k = 0;
+    while k < 128 {
+        // The state with valMPS 0 and the bin that gives this key.
+        let i = (((k & !1) << 1) | (k & 1)) & 255;
+        let c = EST_COST_FX[i];
+        t[0][k] = c as u8;
+        t[1][k] = (c >> 8) as u8;
+        t[2][k] = (c >> 16) as u8;
+        t[3][k] = EST_NEXT[i];
+        k += 1;
+    }
+    t
+};
+
+/// Whether [`EstCore::sig_map_distinct`] takes [`sig_map_neon`]: where
+/// the `h264_enc` table would take NEON (not under `H26X_NO_SIMD`,
+/// `H26X_MAX_SIMD=none` or `H26X_ENC_NO_SIMD`), decided once.
+#[cfg(target_arch = "aarch64")]
+fn sig_map_simd() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        crate::dsp::Cpu::detect_honouring_env().neon && !crate::dsp::enc_simd_disabled("h264_enc")
+    })
+}
+
+/// [`BinCore::sig_map_distinct`] for the estimator in NEON: every
+/// position's significance bin and (where significant) last bin at once,
+/// sixteen lanes of each. The positions' contexts are distinct and none
+/// is read after another is written, so the bins are independent: each
+/// lane's state moves as the bin-at-a-time walk moves it, and the price
+/// is the same integers summed in another order. `sig` and `last` are
+/// the sixteen states from the block's first significance and last
+/// context; lanes from `end` on are left as they are. Returns the price.
+///
+/// # Safety
+/// NEON; `sig` and `last` each sixteen bytes, not overlapping.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sig_map_neon(sig: *mut u8, last: *mut u8, mask: u64, top: usize, end: usize) -> u64 {
+    use std::arch::aarch64::*;
+    unsafe {
+        const IOTA: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        const BIT: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let iota = vld1q_u8(IOTA.as_ptr());
+        let one = vdupq_n_u8(1);
+        // Positions before `end`; the significant ones, as 0xff bytes.
+        let on = vcltq_u8(iota, vdupq_n_u8(end as u8));
+        let m = vcombine_u8(vdup_n_u8(mask as u8), vdup_n_u8((mask >> 8) as u8));
+        let nz = vtstq_u8(m, vld1q_u8(BIT.as_ptr()));
+        let lon = vandq_u8(on, nz);
+        let s = vld1q_u8(sig);
+        let l = vld1q_u8(last);
+        let ks = veorq_u8(s, vandq_u8(nz, one));
+        let kl = veorq_u8(l, vandq_u8(vceqq_u8(iota, vdupq_n_u8(top as u8)), one));
+        let p = KEY_PLANES.as_ptr() as *const u8;
+        let (ks_hi, kl_hi) = (vsubq_u8(ks, vdupq_n_u8(64)), vsubq_u8(kl, vdupq_n_u8(64)));
+        // A 128-byte plane looked up: its low half, then its high half
+        // where the key is past it (out of range in the first, kept).
+        let look = |plane: usize, k: uint8x16_t, k_hi: uint8x16_t| -> uint8x16_t {
+            let base = p.add(128 * plane);
+            vqtbx4q_u8(
+                vqtbl4q_u8(vld1q_u8_x4(base), k),
+                vld1q_u8_x4(base.add(64)),
+                k_hi,
+            )
+        };
+        let ns = veorq_u8(look(3, ks, ks_hi), vandq_u8(s, one));
+        let nl = veorq_u8(look(3, kl, kl_hi), vandq_u8(l, one));
+        vst1q_u8(sig, vbslq_u8(on, ns, s));
+        vst1q_u8(last, vbslq_u8(lon, nl, l));
+        let mut sum = 0u64;
+        for b in 0..3 {
+            let c = vaddq_u16(
+                vpaddlq_u8(vandq_u8(look(b, ks, ks_hi), on)),
+                vpaddlq_u8(vandq_u8(look(b, kl, kl_hi), lon)),
+            );
+            sum += (vaddvq_u16(c) as u64) << (8 * b);
+        }
+        sum
+    }
+}
+
 impl CabacEstimator {
     /// A fresh estimate.
     pub(crate) fn new() -> Self {
@@ -917,12 +1058,47 @@ impl CabacEstimator {
 #[derive(Clone, Copy)]
 pub(crate) struct EstCore(u64);
 
+/// The most ones [`BinCore::ones`] codes at once: a level's prefix past
+/// its first bin (thirteen at the cap of fourteen).
+pub(crate) const ONES_MAX: u32 = 13;
+
+/// `n` ones in a row from each context state, priced and moved:
+/// `ONES[state][n]` is the price of the run in [`CabacEstimator`]'s fixed
+/// point, shifted up a byte, with the state the run leaves in the low
+/// byte — what `n` of [`EstCore::decision`] add and leave, one dependent
+/// load where the bins were a chain of `n` (each state the one before's
+/// table entry, through memory).
+static ONES: [[u32; ONES_MAX as usize + 1]; 128] = {
+    let mut t = [[0u32; ONES_MAX as usize + 1]; 128];
+    let mut s = 0;
+    while s < 128 {
+        let (mut st, mut cost) = (s, 0u32);
+        let mut n = 0;
+        while n <= ONES_MAX as usize {
+            t[s][n] = (cost << 8) | st as u32;
+            let i = (st << 1) | 1;
+            cost += EST_COST_FX[i];
+            st = EST_NEXT[i] as usize;
+            n += 1;
+        }
+        s += 1;
+    }
+    t
+};
+
 impl BinCore<CabacEstimator> for EstCore {
     #[inline(always)]
     fn decision(&mut self, _: &mut CabacEstimator, ctx: &mut Ctx, bin: u32) {
         let i = ((*ctx as usize) << 1 | bin as usize) & 255;
         self.0 += EST_COST_FX[i] as u64;
         *ctx = EST_NEXT[i];
+    }
+    #[inline(always)]
+    fn ones(&mut self, _: &mut CabacEstimator, ctx: &mut Ctx, n: u32) {
+        debug_assert!(n <= ONES_MAX);
+        let e = ONES[*ctx as usize & 127][n.min(ONES_MAX) as usize];
+        self.0 += (e >> 8) as u64;
+        *ctx = e as u8;
     }
     #[inline(always)]
     fn bypass(&mut self, _: &mut CabacEstimator, _bin: u32) {
@@ -934,6 +1110,29 @@ impl BinCore<CabacEstimator> for EstCore {
         // The bin's cost masked in, the state's move selected: no branch.
         self.0 += (EST_COST_FX[i] & 0u32.wrapping_sub(cond as u32)) as u64;
         *ctx = if cond { EST_NEXT[i] } else { *ctx };
+    }
+    #[inline(always)]
+    fn sig_map_distinct(
+        &mut self,
+        out: &mut CabacEstimator,
+        ctx: &mut [Ctx; NUM_CTX],
+        sig: usize,
+        last: usize,
+        mask: u64,
+        top: usize,
+        end: usize,
+    ) {
+        #[cfg(target_arch = "aarch64")]
+        if sig_map_simd() && sig + 16 <= NUM_CTX && last + 16 <= NUM_CTX && sig.abs_diff(last) >= 16
+        {
+            debug_assert!(end <= 15 && top < 16 && mask < 1 << 16);
+            let p = ctx.as_mut_ptr();
+            // SAFETY: NEON is baseline here; both sixteen-byte windows are
+            // inside the array (checked) and apart.
+            self.0 += unsafe { sig_map_neon(p.add(sig), p.add(last), mask, top, end) };
+            return;
+        }
+        sig_map_walk(self, out, ctx, sig, last, mask, top, end);
     }
 }
 
@@ -1247,6 +1446,89 @@ mod tests {
                 ops.push(Op::Terminate);
             }
             round_trip(&ops);
+        }
+    }
+
+    /// The estimator's run of ones from its table is the bins one at a
+    /// time: the same price and the same state, from every state and
+    /// every run length.
+    #[test]
+    fn estimator_ones_are_the_bins() {
+        for s in 0..128u8 {
+            for n in 0..=ONES_MAX {
+                let mut est = CabacEstimator::new();
+                let (mut c, out) = est.split();
+                let mut a = s;
+                c.ones(out, &mut a, n);
+                let mut walk = EstCore(0);
+                let mut b = s;
+                for _ in 0..n {
+                    walk.decision(&mut CabacEstimator::new(), &mut b, 1);
+                }
+                assert_eq!((c.0, a), (walk.0, b), "state {s} run {n}");
+            }
+        }
+    }
+
+    /// The estimator's whole-map pricing ([`EstCore::sig_map_distinct`],
+    /// NEON where there is one) against the walk a position at a time
+    /// ([`sig_map_walk`]): the same price and the same context array, over
+    /// random states, masks and block lengths, at every category's bases.
+    #[test]
+    fn estimator_sig_map_is_the_walk() {
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut lcg = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let bases = [
+            (105, 166),
+            (120, 181),
+            (152, 213),
+            (484, 572),
+            (849, 937),
+            (1000, 900),
+        ];
+        for trial in 0..20000 {
+            let mut ctx = [0u8; NUM_CTX];
+            for v in ctx.iter_mut() {
+                *v = (lcg() % 126) as u8;
+            }
+            let (sig, last) = bases[trial % bases.len()];
+            let n = [4usize, 15, 16][trial % 3];
+            let mask = (lcg() as u64 & ((1 << n) - 1)) | (1 << (lcg() as usize % n));
+            let top = 63 - mask.leading_zeros() as usize;
+            let end = if top == n - 1 { n - 1 } else { top + 1 };
+            let mut a = ctx;
+            let mut est = CabacEstimator::new();
+            let (mut c, out) = est.split();
+            c.sig_map_distinct(out, &mut a, sig, last, mask, top, end);
+            let mut b = ctx;
+            let mut est2 = CabacEstimator::new();
+            let (mut w, out2) = est2.split();
+            sig_map_walk(&mut w, out2, &mut b, sig, last, mask, top, end);
+            assert_eq!(c.0, w.0, "trial {trial}: price");
+            assert!(a == b, "trial {trial}: states");
+        }
+    }
+
+    /// [`KEY_PLANES`] is [`EST_COST_FX`] and [`EST_NEXT`] by key, from
+    /// either `valMPS`.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn key_planes_are_the_tables() {
+        for s in 0..128usize {
+            for bin in 0..2usize {
+                let i = (s << 1) | bin;
+                let k = s ^ bin;
+                let c = KEY_PLANES[0][k] as u32
+                    | (KEY_PLANES[1][k] as u32) << 8
+                    | (KEY_PLANES[2][k] as u32) << 16;
+                assert_eq!(c, EST_COST_FX[i], "state {s} bin {bin}");
+                assert_eq!(KEY_PLANES[3][k] ^ (s & 1) as u8, EST_NEXT[i]);
+            }
         }
     }
 }
