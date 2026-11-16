@@ -805,6 +805,7 @@ pub(crate) fn intra_mb<S: Sample>(
     nb: &Nb,
     qp_pred: i32,
     trellis: Option<&Trellis>,
+    bound: f64,
     rate: &mut dyn FnMut(&MbDecision) -> f64,
 ) -> (MbDecision, [u8; 16], f64) {
     let lam1 = lambda_satd(ctx.qp);
@@ -852,6 +853,15 @@ pub(crate) fn intra_mb<S: Sample>(
     }
     let sy = &src.y[py * src.ys + px..];
     let (e16, m16) = best_i16(ctx, &mut rec[0], px, py, sy, src.ys, nb.avail, lam1);
+    // A candidate the caller compares against `bound` (with the chroma
+    // error joined) and whose luma error alone already reaches it, or the
+    // best one here, cannot win: rate is never negative and wins are
+    // strict, so it is not priced.
+    let luma_bound = if bound.is_finite() {
+        bound - (ssd_mb(ctx, rec, src, mb_x, mb_y) - ssd_luma(ctx, rec, src, mb_x, mb_y)) as f64
+    } else {
+        f64::INFINITY
+    };
 
     let with_chroma = |d: &mut MbDecision| {
         d.chroma_mode = chroma.chroma_mode;
@@ -873,7 +883,11 @@ pub(crate) fn intra_mb<S: Sample>(
                         rate: &mut dyn FnMut(&MbDecision) -> f64| {
         // Without rate-distortion decisions, the estimates decide.
         let j = if use_rate {
-            ssd_luma(ctx, rec, src, mb_x, mb_y) as f64 + lam2 * rate(&d)
+            let ssd = ssd_luma(ctx, rec, src, mb_x, mb_y) as f64;
+            if ssd >= luma_bound || best.as_ref().is_some_and(|b| ssd >= b.0) {
+                return;
+            }
+            ssd + lam2 * rate(&d)
         } else {
             est as f64
         };
@@ -909,7 +923,11 @@ pub(crate) fn intra_mb<S: Sample>(
         with_chroma(&mut d);
         consider(d, [2u8; 16], e16, rec, rate);
     }
-    let (j, mut dec, modes) = best.expect("Intra_16x16 is always a candidate");
+    let Some((j, mut dec, modes)) = best else {
+        // Every candidate reached the bound: the caller keeps its own.
+        debug_assert!(bound.is_finite(), "Intra_16x16 is always a candidate");
+        return (MbDecision::default(), [2u8; 16], f64::INFINITY);
+    };
     match trellis {
         Some(t) => {
             let tctx = IntraCtx {
@@ -1212,6 +1230,7 @@ pub(crate) fn p_mb<S: Sample>(
                 cost: costs,
                 bounds: search_bounds(pref.search, (px + x) as i32, (py + y) as i32, w, h, vr),
                 satd_avg: ctx.enc.satd_avg,
+                sad_x4: ctx.enc.sad_x4,
             };
             s.run(cands, mc)
         };
@@ -1367,6 +1386,7 @@ pub(crate) fn p_mb<S: Sample>(
                 nb,
                 qp_pred,
                 None,
+                f64::INFINITY,
                 &mut |_: &MbDecision| 0.0,
             );
             if (e as f32) < inter {
@@ -1537,7 +1557,11 @@ pub(crate) fn p_mb<S: Sample>(
                 nz_luma: r.nz_luma,
                 nz_chroma: r.nz_chroma,
             };
-            let j = ssd_mb(ctx, rec, src, mb_x, mb_y) as f64 + lam2 * rate(PMb::Coded(&dec));
+            let ssd = ssd_mb(ctx, rec, src, mb_x, mb_y) as f64;
+            if ssd >= best_j {
+                continue; // cannot win: rate is never negative
+            }
+            let j = ssd + lam2 * rate(PMb::Coded(&dec));
             if j < best_j {
                 best_j = j;
                 best = MbChoice::Inter(dec);
@@ -1561,6 +1585,7 @@ pub(crate) fn p_mb<S: Sample>(
             nb,
             qp_pred,
             None,
+            best_j,
             &mut |d: &MbDecision| rate(PMb::Intra(d)),
         );
         // `j` prices luma distortion only; chroma's must join it to be
@@ -1944,6 +1969,7 @@ pub(crate) fn b_mb<S: Sample>(
             cost: costs,
             bounds: search_bounds(refs.search[l], (px + x) as i32, (py + y) as i32, w, h, vr),
             satd_avg: ctx.enc.satd_avg,
+            sad_x4: ctx.enc.sad_x4,
         };
         s.run(cands, mc)
     };
@@ -2256,6 +2282,7 @@ pub(crate) fn b_mb<S: Sample>(
                 nb,
                 qp_pred,
                 None,
+                f64::INFINITY,
                 &mut |_: &MbDecision| 0.0,
             );
             if (e as f32) < best.est {
@@ -2387,7 +2414,11 @@ pub(crate) fn b_mb<S: Sample>(
             } else {
                 BMb::Explicit(&dec)
             };
-            let j = ssd_mb(ctx, rec, src, mb_x, mb_y) as f64 + lam2 * rate(mb);
+            let ssd = ssd_mb(ctx, rec, src, mb_x, mb_y) as f64;
+            if ssd >= best_j {
+                continue; // cannot win: rate is never negative
+            }
+            let j = ssd + lam2 * rate(mb);
             if j < best_j {
                 best_j = j;
                 best = MbChoice::Inter(dec);
@@ -2411,6 +2442,7 @@ pub(crate) fn b_mb<S: Sample>(
             nb,
             qp_pred,
             None,
+            best_j,
             &mut |d: &MbDecision| rate(BMb::Intra(d)),
         );
         let j =

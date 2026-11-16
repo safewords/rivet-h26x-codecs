@@ -77,6 +77,30 @@ pub type SatdAvgFn = fn(
     h: usize,
 ) -> u32;
 
+/// SAD of one 8-bit `src` block against four candidate blocks sharing a
+/// stride, `w` by `h`: four integer motion candidates scored with the
+/// source read once. Each sum is [`super::distortion::sad_scalar`]'s.
+pub type SadX4Fn = fn(
+    src: &[u8],
+    src_stride: usize,
+    refs: [&[u8]; 4],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4];
+
+/// The definition [`SadX4Fn`] kernels are held to: four scalar SADs.
+pub fn sad_x4_scalar(
+    src: &[u8],
+    src_stride: usize,
+    refs: [&[u8]; 4],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4] {
+    refs.map(|r| super::distortion::sad_scalar(src, src_stride, r, ref_stride, w, h))
+}
+
 /// The encode-side kernel table, filled at run time from what the CPU has,
 /// exactly as [`super::h264::H264Dsp`] is. Kept separate from it because a
 /// decoder never calls any of this and should not carry it.
@@ -102,6 +126,10 @@ pub struct H264EncDsp {
     /// average into a buffer and take the distortion table's SATD, which
     /// is what [`satd_avg_scalar`] defines.
     pub satd_avg: Option<SatdAvgFn>,
+    /// Four integer candidates' SADs at once, where a rung has it; `None`
+    /// and callers take the distortion table's SAD four times, which is
+    /// what [`sad_x4_scalar`] defines.
+    pub sad_x4: Option<SadX4Fn>,
 }
 
 impl H264EncDsp {
@@ -117,6 +145,7 @@ impl H264EncDsp {
         quant4: quant4_scalar,
         quant8: quant8_scalar,
         satd_avg: None,
+        sad_x4: None,
     };
 
     /// The best table for `cpu`: the scalar reference, then each rung of

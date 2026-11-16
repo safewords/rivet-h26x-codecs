@@ -31,6 +31,58 @@ pub fn install(d: &mut H264EncDsp, cpu: Cpu) {
         d.quant4 = quant4;
         d.quant8 = quant8;
         d.satd_avg = Some(satd_avg);
+        d.sad_x4 = Some(sad_x4);
+    }
+}
+
+/// [`super::h264_enc::SadX4Fn`]: each source row loaded once and its
+/// absolute differences against the four candidates' rows accumulated in
+/// sixteen-bit lanes (a 16-wide block's lane sums at most 2 * 255 a row,
+/// so 64 rows fit), widened once at the end.
+fn sad_x4(src: &[u8], ss: usize, refs: [&[u8]; 4], rs: usize, w: usize, h: usize) -> [u32; 4] {
+    if !(w == 8 || w == 16) || h == 0 || h > 64 {
+        return super::h264_enc::sad_x4_scalar(src, ss, refs, rs, w, h);
+    }
+    let need = (h - 1) * rs + w;
+    assert!(
+        src.len() >= (h - 1) * ss + w && refs.iter().all(|r| r.len() >= need),
+        "block out of range"
+    );
+    let p = refs.map(|r| r.as_ptr());
+    unsafe {
+        if w == 16 {
+            sad_x4_16(src.as_ptr(), ss, p, rs, h)
+        } else {
+            sad_x4_8(src.as_ptr(), ss, p, rs, h)
+        }
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn sad_x4_16(s: *const u8, ss: usize, r: [*const u8; 4], rs: usize, h: usize) -> [u32; 4] {
+    unsafe {
+        let mut acc = [vdupq_n_u16(0); 4];
+        for y in 0..h {
+            let v = vld1q_u8(s.add(y * ss));
+            for k in 0..4 {
+                acc[k] = vpadalq_u8(acc[k], vabdq_u8(v, vld1q_u8(r[k].add(y * rs))));
+            }
+        }
+        acc.map(|a| vaddlvq_u16(a))
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn sad_x4_8(s: *const u8, ss: usize, r: [*const u8; 4], rs: usize, h: usize) -> [u32; 4] {
+    unsafe {
+        let mut acc = [vdupq_n_u16(0); 4];
+        for y in 0..h {
+            let v = vld1_u8(s.add(y * ss));
+            for k in 0..4 {
+                acc[k] = vabal_u8(acc[k], v, vld1_u8(r[k].add(y * rs)));
+            }
+        }
+        acc.map(|a| vaddlvq_u16(a))
     }
 }
 
@@ -420,6 +472,29 @@ mod tests {
             "NEON installed nothing"
         );
         d
+    }
+
+    /// The four-way SAD against its definition: the search's shapes, the
+    /// tallest a kernel accumulates, and the shapes it hands back.
+    #[test]
+    fn sad_x4_matches_scalar() {
+        let f = neon().sad_x4.expect("NEON installs the four-way SAD");
+        let mut seed = 7u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 24) as u8
+        };
+        let (ss, rs) = (40usize, 72usize);
+        let s: Vec<u8> = (0..ss * 64).map(|_| rnd()).collect();
+        let r: Vec<u8> = (0..rs * 70).map(|_| rnd()).collect();
+        for &(w, h) in &[(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (16, 64)] {
+            let refs = [&r[0..], &r[3..], &r[rs + 1..], &r[5 * rs + 2..]];
+            assert_eq!(
+                f(&s, ss, refs, rs, w, h),
+                crate::dsp::h264_enc::sad_x4_scalar(&s, ss, refs, rs, w, h),
+                "{w}x{h}"
+            );
+        }
     }
 
     /// The fused average-SATD against its definition, every block shape

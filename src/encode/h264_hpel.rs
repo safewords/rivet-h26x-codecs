@@ -367,6 +367,29 @@ pub(crate) struct Search<'a, 'b, S: Sample> {
     pub(crate) bounds: (i32, i32, i32, i32),
     /// The encode table's fused average-SATD, where the CPU has one.
     pub(crate) satd_avg: Option<crate::dsp::h264_enc::SatdAvgFn>,
+    /// The encode table's four-way SAD, where the CPU has one.
+    pub(crate) sad_x4: Option<crate::dsp::h264_enc::SadX4Fn>,
+}
+
+/// Whole-sample points a search step scores together, at most sixteen.
+struct Pts {
+    p: [(i32, i32); 16],
+    n: usize,
+}
+
+impl Pts {
+    fn new() -> Self {
+        Pts {
+            p: [(0, 0); 16],
+            n: 0,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, f: (i32, i32)) {
+        self.p[self.n] = f;
+        self.n += 1;
+    }
 }
 
 impl<S: Sample> Search<'_, '_, S> {
@@ -384,6 +407,48 @@ impl<S: Sample> Search<'_, '_, S> {
         ) + self
             .cost
             .of(Mv::new((fx * 4) as i16, (fy * 4) as i16), self.pred)
+    }
+
+    /// [`Search::sad_full`] at every point of `pts`, in order: four at a
+    /// time through the four-way kernel where there is one.
+    #[inline]
+    fn sad_pts(&self, pts: &Pts) -> [u32; 16] {
+        let mut out = [0u32; 16];
+        let n = pts.n;
+        if let Some(f) = self.sad_x4.filter(|_| S::BYTES == 1 && n > 1) {
+            let r = self.r.p[0];
+            // SAFETY: a one-byte `Sample` is `u8`.
+            let as8 =
+                |v: &[S]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
+            let at = |k: usize| {
+                let (fx, fy) = pts.p[k.min(n - 1)];
+                as8(&r.data[r.offset((self.x + fx) as isize, (self.y + fy) as isize)..])
+            };
+            let mut k = 0;
+            while k < n {
+                let d = f(
+                    as8(self.src),
+                    self.src_stride,
+                    [at(k), at(k + 1), at(k + 2), at(k + 3)],
+                    r.stride,
+                    self.w,
+                    self.h,
+                );
+                for j in 0..4.min(n - k) {
+                    let (fx, fy) = pts.p[k + j];
+                    out[k + j] = d[j]
+                        + self
+                            .cost
+                            .of(Mv::new((fx * 4) as i16, (fy * 4) as i16), self.pred);
+                }
+                k += 4;
+            }
+        } else {
+            for k in 0..n {
+                out[k] = self.sad_full(pts.p[k].0, pts.p[k].1);
+            }
+        }
+        out
     }
 
     #[inline]
@@ -439,7 +504,11 @@ impl<S: Sample> Search<'_, '_, S> {
             )
         };
         let mut best = clampf(self.pred);
-        let mut bcost = self.sad_full(best.0, best.1);
+        // The predictor and the distinct candidates, scored together and
+        // compared in order (each point's score is its own, so the order
+        // they were computed in changes nothing).
+        let mut pts = Pts::new();
+        pts.push(best);
         let mut tried = [(i32::MIN, i32::MIN); 12];
         let mut nt = 0;
         for &c in cands {
@@ -451,16 +520,46 @@ impl<S: Sample> Search<'_, '_, S> {
                 tried[nt] = f;
                 nt += 1;
             }
-            let s = self.sad_full(f.0, f.1);
-            if s < bcost {
-                bcost = s;
-                best = f;
+            // Callers pass at most eight candidates; the batch holds sixteen.
+            pts.push(f);
+        }
+        let sc = self.sad_pts(&pts);
+        let mut bcost = sc[0];
+        for k in 1..pts.n {
+            if sc[k] < bcost {
+                bcost = sc[k];
+                best = pts.p[k];
             }
         }
         let start = best;
         let (bx0, bx1) = ((start.0 - cfg.range).max(lx), (start.0 + cfg.range).min(hx));
         let (by0, by1) = ((start.1 - cfg.range).max(ly), (start.1 + cfg.range).min(hy));
         let ok = |fx: i32, fy: i32| fx >= bx0 && fx <= bx1 && fy >= by0 && fy <= by1;
+        // Points around a fixed centre `c`, the ones inside the window,
+        // scored together and taken in order where strictly cheaper (as
+        // one at a time would: no two are the same point, and none is the
+        // centre). Returns the index of the last one taken.
+        let ring = |c: (i32, i32), offs: &[(i32, i32)], best: &mut (i32, i32), bcost: &mut u32| {
+            let mut pts = Pts::new();
+            let mut idx = [0usize; 16];
+            for (k, &(dx, dy)) in offs.iter().enumerate() {
+                let (fx, fy) = (c.0 + dx, c.1 + dy);
+                if ok(fx, fy) && (fx, fy) != c {
+                    idx[pts.n] = k;
+                    pts.push((fx, fy));
+                }
+            }
+            let sc = self.sad_pts(&pts);
+            let mut moved = usize::MAX;
+            for k in 0..pts.n {
+                if sc[k] < *bcost {
+                    *bcost = sc[k];
+                    *best = pts.p[k];
+                    moved = idx[k];
+                }
+            }
+            moved
+        };
         let try_at = |fx: i32, fy: i32, best: &mut (i32, i32), bcost: &mut u32| {
             if ok(fx, fy) && (fx, fy) != *best {
                 let s = self.sad_full(fx, fy);
@@ -509,9 +608,12 @@ impl<S: Sample> Search<'_, '_, S> {
             // Small diamond to a local minimum.
             for _ in 0..cfg.range {
                 let c = best;
-                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    try_at(c.0 + dx, c.1 + dy, &mut best, &mut bcost);
-                }
+                ring(
+                    c,
+                    &[(-1, 0), (1, 0), (0, -1), (0, 1)],
+                    &mut best,
+                    &mut bcost,
+                );
                 if best == c {
                     break;
                 }
@@ -523,43 +625,36 @@ impl<S: Sample> Search<'_, '_, S> {
         // (they were the old ring's), so only the other three are tried.
         const HEX: [(i32, i32); 6] = [(-2, 0), (-1, -2), (1, -2), (2, 0), (1, 2), (-1, 2)];
         let c = best;
-        let mut dir = usize::MAX;
-        for (k, &(dx, dy)) in HEX.iter().enumerate() {
-            let before = best;
-            try_at(c.0 + dx, c.1 + dy, &mut best, &mut bcost);
-            if best != before {
-                dir = k;
-            }
-        }
+        let mut dir = ring(c, &HEX, &mut best, &mut bcost);
         let mut it = 1;
         while dir != usize::MAX && it < cfg.range {
             let c = best;
-            let mut moved = usize::MAX;
-            for k in [dir + 5, dir, dir + 1] {
-                let k = k % 6;
-                let before = best;
-                try_at(c.0 + HEX[k].0, c.1 + HEX[k].1, &mut best, &mut bcost);
-                if best != before {
-                    moved = k;
-                }
-            }
-            dir = moved;
+            let ks = [(dir + 5) % 6, dir, (dir + 1) % 6];
+            let moved = ring(c, &ks.map(|k| HEX[k]), &mut best, &mut bcost);
+            dir = if moved == usize::MAX {
+                moved
+            } else {
+                ks[moved]
+            };
             it += 1;
         }
         // Square refinement.
         let c = best;
-        for (dx, dy) in [
-            (-1, -1),
-            (0, -1),
-            (1, -1),
-            (-1, 0),
-            (1, 0),
-            (-1, 1),
-            (0, 1),
-            (1, 1),
-        ] {
-            try_at(c.0 + dx, c.1 + dy, &mut best, &mut bcost);
-        }
+        ring(
+            c,
+            &[
+                (-1, -1),
+                (0, -1),
+                (1, -1),
+                (-1, 0),
+                (1, 0),
+                (-1, 1),
+                (0, 1),
+                (1, 1),
+            ],
+            &mut best,
+            &mut bcost,
+        );
         debug_assert!(self.inside(best.0, best.1));
         self.refine(Mv::new((best.0 * 4) as i16, (best.1 * 4) as i16), cfg)
     }
