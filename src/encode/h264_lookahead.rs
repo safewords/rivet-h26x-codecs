@@ -99,7 +99,7 @@ impl<S: Sample> Lookahead<S> {
             let out = &mut low.data[o..o + lw];
             for (d, (a, b)) in out[..inside]
                 .iter_mut()
-                .zip(r0.chunks_exact(2).zip(r1.chunks_exact(2)))
+                .zip(r0.as_chunks::<2>().0.iter().zip(r1.as_chunks::<2>().0))
             {
                 let s = a[0].to_i32() + a[1].to_i32() + b[0].to_i32() + b[1].to_i32();
                 *d = S::from_i32((s + 2) >> 2);

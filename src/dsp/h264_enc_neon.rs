@@ -52,7 +52,7 @@ pub fn install(d: &mut H264EncDsp, cpu: Cpu) {
 fn hpel_planes(src: &[u8], stride: usize, h: &mut [u8], v: &mut [u8], c: &mut [u8]) {
     let len = src.len();
     let rows = len / stride;
-    if stride < 24 || rows < 6 || len % stride != 0 {
+    if stride < 24 || rows < 6 || !len.is_multiple_of(stride) {
         return super::h264_enc::hpel_planes_scalar(src, stride, h, v, c);
     }
     assert!(h.len() == len && v.len() == len && c.len() == len);

@@ -1107,7 +1107,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                 InterMbKind::PSkip => {
                     // A skip carries no delta and holds the prediction.
                     let q = chain.settle(ctx.qp, false);
-                    emit(mb_x, mb_y, PMb::Skip(&dec), false);
+                    emit(mb_x, mb_y, PMb::Skip(dec), false);
                     pm.commit(
                         addr,
                         coded_info(DecKind::PSkip, 0, false, q, [0; 2]),
@@ -1125,7 +1125,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                         has_residual(dec.kind.dec_kind(), dec.cbp_luma | (dec.cbp_chroma << 4)),
                     );
                     dec.qp_delta = q.delta as i8;
-                    emit(mb_x, mb_y, PMb::Coded(&dec), false);
+                    emit(mb_x, mb_y, PMb::Coded(dec), false);
                     let mut rects = [(0usize, 0usize, 0usize, 0usize); 16];
                     let n = dec.rects(&mut rects);
                     pm.commit(
@@ -1177,7 +1177,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                         ),
                     );
                     idec.qp_delta = q.delta as i8;
-                    emit(mb_x, mb_y, PMb::Intra(&idec), false);
+                    emit(mb_x, mb_y, PMb::Intra(idec), false);
                     pm.commit(
                         addr,
                         coded_info(
@@ -1470,7 +1470,7 @@ pub(crate) fn code_b_picture<S: Sample>(
                     ),
                 );
                 idec.qp_delta = q.delta as i8;
-                emit(mb_x, mb_y, BMb::Intra(&idec), false);
+                emit(mb_x, mb_y, BMb::Intra(idec), false);
                 pm.commit(
                     addr,
                     coded_info(
@@ -1495,10 +1495,10 @@ pub(crate) fn code_b_picture<S: Sample>(
                 mb_x,
                 mb_y,
                 match dec.kind {
-                    BMbKind::BSkip => BMb::Skip(&dec),
-                    BMbKind::BDirect16 => BMb::Direct(&dec),
+                    BMbKind::BSkip => BMb::Skip(dec),
+                    BMbKind::BDirect16 => BMb::Direct(dec),
                     BMbKind::B16 | BMbKind::B16x8 | BMbKind::B8x16 | BMbKind::B8x8 => {
-                        BMb::Explicit(&dec)
+                        BMb::Explicit(dec)
                     }
                     BMbKind::UseIntra => unreachable!(),
                 },
