@@ -334,6 +334,111 @@ x264's curve is about 0.3 points of BD-rate or a fifth of its time;
 slow's is a fifth of its time; veryfast's an eighth, where the final
 CABAC writer alone is a sixth of the time and changes no decision.
 
+#### Round 10A: the final CABAC writer and the trellis
+
+(2026-11-16. The tenth round was split in two; this part had the final
+CABAC writer and the trellis, the other the motion search, the SATD
+kernels and the estimator. Every change here is byte-identical: the
+BD-rates are the ninth round's to the digit, at all three presets.)
+
+Cycles and instructions at QP 27 over the five clips, minimum of three
+runs, `/usr/bin/time -l`, each change against the tree before it:
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| CABAC writer: `low` sixty-four bits wide, its bits out thirty-two at a time into a byte buffer of the writer's own (a carry adds one to the bytes already there), rather than a byte at a time with a pending byte and a run of `0xff`s | -3.4 % cycles (-1.3 % ins) | -1.7 % (-0.6 %) | -0.9 % (-0.3 %) |
+| trellis: the first pass in NEON — exact levels four at a time, the scan gathered by byte lookups, the last position and the largest level from a mask and a reduction, no array zeroed first | -1.3 % (-1.4 %) | -1.0 % (-1.4 %) | -1.1 % (-1.5 %) |
+| trellis: the walk back through the chosen path by a shift and a mask per position (the source lanes, times eight, a byte each in one word), not an indexed load | -0.8 % (+0.2 %) | -1.1 % (+0.2 %) | -1.3 % (+0.2 %) |
+| **all three** (5.27G / 11.93G / 18.85G before) | **-6.0 %** (-2.4 %) | **-3.7 %** (-1.8 %) | **-3.3 %** (-1.6 %) |
+
+On x264's ladder (`frontier.py`, x264 timed again in the same shuffled
+batch, four at a time, minimum of three runs; BD-rate against x264
+medium):
+
+| rivet | BD-rate Y | CPU | x264's CPU at this BD-rate | rivet's time at equal BD-rate |
+|---|---:|---:|---:|---:|
+| veryfast, be1409c | +13.09 % | 0.543x | 0.492x | 1.10x |
+| veryfast, now | +13.09 % | 0.518x | 0.492x | **1.05x** |
+| medium, be1409c | +0.33 % | 1.226x | 0.978x | 1.25x |
+| medium, now | +0.33 % | 1.177x | 0.978x | **1.20x** |
+| slow, be1409c | -2.21 % | 1.949x | 1.583x | 1.23x |
+| slow, now | -2.21 % | 1.877x | 1.583x | **1.19x** |
+
+(This run read 1.10x for veryfast before the round where the ninth
+round's read 1.12x; the others repeat to 0.01.) H.265 is untouched: its
+writer is the standard-shaped `CabacEncoder`, and 18 streams (three CIF
+clips, three presets, QP 22 and 32) are byte-identical before and after;
+H.265 medium parity is still -14.45 %. The decoder is untouched: 56
+streams (the decoder fixtures and `tests/data`) decode to the same
+picture MD5s.
+
+The writer, measured on its own. A replay of park_joy's residual blocks
+as veryfast writes them (738,000 blocks, 19.1 million bins: 30 frames
+at QP 27; the blocks dumped from an encode and coded again by the real
+writer, cycles from `/usr/bin/time -l` with the replay's set-up
+subtracted) took 17.1 cycles and 50 instructions a bin before this
+round and 13.6 cycles and 43 instructions after. Almost all of that is
+the branch that sent bytes out: crossed every eight or so bins at a
+point the data decides, it was mispredicted nearly every time, and the
+path behind it (the pending byte, the run of `0xff`s, a call into the
+bit writer per byte) cost more than the bins between. A top-down count
+of the replay (Instruments' CPU Counters) had half its issue slots
+discarded after mispredictions before the change.
+
+How the counts were taken. Branch mispredictions can be sampled, not
+only counted: `xctrace record --template 'CPU Counters'
+--recording-options` with a JSON whose `configurationType` is `manual`,
+`sampleByTime` false and `pmiEventAliasOrMnemonic`
+`BRANCH_MISPRED_NONSPEC` gives a profile whose samples land where
+mispredicted branches resolve (the kernel throttles the interrupts, so
+the counts are relative, not absolute). On park_joy at medium the
+trellis had 19 % of the samples, the estimator's residual pricing 8 %,
+the sub-sample SATD 12 %, the final writer 5 %.
+
+Tried and dropped (byte-identical unless said otherwise):
+
+- The writer coding a residual block from a list: the block's bins
+  built first without a branch on its values (every position's
+  significance and last flags written and the count moved past the ones
+  not coded; a level's prefix of ones written twelve ahead and the count
+  moved by its length; each sign folded into the bin before it as one
+  more doubling of `low`), then coded in one straight run. The run itself
+  was made cheaper again: the range kept in the top of a word, a bin's
+  new range one of four candidates (`range - rLPS` or `rLPS` for each
+  quarter of the range, each one add of a constant loaded from the state
+  and the bin) picked by two selects on the range's own bits, then a
+  count of leading zeros and a shift — six steps from one range to the
+  next where the writer takes nine. In the replay that reached 12.8
+  cycles a bin (the run 7.7 of them, the list 4); in the encoder, -0.4 %
+  cycles at veryfast against the change above alone, +2.7 %
+  instructions: noise, and dropped. The same six-step bin in the
+  writer's ordinary per-bin path: +0.9 % at veryfast. The replay keeps
+  the writer's tables and contexts in the first-level cache; the encoder,
+  which runs a motion search between two macroblocks' bins, does not.
+- Carrying a context's state in a register from one bin to the next
+  when they share the context, selected against a load from the array:
+  slower, because the select waits on both, which ties every bin to the
+  one before through the state tables (in the replay 14.1 against 13.2
+  cycles a listed bin without it).
+- The trellis's ones-only path without a branch on the rounded level,
+  every position's prices taken before the walk and the costs
+  re-associated so that one add per lane leads to a position's
+  candidates (not byte-identical): +38 % in a replay of the trellis's
+  ones-only blocks. Its general path with a rounded one priced as a two
+  with the two made infinite, which leaves one branch per position
+  (zero or not) instead of three: +2 % (4x4) and +8 % (8x8). Why the
+  branch on zero stays: a level of one is three dependent adds and a
+  select from the position before (about thirteen cycles), a zero two
+  adds (six); a branch-free step costs every position thirteen, more
+  than the mispredictions it removes. What did pay was everything around
+  that walk: the first pass was, in a replay of park_joy medium's
+  trellised blocks, two fifths of a ones-only block's time, and the walk
+  back a chain of dependent loads.
+
+Where the time goes now (park_joy, sampled): at veryfast the trellis
+13 % and the final writer 12 %; at medium the trellis 17 % (every coded
+candidate's blocks) and the final writer 6 %.
+
 The eighth round, for the record (its frontier: 1.15x / 1.45x / 1.46x).
 
 What the eighth round did (BD-rate Y against x264 at the same preset,
