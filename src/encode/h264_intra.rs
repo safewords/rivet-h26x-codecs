@@ -32,7 +32,10 @@ use crate::dsp::h264::{H264Dsp, NO_DC};
 use crate::dsp::h264_enc::{H264EncDsp, Quant, qbits4, qbits8, quant_offset};
 use crate::encode::h264_syntax::Recon;
 use crate::h264::cavlc::sub_block_counts_8x8_scan;
-use crate::h264::intra::{IntraAvail, predict_4x4, predict_8x8, predict_16x16, predict_chroma};
+use crate::h264::intra::{
+    Edge4, Edge8, IntraAvail, mode_nxn_available, pred_4x4, pred_8x8, predict_4x4, predict_8x8,
+    predict_16x16, predict_chroma,
+};
 use crate::h264::mb::dequant_level;
 use crate::h264::tables::BLK4X4_FROM_RASTER;
 use crate::h264::transform::{
@@ -831,12 +834,13 @@ fn code_i8x8<S: Sample>(
                 .copy_from_slice(&src[soff + y * src_stride..soff + y * src_stride + 8]);
         }
         let mut best = (u32::MAX, 2u8);
+        let edge = Edge8::gather(rec, boff, rec.stride, av);
         for mode in 0..9u8 {
-            if predict_8x8(rec, boff, rec.stride, mode, av, ctx.bit_depth).is_err() {
+            if !mode_nxn_available(mode, av) {
                 continue;
             }
             let mut pred = [S::default(); 64];
-            gather(rec, boff, 8, 8, &mut pred);
+            let _ = pred_8x8(&edge, mode, av, ctx.bit_depth, &mut pred);
             let cost = (ctx.dist.satd)(&src_blk, 8, &pred, 8, 8, 8);
             let better = cost < best.0 || (cost == best.0 && mode == predicted);
             if better {
@@ -935,12 +939,13 @@ fn code_i4x4<S: Sample>(
                 .copy_from_slice(&src[soff + y * src_stride..soff + y * src_stride + 4]);
         }
         let mut best = (u32::MAX, 2u8);
+        let edge = Edge4::gather(rec, boff, rec.stride, av);
         for mode in 0..9u8 {
-            if predict_4x4(rec, boff, rec.stride, mode, av, ctx.bit_depth).is_err() {
+            if !mode_nxn_available(mode, av) {
                 continue;
             }
             let mut pred = [S::default(); 16];
-            gather(rec, boff, 4, 4, &mut pred);
+            let _ = pred_4x4(&edge, mode, av, ctx.bit_depth, &mut pred);
             let cost = (ctx.dist.satd)(&src_blk, 4, &pred, 4, 4, 4);
             // A tie goes to the predicted mode, which costs one bit
             // instead of four.

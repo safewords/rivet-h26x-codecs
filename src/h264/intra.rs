@@ -20,6 +20,71 @@ pub struct IntraAvail {
     pub top_right: bool,
 }
 
+/// The neighbours an Intra_4x4 block predicts from (8.3.1.2): `p[0..8, -1]`
+/// (the top-right four repeated from `p[3, -1]` where unavailable),
+/// `p[-1, 0..4]` and `p[-1, -1]`, zero where unavailable.
+#[derive(Clone, Copy, Debug)]
+pub struct Edge4 {
+    /// `p[x, -1]`, x = 0..8.
+    pub top: [i32; 8],
+    /// `p[-1, y]`, y = 0..4.
+    pub left: [i32; 4],
+    /// `p[-1, -1]`.
+    pub corner: i32,
+}
+
+impl Edge4 {
+    /// The neighbours of the block at plane offset `off`.
+    #[inline]
+    pub fn gather<S: Sample>(
+        p: &PaddedPlane<S>,
+        off: usize,
+        stride: usize,
+        av: IntraAvail,
+    ) -> Self {
+        let mut top = [0i32; 8];
+        let mut left = [0i32; 4];
+        if av.top {
+            for x in 0..4 {
+                top[x] = p.data[off - stride + x].to_i32();
+            }
+            if av.top_right {
+                for x in 4..8 {
+                    top[x] = p.data[off - stride + x].to_i32();
+                }
+            } else {
+                for x in 4..8 {
+                    top[x] = top[3];
+                }
+            }
+        }
+        if av.left {
+            for y in 0..4 {
+                left[y] = p.data[off + y * stride - 1].to_i32();
+            }
+        }
+        let corner: i32 = if av.top_left {
+            p.data[off - stride - 1].to_i32()
+        } else {
+            0
+        };
+        Edge4 { top, left, corner }
+    }
+}
+
+/// Whether Intra_4x4 or Intra_8x8 `mode` has the neighbours it reads under
+/// `av` (the modes [`predict_4x4`] and [`predict_8x8`] refuse otherwise).
+#[inline]
+pub fn mode_nxn_available(mode: u8, av: IntraAvail) -> bool {
+    match mode {
+        0 | 3 | 7 => av.top,
+        1 | 8 => av.left,
+        2 => true,
+        4..=6 => av.top && av.left && av.top_left,
+        _ => false,
+    }
+}
+
 /// Intra_4x4 prediction (8.3.1.2) of the block at plane offset `off`
 /// (top-left sample), mode 0..=8.
 pub fn predict_4x4<S: Sample>(
@@ -30,35 +95,25 @@ pub fn predict_4x4<S: Sample>(
     av: IntraAvail,
     bit_depth: u32,
 ) -> Result<()> {
-    // Gather neighbours: top[0..8] = p[x,-1] x=0..7, left[0..4], corner.
-    let mut top = [0i32; 8];
-    let mut left = [0i32; 4];
-
-    if av.top {
-        for x in 0..4 {
-            top[x] = p.data[off - stride + x].to_i32();
-        }
-        if av.top_right {
-            for x in 4..8 {
-                top[x] = p.data[off - stride + x].to_i32();
-            }
-        } else {
-            for x in 4..8 {
-                top[x] = top[3];
-            }
-        }
-    }
-    if av.left {
-        for y in 0..4 {
-            left[y] = p.data[off + y * stride - 1].to_i32();
-        }
-    }
-    let corner: i32 = if av.top_left {
-        p.data[off - stride - 1].to_i32()
-    } else {
-        0
-    };
+    let e = Edge4::gather(p, off, stride, av);
     let mut pred = [S::default(); 16];
+    pred_4x4(&e, mode, av, bit_depth, &mut pred)?;
+    for y in 0..4 {
+        p.data[off + y * stride..off + y * stride + 4].copy_from_slice(&pred[y * 4..y * 4 + 4]);
+    }
+    Ok(())
+}
+
+/// [`predict_4x4`] from gathered neighbours into `pred` (raster, stride 4),
+/// for a caller that tries several modes on one block.
+pub fn pred_4x4<S: Sample>(
+    e: &Edge4,
+    mode: u8,
+    av: IntraAvail,
+    bit_depth: u32,
+    pred: &mut [S; 16],
+) -> Result<()> {
+    let (top, left, corner) = (&e.top, &e.left, e.corner);
     match mode {
         0 => {
             if !av.top {
@@ -257,10 +312,97 @@ pub fn predict_4x4<S: Sample>(
         }
         _ => return Err(Error::bitstream("Intra_4x4 prediction mode out of range")),
     }
-    for y in 0..4 {
-        p.data[off + y * stride..off + y * stride + 4].copy_from_slice(&pred[y * 4..y * 4 + 4]);
-    }
     Ok(())
+}
+
+/// The filtered neighbours an Intra_8x8 block predicts from (8.3.2.2.1):
+/// `p'[0..16, -1]`, `p'[-1, 0..8]` and `p'[-1, -1]`.
+#[derive(Clone, Copy, Debug)]
+pub struct Edge8 {
+    /// `p'[x, -1]`, x = 0..16.
+    pub top: [i32; 16],
+    /// `p'[-1, y]`, y = 0..8.
+    pub left: [i32; 8],
+    /// `p'[-1, -1]`.
+    pub corner: i32,
+}
+
+impl Edge8 {
+    /// The filtered neighbours of the block at plane offset `off`.
+    #[inline]
+    pub fn gather<S: Sample>(
+        p: &PaddedPlane<S>,
+        off: usize,
+        stride: usize,
+        av: IntraAvail,
+    ) -> Self {
+        // Unfiltered neighbours: top[0..16], left[0..8], corner.
+        let mut top = [0i32; 16];
+        let mut left = [0i32; 8];
+        let mut corner = 0i32;
+        if av.top {
+            for x in 0..8 {
+                top[x] = p.data[off - stride + x].to_i32();
+            }
+            if av.top_right {
+                for x in 8..16 {
+                    top[x] = p.data[off - stride + x].to_i32();
+                }
+            } else {
+                for x in 8..16 {
+                    top[x] = top[7];
+                }
+            }
+        }
+        if av.left {
+            for y in 0..8 {
+                left[y] = p.data[off + y * stride - 1].to_i32();
+            }
+        }
+        if av.top_left {
+            corner = p.data[off - stride - 1].to_i32();
+        }
+        // Filtering (8.3.2.2.1).
+        let mut ftop = [0i32; 16];
+        let mut fleft = [0i32; 8];
+        let mut fcorner = 0i32;
+        if av.top {
+            // p'[0,-1]
+            ftop[0] = if av.top_left {
+                (corner + 2 * top[0] + top[1] + 2) >> 2
+            } else {
+                (3 * top[0] + top[1] + 2) >> 2
+            };
+            for x in 1..15 {
+                ftop[x] = (top[x - 1] + 2 * top[x] + top[x + 1] + 2) >> 2;
+            }
+            ftop[15] = (top[14] + 3 * top[15] + 2) >> 2;
+        }
+        if av.top_left {
+            fcorner = match (av.top, av.left) {
+                (true, true) => (top[0] + 2 * corner + left[0] + 2) >> 2,
+                (true, false) => (3 * corner + top[0] + 2) >> 2,
+                (false, true) => (3 * corner + left[0] + 2) >> 2,
+                (false, false) => corner,
+            };
+        }
+        if av.left {
+            fleft[0] = if av.top_left {
+                (corner + 2 * left[0] + left[1] + 2) >> 2
+            } else {
+                (3 * left[0] + left[1] + 2) >> 2
+            };
+            for y in 1..7 {
+                fleft[y] = (left[y - 1] + 2 * left[y] + left[y + 1] + 2) >> 2;
+            }
+            fleft[7] = (left[6] + 3 * left[7] + 2) >> 2;
+        }
+        Edge8 {
+            top: ftop,
+            left: fleft,
+            corner: fcorner,
+        }
+    }
 }
 
 /// Intra_8x8 prediction (8.3.2.2) with reference sample filtering.
@@ -272,68 +414,24 @@ pub fn predict_8x8<S: Sample>(
     av: IntraAvail,
     bit_depth: u32,
 ) -> Result<()> {
-    // Unfiltered neighbours: top[0..16], left[0..8], corner.
-    let mut top = [0i32; 16];
-    let mut left = [0i32; 8];
-    let mut corner = 0i32;
-    if av.top {
-        for x in 0..8 {
-            top[x] = p.data[off - stride + x].to_i32();
-        }
-        if av.top_right {
-            for x in 8..16 {
-                top[x] = p.data[off - stride + x].to_i32();
-            }
-        } else {
-            for x in 8..16 {
-                top[x] = top[7];
-            }
-        }
+    let e = Edge8::gather(p, off, stride, av);
+    let mut pred = [S::default(); 64];
+    pred_8x8(&e, mode, av, bit_depth, &mut pred)?;
+    for y in 0..8 {
+        p.data[off + y * stride..off + y * stride + 8].copy_from_slice(&pred[y * 8..y * 8 + 8]);
     }
-    if av.left {
-        for y in 0..8 {
-            left[y] = p.data[off + y * stride - 1].to_i32();
-        }
-    }
-    if av.top_left {
-        corner = p.data[off - stride - 1].to_i32();
-    }
-    // Filtering (8.3.2.2.1).
-    let mut ftop = [0i32; 16];
-    let mut fleft = [0i32; 8];
-    let mut fcorner = 0i32;
-    if av.top {
-        // p'[0,-1]
-        ftop[0] = if av.top_left {
-            (corner + 2 * top[0] + top[1] + 2) >> 2
-        } else {
-            (3 * top[0] + top[1] + 2) >> 2
-        };
-        for x in 1..15 {
-            ftop[x] = (top[x - 1] + 2 * top[x] + top[x + 1] + 2) >> 2;
-        }
-        ftop[15] = (top[14] + 3 * top[15] + 2) >> 2;
-    }
-    if av.top_left {
-        fcorner = match (av.top, av.left) {
-            (true, true) => (top[0] + 2 * corner + left[0] + 2) >> 2,
-            (true, false) => (3 * corner + top[0] + 2) >> 2,
-            (false, true) => (3 * corner + left[0] + 2) >> 2,
-            (false, false) => corner,
-        };
-    }
-    if av.left {
-        fleft[0] = if av.top_left {
-            (corner + 2 * left[0] + left[1] + 2) >> 2
-        } else {
-            (3 * left[0] + left[1] + 2) >> 2
-        };
-        for y in 1..7 {
-            fleft[y] = (left[y - 1] + 2 * left[y] + left[y + 1] + 2) >> 2;
-        }
-        fleft[7] = (left[6] + 3 * left[7] + 2) >> 2;
-    }
-    let (top, left, corner) = (ftop, fleft, fcorner);
+    Ok(())
+}
+
+/// [`predict_8x8`] from filtered neighbours into `pred` (raster, stride 8).
+pub fn pred_8x8<S: Sample>(
+    e: &Edge8,
+    mode: u8,
+    av: IntraAvail,
+    bit_depth: u32,
+    pred: &mut [S; 64],
+) -> Result<()> {
+    let (top, left, corner) = (&e.top, &e.left, e.corner);
     let at = |x: i32, y: i32| -> i32 {
         if y == -1 {
             if x == -1 { corner } else { top[x as usize] }
@@ -341,7 +439,6 @@ pub fn predict_8x8<S: Sample>(
             left[y as usize]
         }
     };
-    let mut pred = [S::default(); 64];
     match mode {
         0 => {
             if !av.top {
@@ -517,9 +614,6 @@ pub fn predict_8x8<S: Sample>(
             }
         }
         _ => return Err(Error::bitstream("Intra_8x8 prediction mode out of range")),
-    }
-    for y in 0..8 {
-        p.data[off + y * stride..off + y * stride + 8].copy_from_slice(&pred[y * 8..y * 8 + 8]);
     }
     Ok(())
 }

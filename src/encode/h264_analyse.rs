@@ -40,7 +40,9 @@ use crate::encode::h264_trellis::Trellis;
 use crate::h264::cavlc::mb_partitions;
 use crate::h264::frame::Mv;
 use crate::h264::inter::Weighting;
-use crate::h264::intra::{predict_4x4, predict_8x8, predict_16x16, predict_chroma};
+use crate::h264::intra::{
+    Edge4, Edge8, mode_nxn_available, pred_4x4, pred_8x8, predict_16x16, predict_chroma,
+};
 use crate::h264::mb::{PRED_BI, PRED_L0, PRED_L1, SubMbShape};
 use crate::sample::Sample;
 
@@ -508,6 +510,15 @@ struct IntraCand {
     est: f32,
 }
 
+/// Write an `N`-wide square block held at stride `N` into `rec` at `off`.
+#[inline]
+fn put_block<S: Sample, const N: usize>(rec: &mut Recon<S>, off: usize, b: &[S]) {
+    for y in 0..N {
+        rec.data[off + y * rec.stride..off + y * rec.stride + N]
+            .copy_from_slice(&b[y * N..y * N + N]);
+    }
+}
+
 /// Bits an Intra_4x4 / Intra_8x8 mode costs: one for the predicted mode,
 /// four otherwise.
 #[inline]
@@ -558,12 +569,18 @@ fn i4x4<S: Sample>(
             None
         };
         let predicted = predicted_mode(left, top);
+        // Every legal mode from one gather of the neighbours, each
+        // predicted into its own buffer and scored there.
+        let edge = Edge4::gather(rec, boff, rec.stride, av);
         let mut best = (f32::MAX, 2u8);
+        let mut preds = [[S::default(); 16]; 9];
         for mode in 0..9u8 {
-            if predict_4x4(rec, boff, rec.stride, mode, av, ctx.bit_depth).is_err() {
+            if !mode_nxn_available(mode, av) {
                 continue;
             }
-            let c = (ctx.dist.satd)(&src[soff..], ss, &rec.data[boff..], rec.stride, 4, 4) as f32
+            let pred = &mut preds[mode as usize];
+            let _ = pred_4x4(&edge, mode, av, ctx.bit_depth, pred);
+            let c = (ctx.dist.satd)(&src[soff..], ss, pred, 4, 4, 4) as f32
                 + lam * mode_bits(mode, predicted);
             if c < best.0 {
                 best = (c, mode);
@@ -574,7 +591,7 @@ fn i4x4<S: Sample>(
             return None;
         }
         chosen[raster] = best.1;
-        let _ = predict_4x4(rec, boff, rec.stride, best.1, av, ctx.bit_depth);
+        put_block::<S, 4>(rec, boff, &preds[best.1 as usize]);
         let (lv, n, _) = code_block_4x4(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
         dec.luma[raster] = lv;
         dec.nz_luma[raster] = n as u8;
@@ -635,12 +652,16 @@ fn i8x8<S: Sample>(
             None
         };
         let predicted = predicted_mode(left, top);
+        let edge = Edge8::gather(rec, boff, rec.stride, av);
         let mut best = (f32::MAX, 2u8);
+        let mut preds = [[S::default(); 64]; 9];
         for mode in 0..9u8 {
-            if predict_8x8(rec, boff, rec.stride, mode, av, ctx.bit_depth).is_err() {
+            if !mode_nxn_available(mode, av) {
                 continue;
             }
-            let c = (ctx.dist.satd)(&src[soff..], ss, &rec.data[boff..], rec.stride, 8, 8) as f32
+            let pred = &mut preds[mode as usize];
+            let _ = pred_8x8(&edge, mode, av, ctx.bit_depth, pred);
+            let c = (ctx.dist.satd)(&src[soff..], ss, pred, 8, 8, 8) as f32
                 + lam * mode_bits(mode, predicted);
             if c < best.0 {
                 best = (c, mode);
@@ -650,7 +671,7 @@ fn i8x8<S: Sample>(
         if est > budget {
             return None;
         }
-        let _ = predict_8x8(rec, boff, rec.stride, best.1, av, ctx.bit_depth);
+        put_block::<S, 8>(rec, boff, &preds[best.1 as usize]);
         let (lv, counts) = code_block_8x8(ctx, rec, boff, &src[soff..], ss, 0, ctx.qp_prime, true);
         reconstruct_8x8(ctx, rec, boff, &lv, 0, ctx.qp_prime);
         dec.luma.as_flattened_mut()[blk8 * 64..blk8 * 64 + 64].copy_from_slice(&lv);
