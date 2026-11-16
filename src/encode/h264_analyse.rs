@@ -105,7 +105,10 @@ impl AnalysisCfg {
     /// The tier closest to x264's `medium`. Quantising every coded
     /// candidate by the trellis (-0.96 % BD-rate) and analysing intra up to
     /// 1.5x the best inter estimate (-0.45 %) cost 23 % more instructions,
-    /// the B partition gate takes back 5 % of it.
+    /// the B partition gate takes back 5 % of it. A second inter shape is
+    /// coded only within 1.03x of the best estimate (was 1.1: +0.18 %
+    /// BD-rate for 8 % fewer cycles) and B partitions are searched only
+    /// within 0.98x (was 1.02: with the shape ratio, +0.41 % for 13 %).
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -127,7 +130,7 @@ impl AnalysisCfg {
         skip_ssd: 0.02,
         i4x4: true,
         intra_ratio: 1.5,
-        rd_ratio: 1.1,
+        rd_ratio: 1.03,
         rd_max: 2,
         trellis: true,
         trellis_rd: true,
@@ -138,7 +141,7 @@ impl AnalysisCfg {
         mixed_refs: 1.25,
         bi_refine: 2,
         bi_part_ratio: 0.0,
-        b_part_gate: 1.02,
+        b_part_gate: 0.98,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, one
