@@ -82,18 +82,28 @@ impl<S: Sample> Lookahead<S> {
     pub(crate) fn add(&mut self, display: u64, luma: &[S], width: usize, height: usize) {
         let (lw, lh) = (self.mbs_wide * 8, self.mbs_high * 8);
         let mut low = Recon::<S>::new(lw, lh, PAD);
+        // The columns whose pair of source columns is inside the picture,
+        // a row at a time over slices (no clamp per sample, so the compiler
+        // vectorises it); the rest clamped to the last column.
+        let inside = (width / 2).min(lw);
         for y in 0..lh {
             let y0 = (2 * y).min(height - 1);
             let y1 = (2 * y + 1).min(height - 1);
-            for x in 0..lw {
+            let (r0, r1) = (&luma[y0 * width..][..width], &luma[y1 * width..][..width]);
+            let o = low.offset(0, y as isize);
+            let out = &mut low.data[o..o + lw];
+            for (d, (a, b)) in out[..inside]
+                .iter_mut()
+                .zip(r0.chunks_exact(2).zip(r1.chunks_exact(2)))
+            {
+                let s = a[0].to_i32() + a[1].to_i32() + b[0].to_i32() + b[1].to_i32();
+                *d = S::from_i32((s + 2) >> 2);
+            }
+            for (x, d) in out.iter_mut().enumerate().skip(inside) {
                 let x0 = (2 * x).min(width - 1);
                 let x1 = (2 * x + 1).min(width - 1);
-                let s = luma[y0 * width + x0].to_i32()
-                    + luma[y0 * width + x1].to_i32()
-                    + luma[y1 * width + x0].to_i32()
-                    + luma[y1 * width + x1].to_i32();
-                let o = low.offset(x as isize, y as isize);
-                low.data[o] = S::from_i32((s + 2) >> 2);
+                let s = r0[x0].to_i32() + r0[x1].to_i32() + r1[x0].to_i32() + r1[x1].to_i32();
+                *d = S::from_i32((s + 2) >> 2);
             }
         }
         low.extend_edges(false);
@@ -243,9 +253,32 @@ impl<S: Sample> Lookahead<S> {
                 }
             }
         }
+        // The hexagon, its points in order around it. After a step in
+        // direction `k`, three of the next hexagon's points were scored
+        // already — the old centre (`k + 3`) and the old hexagon's `k - 1`
+        // and `k + 1` (`k + 4` and `k + 2` of the new one) — and none of
+        // them can win: each cost at least what the step's best costs, and
+        // only a strictly cheaper point moves the best. So only `k - 1`,
+        // `k` and `k + 1` are scored again: the same search, half the SADs.
+        const HEX: [(i32, i32); 6] = [(-2, 0), (-1, -2), (1, -2), (2, 0), (1, 2), (-1, 2)];
+        let mut from: Option<usize> = None;
         for _ in 0..RANGE {
             let c = best.1;
-            for (dx, dy) in [(-2, 0), (-1, -2), (1, -2), (2, 0), (1, 2), (-1, 2)] {
+            let mut step = None;
+            // The points to score, in the hexagon's order (of equal
+            // costs, the first scored stays the best).
+            let live: u32 = match from {
+                None => 0x3f,
+                Some(k) => {
+                    // `k - 1`, `k` and `k + 1`, around the six.
+                    let r = 0b111u32 << (k + 5);
+                    (r | r >> 6 | r >> 12) & 0x3f
+                }
+            };
+            for (k, &(dx, dy)) in HEX.iter().enumerate() {
+                if live >> k & 1 == 0 {
+                    continue;
+                }
                 let (mx, my) = (c.0 + dx, c.1 + dy);
                 if mx < lx || mx > hx || my < ly || my > hy {
                     continue;
@@ -253,11 +286,13 @@ impl<S: Sample> Lookahead<S> {
                 let s = sad(mx, my);
                 if s < best.0 {
                     best = (s, (mx, my));
+                    step = Some(k);
                 }
             }
             if best.1 == c {
                 break;
             }
+            from = step;
         }
         let c = best.1;
         for (dx, dy) in [
