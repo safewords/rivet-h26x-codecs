@@ -198,7 +198,7 @@ use super::h265_wp;
 use super::rc::{Insensitivity, PicKind, RateController};
 use super::{Access, BWeighting, Config, RateControl};
 use crate::bitwriter::BitWriter;
-use crate::cabac_enc::CabacEncoder;
+use crate::cabac_enc::BinEnc;
 use crate::dsp::Cpu;
 use crate::dsp::distortion::DistortionDsp;
 use crate::dsp::hevc::HevcDsp;
@@ -1439,8 +1439,13 @@ impl<S: Sample> Core<S> {
             )
         });
         let mut census = KindCensus::of_intra(&cus, i32::from(qp));
+        // The slice's bits, by the word-at-a-time writer: the same
+        // codeword as `CabacEncoder` (the cabac_enc round trip holds the
+        // two to the same bytes), counted from the writer once it has
+        // flushed.
+        let start = w.position();
         {
-            let mut e = CabacEncoder::new(&mut w);
+            let mut e = crate::cabac_enc::CabacWriter::new(&mut w);
             // The writer's own copy of the quantiser chain: it must spell
             // the delta against the same prediction the decision pass
             // settled with, and a decoder derives that prediction from
@@ -1449,7 +1454,6 @@ impl<S: Sample> Core<S> {
                 .is_some()
                 .then(|| QgChain::new(i32::from(qp), bit_depth, &g, log2_qg));
             let mut tc = TreeCtx::new(&g);
-            let start = e.position();
             for cy in 0..hc {
                 for cxu in 0..wc {
                     let addr = cy * wc + cxu;
@@ -1479,9 +1483,9 @@ impl<S: Sample> Core<S> {
                     e.encode_terminate(u32::from(cy == hc - 1 && cxu == wc - 1));
                 }
             }
-            if max_depth > 0 {
-                census.coded_bits += e.position() - start;
-            }
+        }
+        if max_depth > 0 {
+            census.coded_bits += w.position() - start;
         }
         w.align_zero();
         out.extend_from_slice(&syn::annexb(syn::NAL_IDR_N_LP, &w.into_nal()));
@@ -2157,8 +2161,10 @@ impl<S: Sample> Core<S> {
         census.wp_on += wp_stats.0;
         census.wp_won += wp_stats.1;
         census.wp_lost += wp_stats.2;
+        // The word-at-a-time writer, as for an intra picture.
+        let start = w.position();
         {
-            let mut e = CabacEncoder::new(&mut w);
+            let mut e = crate::cabac_enc::CabacWriter::new(&mut w);
             let mut chain = offsets
                 .is_some()
                 .then(|| QgChain::new(i32::from(qp), bit_depth, &g, log2_qg));
@@ -2166,7 +2172,6 @@ impl<S: Sample> Core<S> {
             // neighbours and split_cu_flag's counts deeper ones; the tree
             // context carries both, per 4x4, as the units are written.
             let mut tc = TreeCtx::new(&g);
-            let start = e.position();
             for cy in 0..hc {
                 for cxu in 0..wc {
                     let addr = cy * wc + cxu;
@@ -2211,9 +2216,9 @@ impl<S: Sample> Core<S> {
                     e.encode_terminate(u32::from(cy == hc - 1 && cxu == wc - 1));
                 }
             }
-            if max_depth > 0 {
-                census.coded_bits += e.position() - start;
-            }
+        }
+        if max_depth > 0 {
+            census.coded_bits += w.position() - start;
         }
         w.align_zero();
         let mut out = Vec::new();
