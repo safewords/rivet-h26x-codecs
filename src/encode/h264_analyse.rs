@@ -2336,7 +2336,7 @@ pub(crate) fn b_mb<S: Sample>(
                             let (hp, hs) =
                                 me_at(hl, br[hl]).pred(ax, ay, mbi[hl], w, h, &mut held_buf);
                             let mr = me_at(l, br[l]);
-                            let rs = mr.p[0].stride;
+                            let rs = mr.g.stride;
                             // SAFETY: a one-byte `Sample` is `u8`.
                             let as8 = |v: &[S]| unsafe {
                                 std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len())

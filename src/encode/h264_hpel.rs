@@ -24,13 +24,60 @@ use crate::h264::frame::Mv;
 use crate::sample::Sample;
 
 /// The three half-sample planes of one reference luma plane, at the same
-/// geometry (stride, border) as the plane itself: `h` holds the sample
-/// half a step right of each integer position (`b`), `v` half a step
-/// below (`h` in the standard's naming) and `c` both (`j`).
+/// geometry (stride, border) as the plane itself: [`Hpel::plane`] `0`
+/// holds the sample half a step right of each integer position (`b`), `1`
+/// half a step below (`h` in the standard's naming) and `2` both (`j`).
+///
+/// The three live in one allocation, each starting at its own offset
+/// within a 16 KiB span of addresses ([`HPEL_SKEW`]). Planes allocated
+/// apart are each page-aligned, so the same sample of every plane — the
+/// integer plane's, the three half planes', every reference's — falls in
+/// one set of a 16 KiB-way cache, and a refinement ring reading four
+/// planes of three references at one position asks a set for more lines
+/// than it has ways. Skewed, they spread over four sets.
 pub(crate) struct Hpel<S: Sample> {
-    pub(crate) h: Recon<S>,
-    pub(crate) v: Recon<S>,
-    pub(crate) c: Recon<S>,
+    buf: Vec<S>,
+    base: [usize; 3],
+    len: usize,
+}
+
+/// The cache span the half planes are spread over, in bytes: the L1 data
+/// cache's way size on the CPUs this was measured on (128 KiB, 8 ways),
+/// and a multiple of every smaller one's.
+const HPEL_SPAN: usize = 16 << 10;
+
+/// Each half plane's start, as a fraction of [`HPEL_SPAN`] past the
+/// integer plane's (which an allocator hands out page-aligned): a quarter,
+/// a half and three quarters.
+const HPEL_SKEW: [usize; 3] = [HPEL_SPAN / 4, HPEL_SPAN / 2, 3 * HPEL_SPAN / 4];
+
+impl<S: Sample> Hpel<S> {
+    /// Half plane `k` (0: `b`, 1: `h`, 2: `j`), laid out exactly as the
+    /// integer plane is.
+    #[inline(always)]
+    pub(crate) fn plane(&self, k: usize) -> &[S] {
+        &self.buf[self.base[k]..self.base[k] + self.len]
+    }
+
+    /// Three planes of `len` samples, plane `k`'s first sample [`HPEL_SKEW`]`[k]`
+    /// bytes past a multiple of [`HPEL_SPAN`].
+    fn alloc(len: usize) -> Self {
+        let span = HPEL_SPAN / S::BYTES;
+        let buf = vec![S::default(); 3 * (len + span)];
+        let addr = buf.as_ptr() as usize;
+        let mut base = [0usize; 3];
+        let mut at = 0usize;
+        for k in 0..3 {
+            // The first index at or past `at` whose address sits at the
+            // skew within the span.
+            let want = HPEL_SKEW[k] / S::BYTES;
+            let phase = ((addr / S::BYTES) + at) % span;
+            at += (want + span - phase) % span;
+            base[k] = at;
+            at += len;
+        }
+        Hpel { buf, base, len }
+    }
 }
 
 #[inline(always)]
@@ -45,14 +92,22 @@ fn tap6(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
 pub(crate) fn build_hpel<S: Sample>(r: &Recon<S>, max: i32) -> Hpel<S> {
     let stride = r.stride;
     let rows = r.data.len() / stride;
-    let mut h = r.clone();
-    let mut v = r.clone();
-    let mut c = r.clone();
+    let len = r.data.len();
+    let mut out = Hpel::<S>::alloc(len);
+    let [b0, b1, b2] = out.base;
+    let (lo, rest) = out.buf.split_at_mut(b1);
+    let (mid, hi) = rest.split_at_mut(b2 - b1);
+    let h = &mut lo[b0..b0 + len];
+    let v = &mut mid[..len];
+    let c = &mut hi[..len];
+    h.copy_from_slice(&r.data);
+    v.copy_from_slice(&r.data);
+    c.copy_from_slice(&r.data);
     let d = &r.data;
     // Horizontal half samples, every row.
     for y in 0..rows {
         let row = &d[y * stride..(y + 1) * stride];
-        let out = &mut h.data[y * stride..(y + 1) * stride];
+        let out = &mut h[y * stride..(y + 1) * stride];
         for x in 2..stride - 3 {
             let t = tap6(
                 row[x - 2].to_i32(),
@@ -80,11 +135,11 @@ pub(crate) fn build_hpel<S: Sample>(r: &Recon<S>, max: i32) -> Hpel<S> {
                 d[(y + 3) * stride + x].to_i32(),
             );
         }
-        let vo = &mut v.data[y * stride..(y + 1) * stride];
+        let vo = &mut v[y * stride..(y + 1) * stride];
         for x in 0..stride {
             vo[x] = S::from_i32(((inter[x] + 16) >> 5).clamp(0, max));
         }
-        let co = &mut c.data[y * stride..(y + 1) * stride];
+        let co = &mut c[y * stride..(y + 1) * stride];
         for x in 2..stride - 3 {
             let t = tap6(
                 inter[x - 2],
@@ -97,14 +152,17 @@ pub(crate) fn build_hpel<S: Sample>(r: &Recon<S>, max: i32) -> Hpel<S> {
             co[x] = S::from_i32(((t + 512) >> 10).clamp(0, max));
         }
     }
-    Hpel { h, v, c }
+    out
 }
 
 /// A reference as the search reads it: the integer plane and its three
 /// half-sample planes.
 pub(crate) struct MeRef<'a, S: Sample> {
-    /// `[G, b, h, j]`: integer, horizontal half, vertical half, centre.
-    pub(crate) p: [&'a Recon<S>; 4],
+    /// The integer plane, whose geometry every plane shares.
+    pub(crate) g: &'a Recon<S>,
+    /// `[G, b, h, j]`'s samples: integer, horizontal half, vertical half,
+    /// centre, each indexed by `g`'s offsets.
+    planes: [&'a [S]; 4],
 }
 
 /// For each quarter-sample fraction `(fy * 4 + fx)`: the one or two
@@ -131,10 +189,17 @@ const QPEL: [(u8, i8, i8, u8, i8, i8); 16] = [
 ];
 
 impl<'a, S: Sample> MeRef<'a, S> {
+    /// The reference `g` with its half planes `h` (built from it).
+    pub(crate) fn new(g: &'a Recon<S>, h: &'a Hpel<S>) -> Self {
+        MeRef {
+            g,
+            planes: [&g.data, h.plane(0), h.plane(1), h.plane(2)],
+        }
+    }
+
     #[inline(always)]
     fn at(&self, plane: u8, x: i32, y: i32) -> &'a [S] {
-        let r = self.p[plane as usize];
-        &r.data[r.offset(x as isize, y as isize)..]
+        &self.planes[plane as usize][self.g.offset(x as isize, y as isize)..]
     }
 
     /// The two plane views whose rounded average is the prediction of the
@@ -172,7 +237,7 @@ impl<'a, S: Sample> MeRef<'a, S> {
         let (xi, yi) = (x + (mv.x as i32 >> 2), y + (mv.y as i32 >> 2));
         let (p1, dx1, dy1, p2, dx2, dy2) = QPEL[((mv.y & 3) * 4 + (mv.x & 3)) as usize];
         let a = self.at(p1, xi + dx1 as i32, yi + dy1 as i32);
-        let stride = self.p[0].stride;
+        let stride = self.g.stride;
         if p2 == 255 {
             return (a, stride);
         }
@@ -445,7 +510,7 @@ impl Pts {
 impl<S: Sample> Search<'_, '_, S> {
     #[inline]
     fn sad_full(&self, fx: i32, fy: i32) -> u32 {
-        let r = self.r.p[0];
+        let r = self.r.g;
         let off = r.offset((self.x + fx) as isize, (self.y + fy) as isize);
         (self.dist.sad)(
             self.src,
@@ -466,7 +531,7 @@ impl<S: Sample> Search<'_, '_, S> {
         let mut out = [0u32; 16];
         let n = pts.n;
         if let Some(f) = self.sad_x4.filter(|_| S::BYTES == 1 && n > 1) {
-            let r = self.r.p[0];
+            let r = self.r.g;
             // SAFETY: a one-byte `Sample` is `u8`.
             let as8 =
                 |v: &[S]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
@@ -518,7 +583,7 @@ impl<S: Sample> Search<'_, '_, S> {
             if p2 != 255 {
                 let a = self.r.at(p1, xi + dx1 as i32, yi + dy1 as i32);
                 let b = self.r.at(p2, xi + dx2 as i32, yi + dy2 as i32);
-                let rs = self.r.p[0].stride;
+                let rs = self.r.g.stride;
                 // SAFETY: a one-byte `Sample` is `u8`.
                 let (s8, a8, b8) = unsafe {
                     (
@@ -541,7 +606,7 @@ impl<S: Sample> Search<'_, '_, S> {
     fn satd_n(&self, mvs: &[Mv; 8], n: usize, buf: &mut [S; 256]) -> [u32; 8] {
         let mut out = [0u32; 8];
         if let Some(f) = self.satd_x4.filter(|_| S::BYTES == 1 && n > 1) {
-            let rs = self.r.p[0].stride;
+            let rs = self.r.g.stride;
             // SAFETY: a one-byte `Sample` is `u8`.
             let as8 =
                 |v: &[S]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
@@ -836,9 +901,7 @@ mod tests {
         }
         r.extend_edges(false);
         let hp = build_hpel(&r, 255);
-        let me = MeRef {
-            p: [&r, &hp.h, &hp.v, &hp.c],
-        };
+        let me = MeRef::new(&r, &hp);
         let dsp = H264Dsp::<u8>::new(Cpu::SCALAR);
         for my in -12i16..12 {
             for mx in -12i16..12 {

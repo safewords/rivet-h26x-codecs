@@ -991,9 +991,7 @@ pub(crate) fn code_p_picture<S: Sample>(
         let mut a = PicAn::new(
             cfg,
             [
-                Some(MeRef {
-                    p: [pref.search, &h.h, &h.v, &h.c],
-                }),
+                Some(MeRef::new(pref.search, h)),
                 None,
             ],
         )
@@ -1004,9 +1002,7 @@ pub(crate) fn code_p_picture<S: Sample>(
         a.me_more = more
             .iter()
             .zip(&hpel_more)
-            .map(|(r, h)| MeRef {
-                p: [&r[0], &h.h, &h.v, &h.c],
-            })
+            .map(|(r, h)| MeRef::new(&r[0], h))
             .collect();
         a
     });
@@ -1314,9 +1310,7 @@ pub(crate) fn code_b_picture<S: Sample>(
         PicAn::new(
             cfg,
             [0, 1].map(|l| {
-                Some(MeRef {
-                    p: [brefs.search[l], &h[l].h, &h[l].v, &h[l].c],
-                })
+                Some(MeRef::new(brefs.search[l], &h[l]))
             }),
         )
         .with_trellis(
@@ -1329,9 +1323,7 @@ pub(crate) fn code_b_picture<S: Sample>(
             more.planes[l]
                 .iter()
                 .zip(&hpel_more[l])
-                .map(|(r, h)| MeRef {
-                    p: [&r[0], &h.h, &h.v, &h.c],
-                })
+                .map(|(r, h)| MeRef::new(&r[0], h))
                 .collect()
         }))
     });

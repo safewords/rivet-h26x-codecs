@@ -1154,11 +1154,11 @@ pub(crate) fn predict_inter_rect<S: Sample>(
     // the interpolation below would make, without the six taps.
     let plane = |l: usize| -> Option<&crate::encode::h264_hpel::MeRef<'_, S>> {
         let m = me[l]?;
-        if !matches!(weighting, Weighting::Default) || !std::ptr::eq(m.p[0], &refs[l][0]) {
+        if !matches!(weighting, Weighting::Default) || !std::ptr::eq(m.g, &refs[l][0]) {
             return None;
         }
         let (lx, hx, ly, hy) =
-            crate::encode::h264_hpel::search_bounds(m.p[0], px as i32, py as i32, pw, ph, i32::MAX);
+            crate::encode::h264_hpel::search_bounds(m.g, px as i32, py as i32, pw, ph, i32::MAX);
         let (mx, my) = (mv[l].x as i32 >> 2, mv[l].y as i32 >> 2);
         (mx >= lx && mx < hx && my >= ly && my < hy).then_some(m)
     };
