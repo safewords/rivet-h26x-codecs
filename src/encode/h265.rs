@@ -1738,6 +1738,10 @@ impl<S: Sample> Core<S> {
         pic.tu_split = tune.inter_tu_split;
         pic.tu_split_max = tune.inter_tu_split_max;
         pic.bi_refine = tune.bi_refine;
+        pic.tu_split_nz = tune.tu_split_nz;
+        pic.merge_tried = tune.merge_tried;
+        pic.split_gate = tune.split_gate;
+        pic.split_gate_above = tune.split_gate_above;
         pic.slice_b = c.kind == Kind::B;
         // SAO in a picture nothing references improves only that picture,
         // and under the tiers not by enough to pay for its decision.

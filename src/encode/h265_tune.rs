@@ -122,6 +122,14 @@ pub(crate) struct Tune {
     pub inter_tu_split_max: u32,
     /// `h265_me::InterPicture::bi_refine`.
     pub bi_refine: u32,
+    /// `h265_me::InterPicture::tu_split_nz`.
+    pub tu_split_nz: usize,
+    /// `h265_me::InterPicture::merge_tried`.
+    pub merge_tried: usize,
+    /// `h265_me::InterPicture::split_gate`.
+    pub split_gate: Option<f32>,
+    /// `h265_me::InterPicture::split_gate_above`.
+    pub split_gate_above: u32,
     /// The Lagrangian multiplier of an intra picture, a P picture, the
     /// reference B and the other B pictures
     /// (`h265_intra::set_lambda_scale`).
@@ -165,6 +173,10 @@ impl Tune {
         inter_tu_split: false,
         inter_tu_split_max: 5,
         bi_refine: 0,
+        tu_split_nz: 0,
+        merge_tried: 5,
+        split_gate: None,
+        split_gate_above: 3,
         lambda: [1.0; 4],
         tree_frame_only: false,
         i_adapt_min: -6,
@@ -268,7 +280,11 @@ impl Tune {
                 intra_satd_gate: Some(1.5),
                 ..base
             },
+            // The 8x8 transform split tried only where the whole TU kept
+            // four luma levels or more (round 4, 2026-11-15, x265 parity):
+            // -11.45% -> -11.33% BD-rate at 0.98x the CPU.
             Preset::Medium => Tune {
+                tu_split_nz: 4,
                 rskip: Some(0.5),
                 intra_split_depth: 0,
                 intra_satd_gate: Some(1.0),
@@ -283,7 +299,26 @@ impl Tune {
             // one reference -5.09% at 1.27x.
             // Intra pictures without a transform split (round 3): -12.06%
             // -> -11.88% BD-rate at 0.97x the CPU.
+            // Round 4 (2026-11-15, x265 parity): a unit above 8x8 whose
+            // 2Nx2N search costs more than 2.5 SATD Lagrangians a sample
+            // goes straight to its children (`split_gate`), the 8x8
+            // transform split only where the whole TU kept four levels or
+            // more, and three merge candidates scored of five: -12.52% ->
+            // -10.49% BD-rate at 0.89x the CPU (interleaved one-thread
+            // runs; foreman and mobile 0.93x, the 720p clips 0.88x).
+            // Measured on the way: the gate at 3 with the level count
+            // -11.32% at 0.92x; the gate alone at 1.5 -10.02% (ducks
+            // -3.87%), at 3 -11.38%;
+            // the gate on 32x32 and 64x64 units only -12.02%, at 64x64
+            // only never firing; no unit coded whole at 64x64 -8.93% at
+            // no saving; SAO off in reference pictures too -10.29% for
+            // 3.5%; quarter-sample refinement on a cross -10.19% (mobile
+            // -6.97% -> -4.11%) for 2%; the merge candidates no longer
+            // seeding a unit with a parent's vector, no saving.
             Preset::Veryfast => Tune {
+                split_gate: Some(2.5),
+                tu_split_nz: 4,
+                merge_tried: 3,
                 i_split_depth: 0,
                 rskip: Some(f32::MAX),
                 rd_intra: None,

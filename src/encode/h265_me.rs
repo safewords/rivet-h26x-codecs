@@ -738,6 +738,22 @@ pub struct InterPicture<S: Sample> {
     /// AMVP pair gets ([`Self::refine_bi`]); 0 scores the pair of
     /// independently searched vectors only.
     pub bi_refine: u32,
+    /// The transform split is tried only where the whole TU kept at least
+    /// this many luma levels.
+    pub tu_split_nz: usize,
+    /// How many of the merge candidates a unit scores, in list order.
+    pub merge_tried: usize,
+    /// The early split: a unit above the smallest whose 2Nx2N search
+    /// costs more than this many SATD Lagrangians per sample, and is not
+    /// a merge, is not coded whole — the walk goes straight to its four
+    /// children (`tree_node`).
+    pub split_gate: Option<f32>,
+    /// The gate applies to units above this log2 size only.
+    pub split_gate_above: u32,
+    /// Whether the unit being decided may be gated ([`Self::split_gate`]).
+    gate_now: bool,
+    /// Whether it was.
+    gated: bool,
     /// Scratch for [`Self::refine_bi`]: the other list's prediction, then
     /// the target the refined list is searched against.
     bi_target: Vec<S>,
@@ -891,6 +907,12 @@ impl<S: Sample> InterPicture<S> {
             seed_at: [[None; 16]; 4],
             spred_avg: vec![S::default(); 64 * 64],
             bi_refine: 0,
+            tu_split_nz: 0,
+            merge_tried: MAX_MERGE_CAND,
+            split_gate: None,
+            split_gate_above: 3,
+            gate_now: false,
+            gated: false,
             bi_target: vec![S::default(); 64 * 64],
             geo: Geo::new(sps.log2_ctb_size, w, h, sps.chroma_array_type()),
             intra_scratch: IntraScratch::default(),
@@ -1103,6 +1125,15 @@ impl<S: Sample> InterPicture<S> {
         let lam = lambda(ctx.qp) * satd_lambda_scale(ctx.bit_depth);
         let rate = Rate::new_at(ctx.qp, false, log2_cu, depth);
         let pick = self.pick_pu(ctx, refs_l0, &pu, src_y, y_stride, &rate, lam);
+        if self.gate_now
+            && pick.merge_idx.is_none()
+            && self
+                .split_gate
+                .is_some_and(|t| pick.cost > t * lam * (n * n) as f32)
+        {
+            self.gated = true;
+            return;
+        }
         let parts = self.pick_parts(
             ctx,
             TreeRefs::P(refs_l0),
@@ -1268,7 +1299,7 @@ impl<S: Sample> InterPicture<S> {
         let mut best_merge: Option<(usize, u32)> = None; // (idx, satd)
         let mut best_merge_cost = f32::INFINITY;
         let mut seen: Vec<(Mv, i8)> = Vec::with_capacity(MAX_MERGE_CAND);
-        for (idx, cand) in merge.iter().enumerate() {
+        for (idx, cand) in merge.iter().enumerate().take(self.merge_tried) {
             let ri = cand.ref_idx[0];
             if ri < 0 || ri as usize >= refs_l0.len() || seen.contains(&(cand.mv[0], ri)) {
                 continue;
@@ -1483,6 +1514,15 @@ impl<S: Sample> InterPicture<S> {
         let lam = lambda(ctx.qp) * satd_lambda_scale(ctx.bit_depth);
         let rate = Rate::new_at(ctx.qp, true, log2_cu, depth);
         let pick = self.pick_pu_b(ctx, ref0, ref1, &pu, src_y, y_stride, &rate, lam);
+        if self.gate_now
+            && pick.merge_idx.is_none()
+            && self
+                .split_gate
+                .is_some_and(|t| pick.cost > t * lam * (n * n) as f32)
+        {
+            self.gated = true;
+            return;
+        }
         let parts = self.pick_parts(
             ctx,
             TreeRefs::B(ref0, ref1),
@@ -1785,7 +1825,7 @@ impl<S: Sample> InterPicture<S> {
         let mut best_merge: Option<(usize, u32)> = None;
         let mut best_merge_cost = f32::INFINITY;
         let mut seen: Vec<([Mv; 2], [i8; 2])> = Vec::with_capacity(MAX_MERGE_CAND);
-        for (idx, cand) in merge.iter().enumerate() {
+        for (idx, cand) in merge.iter().enumerate().take(self.merge_tried) {
             let key = (cand.mv, cand.ref_idx);
             if cand.ref_idx == [-1, -1] || seen.contains(&key) {
                 continue;
@@ -2265,7 +2305,10 @@ impl<S: Sample> InterPicture<S> {
         let any = self.code_residual_whole(
             ctx, x0, y0, log2_cu, src, y_stride, src_cb, src_cr, c_stride, out,
         );
-        if !out.cbf_luma {
+        if !out.cbf_luma
+            || (self.tu_split_nz > 1
+                && out.luma[..n * n].iter().filter(|&&v| v != 0).count() < self.tu_split_nz)
+        {
             self.tu_save = save;
             return any;
         }
@@ -2845,7 +2888,11 @@ impl<S: Sample> InterPicture<S> {
             1
         };
         let lam = ssd_lambda(qp, ctx.bit_depth);
+        self.gate_now = depth < max_depth && log2 > MIN_CB_LOG2.max(self.split_gate_above);
+        self.gated = false;
         let (d, ssd, unit_bits) = self.tree_leaf(&cctx, refs, x0, y0, log2, depth, src);
+        self.gate_now = false;
+        let gated = std::mem::take(&mut self.gated);
         if (depth as usize) < 4 {
             self.parent_ref[depth as usize] = match &d {
                 PCuDecision::Inter(i) => Some((x0 as u32, y0 as u32, i.ref_idx)),
@@ -2858,7 +2905,11 @@ impl<S: Sample> InterPicture<S> {
             0.0
         };
         let bits = unit_bits + flag;
-        let j_whole = ssd as f64 + lam * f64::from(bits);
+        let j_whole = if gated {
+            f64::INFINITY
+        } else {
+            ssd as f64 + lam * f64::from(bits)
+        };
         // A skipped unit this cheap is not split further: see `rskip`.
         let rskip = self
             .rskip
@@ -2941,6 +2992,9 @@ impl<S: Sample> InterPicture<S> {
         src: &Srcs<'_, S>,
     ) -> (PCuDecision, u64, f32) {
         let (coded, ssd, bits) = self.tree_leaf_coded(ctx, refs, x0, y0, log2, depth, src);
+        if self.gated {
+            return (coded, ssd, bits);
+        }
         let (coded, ssd, bits) = if self.drop_trial {
             self.tree_leaf_drop(ctx, refs, x0, y0, log2, depth, src, coded, ssd, bits)
         } else {
@@ -3200,6 +3254,9 @@ impl<S: Sample> InterPicture<S> {
                 (1, true)
             }
         };
+        if self.gated {
+            return (PCuDecision::Inter(d), 0, f32::INFINITY);
+        }
         let coded = if matches!(d.kind, InterCuKind::UseIntra) {
             self.pool.push(d);
             PCuDecision::Intra(Box::new(self.code_cu_intra(
@@ -3665,8 +3722,7 @@ impl<S: Sample> InterPicture<S> {
         let mut t = std::mem::take(&mut self.bi_target);
         let max = (1i32 << ctx.bit_depth) - 1;
         {
-            let (p, ps) = match Self::read_at(&self.half, planes[other], x, y, (w, h), mvs[other])
-            {
+            let (p, ps) = match Self::read_at(&self.half, planes[other], x, y, (w, h), mvs[other]) {
                 Some(v) => v,
                 None => {
                     let InterPicture {
