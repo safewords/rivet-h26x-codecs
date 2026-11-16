@@ -988,14 +988,7 @@ pub(crate) fn code_p_picture<S: Sample>(
     };
     let mut an = analysis.map(|cfg| {
         let h = hpel.as_ref().expect("built with the analysis");
-        let mut a = PicAn::new(
-            cfg,
-            [
-                Some(MeRef::new(pref.search, h)),
-                None,
-            ],
-        )
-        .with_trellis(
+        let mut a = PicAn::new(cfg, [Some(MeRef::new(pref.search, h)), None]).with_trellis(
             tools.trellis_states(crate::h264::SliceType::P, qp, g.field_pic),
             g.bit_depth,
         );
@@ -1309,9 +1302,7 @@ pub(crate) fn code_b_picture<S: Sample>(
         let h = hpel.as_ref().expect("built with the analysis");
         PicAn::new(
             cfg,
-            [0, 1].map(|l| {
-                Some(MeRef::new(brefs.search[l], &h[l]))
-            }),
+            [0, 1].map(|l| Some(MeRef::new(brefs.search[l], &h[l]))),
         )
         .with_trellis(
             tools

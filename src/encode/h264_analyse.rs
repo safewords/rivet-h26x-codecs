@@ -130,6 +130,16 @@ pub(crate) struct AnalysisCfg {
     /// starting 1.1x behind never ended as the macroblock's 16x16 choice
     /// in the measurement (park_joy, ducks_take_off, foreman, mobile).
     pub(crate) bi_ratio: f32,
+    /// A 16x16 search at a further reference (P: past the first; B: each
+    /// list past its first) is refined to sub-samples only when its
+    /// whole-sample cost (SAD plus rate, the reference's bits included)
+    /// is within this factor of the best whole-sample cost an earlier
+    /// reference of the list reached (0: always refined). One that is not
+    /// is scored where its whole-sample search ended. Of park_joy's
+    /// (medium, QP 27) further references 1.5x or more behind, 4 of
+    /// 17,500 P searches and 25 of 18,300 B ones would have won the
+    /// list's 16x16 after refinement.
+    pub(crate) refine_ratio: f32,
 }
 
 impl AnalysisCfg {
@@ -146,7 +156,11 @@ impl AnalysisCfg {
     /// no third reference past 1.2x, and one whose best inter estimate is
     /// 1.1x behind it codes no inter candidate (inter almost never wins
     /// there); a B pair is refined only from within 1.05x of the better
-    /// list (together +0.10 % BD-rate for 13 % fewer cycles).
+    /// list (together +0.10 % BD-rate for 13 % fewer cycles). Since the
+    /// tenth round a further reference whose whole-sample cost is 1.5x the
+    /// best one's so far is not refined to sub-samples (`refine_ratio`:
+    /// +0.03 % for 2.3 % fewer cycles; slow, +0.17 % for 2.6 %, and
+    /// veryfast, +0.04 % for 0.4 %, are left without it).
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -187,6 +201,7 @@ impl AnalysisCfg {
         rd_lead: 1.1,
         ref_lead: 1.2,
         bi_ratio: 1.05,
+        refine_ratio: 1.5,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, and
@@ -247,6 +262,7 @@ impl AnalysisCfg {
         rd_lead: 0.0,
         ref_lead: 0.0,
         bi_ratio: 1.05,
+        refine_ratio: 0.0,
     };
 
     /// The most thorough tier: more references, refinement and candidates
@@ -299,6 +315,7 @@ impl AnalysisCfg {
         rd_lead: 1.2,
         ref_lead: 0.0,
         bi_ratio: 1.05,
+        refine_ratio: 0.0,
     };
 
     /// The tier for a preset.
@@ -1419,25 +1436,25 @@ pub(crate) fn p_mb<S: Sample>(
         }
     }
     let nref = 1 + more.len();
+    let search_r = |r: usize, x: usize, y: usize, w: usize, h: usize, pred: Mv| Search {
+        dist: ctx.dist,
+        r: if r == 0 { me } else { &an.me_more[r - 1] },
+        src: &sy[y * src.ys + x..],
+        src_stride: src.ys,
+        x: (px + x) as i32,
+        y: (py + y) as i32,
+        w,
+        h,
+        pred,
+        cost: costs,
+        bounds: search_bounds(pref.search, (px + x) as i32, (py + y) as i32, w, h, vr),
+        satd_avg: ctx.enc.satd_avg,
+        sad_x4: ctx.enc.sad_x4,
+        satd_x4: ctx.enc.satd_avg_x4,
+    };
     let run_r =
         |r: usize, x: usize, y: usize, w: usize, h: usize, pred: Mv, cands: &[Mv], mc: &MeCfg| {
-            let s = Search {
-                dist: ctx.dist,
-                r: if r == 0 { me } else { &an.me_more[r - 1] },
-                src: &sy[y * src.ys + x..],
-                src_stride: src.ys,
-                x: (px + x) as i32,
-                y: (py + y) as i32,
-                w,
-                h,
-                pred,
-                cost: costs,
-                bounds: search_bounds(pref.search, (px + x) as i32, (py + y) as i32, w, h, vr),
-                satd_avg: ctx.enc.satd_avg,
-                sad_x4: ctx.enc.sad_x4,
-                satd_x4: ctx.enc.satd_avg_x4,
-            };
-            s.run(cands, mc)
+            search_r(r, x, y, w, h, pred).run(cands, mc)
         };
     // 16x16 against every active reference, each at its own predictor and
     // charged its index (te(v): one bit over two entries, else ue(v)).
@@ -1459,6 +1476,8 @@ pub(crate) fn p_mb<S: Sample>(
     // the candidates are predicted again below.)
     let i16 = intra_estimate(ctx, rec, mb_x, mb_y, src, nb.avail);
     let i_est = i16.0;
+    // The best whole-sample cost so far, for `refine_ratio`.
+    let mut int16 = u32::MAX;
     for r in 0..nref {
         if r > 0 && cfg.ref_lead > 0.0 && c16 as f32 + lam1 >= cfg.ref_lead * i_est {
             break;
@@ -1472,8 +1491,18 @@ pub(crate) fn p_mb<S: Sample>(
             cands[nc] = p;
         }
         let k = if r > 0 { (nc + 1).min(cands.len()) } else { nc };
-        let (m, _, c) = run_r(r, 0, 0, 16, 16, p, &cands[..k], &cfg.me);
-        let c = c + (lam1 * ref_bits(r)) as u32;
+        let s = search_r(r, 0, 0, 16, 16, p);
+        let rb = (lam1 * ref_bits(r)) as u32;
+        let (mi, ci) = s.int_search(&cands[..k], &cfg.me);
+        let ci = ci + rb;
+        let (m, _, c) =
+            if r > 0 && cfg.refine_ratio > 0.0 && ci as f32 >= cfg.refine_ratio * int16 as f32 {
+                s.refine(mi, &MeCfg::SCORE)
+            } else {
+                s.refine(mi, &cfg.me)
+            };
+        int16 = int16.min(ci);
+        let c = c + rb;
         if r < mv16r.len() {
             (mv16r[r], c16r[r]) = (m, c);
         }
@@ -2203,6 +2232,22 @@ pub(crate) fn b_mb<S: Sample>(
 
     // 16x16 per list, then the pair.
     let vr = ctx.motion.vertical_search(ctx.field);
+    let searcher = |l: usize, rf: i8, x: usize, y: usize, w: usize, h: usize, pred: Mv| Search {
+        dist: ctx.dist,
+        r: me_at(l, rf),
+        src: &sy[y * src.ys + x..],
+        src_stride: src.ys,
+        x: (px + x) as i32,
+        y: (py + y) as i32,
+        w,
+        h,
+        pred,
+        cost: costs,
+        bounds: search_bounds(refs.search[l], (px + x) as i32, (py + y) as i32, w, h, vr),
+        satd_avg: ctx.enc.satd_avg,
+        sad_x4: ctx.enc.sad_x4,
+        satd_x4: ctx.enc.satd_avg_x4,
+    };
     let search = |l: usize,
                   rf: i8,
                   x: usize,
@@ -2211,28 +2256,10 @@ pub(crate) fn b_mb<S: Sample>(
                   h: usize,
                   pred: Mv,
                   cands: &[Mv],
-                  mc: &MeCfg| {
-        let s = Search {
-            dist: ctx.dist,
-            r: me_at(l, rf),
-            src: &sy[y * src.ys + x..],
-            src_stride: src.ys,
-            x: (px + x) as i32,
-            y: (py + y) as i32,
-            w,
-            h,
-            pred,
-            cost: costs,
-            bounds: search_bounds(refs.search[l], (px + x) as i32, (py + y) as i32, w, h, vr),
-            satd_avg: ctx.enc.satd_avg,
-            sad_x4: ctx.enc.sad_x4,
-            satd_x4: ctx.enc.satd_avg_x4,
-        };
-        s.run(cands, mc)
-    };
+                  mc: &MeCfg| { searcher(l, rf, x, y, w, h, pred).run(cands, mc) };
     // List `l`'s 16x16 at reference `r` from predictor `p`; `m16` holds
     // list 0's result by the time list 1 is searched.
-    let search16 = |l: usize, r: i8, p: Mv, m16: &[Mv; 2]| -> (Mv, u32) {
+    let search16 = |l: usize, r: i8, p: Mv, m16: &[Mv; 2], gate: f32| -> (Mv, u32, u32) {
         let mut cands = [Mv::ZERO; 9];
         let mut nc = 0;
         // List 1 also starts from list 0's vector mirrored: an object in
@@ -2252,8 +2279,17 @@ pub(crate) fn b_mb<S: Sample>(
                 nc += 1;
             }
         }
-        let (mv, _, c) = search(l, r, 0, 0, 16, 16, p, &cands[..nc], &cfg.me);
-        (mv, c)
+        let s = searcher(l, r, 0, 0, 16, 16, p);
+        let (mi, ci) = s.int_search(&cands[..nc], &cfg.me);
+        let (mv, _, c) = s.refine(
+            mi,
+            if ci as f32 >= gate {
+                &MeCfg::SCORE
+            } else {
+                &cfg.me
+            },
+        );
+        (mv, c, ci)
     };
     st.reset_mb();
     // Each list's 16x16 searched at every active reference; the best one
@@ -2266,10 +2302,21 @@ pub(crate) fn b_mb<S: Sample>(
     for l in 0..2 {
         let n = refs.more.count(l);
         let mut best = (u32::MAX, 0i8, Mv::ZERO, Mv::ZERO);
+        // The best whole-sample cost so far, for `refine_ratio`.
+        let mut int16 = u32::MAX;
         for r in 0..n as i8 {
             let p = st.predict(l, r, 0, 0, 16, 16);
-            let (mv, c) = search16(l, r, p, &m16);
-            let c = c + (lam1 * (ref_bits(r, n) + if r > 0 { B_REF_BIAS } else { 0.0 })) as u32;
+            let rb = (lam1 * (ref_bits(r, n) + if r > 0 { B_REF_BIAS } else { 0.0 })) as u32;
+            // The whole-sample cost at which this reference is not refined
+            // (its own bits come off it: they are added to the search's).
+            let gate = if r > 0 && cfg.refine_ratio > 0.0 {
+                cfg.refine_ratio * int16 as f32 - rb as f32
+            } else {
+                f32::INFINITY
+            };
+            let (mv, c, ci) = search16(l, r, p, &m16, gate);
+            int16 = int16.min(ci + rb);
+            let c = c + rb;
             if c < best.0 {
                 best = (c, r, mv, p);
             }

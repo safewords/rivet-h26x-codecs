@@ -461,6 +461,18 @@ pub(crate) struct MeCfg {
     pub(crate) dia: bool,
 }
 
+impl MeCfg {
+    /// No refinement: [`Search::refine`] scores its start and returns it.
+    pub(crate) const SCORE: MeCfg = MeCfg {
+        range: 0,
+        hpel_iters: 0,
+        qpel_iters: 0,
+        umh: false,
+        qpel_diamond: false,
+        dia: false,
+    };
+}
+
 /// One block's search: everything fixed while candidates are scored.
 pub(crate) struct Search<'a, 'b, S: Sample> {
     pub(crate) dist: &'b DistortionDsp<S>,
@@ -650,6 +662,13 @@ impl<S: Sample> Search<'_, '_, S> {
     /// whole samples for the descent). Returns the vector, its SATD and
     /// its full cost (SATD plus rate).
     pub(crate) fn run(&self, cands: &[Mv], cfg: &MeCfg) -> (Mv, u32, u32) {
+        let (mv, _) = self.int_search(cands, cfg);
+        self.refine(mv, cfg)
+    }
+
+    /// The whole-sample stage of [`Search::run`]: the best whole-sample
+    /// vector (in quarter samples) and its cost, SAD plus rate.
+    pub(crate) fn int_search(&self, cands: &[Mv], cfg: &MeCfg) -> (Mv, u32) {
         let (lx, hx, ly, hy) = self.bounds;
         let clampf = |m: Mv| {
             (
@@ -772,7 +791,7 @@ impl<S: Sample> Search<'_, '_, S> {
                     break;
                 }
             }
-            return self.refine(Mv::new((best.0 * 4) as i16, (best.1 * 4) as i16), cfg);
+            return (Mv::new((best.0 * 4) as i16, (best.1 * 4) as i16), bcost);
         }
         // Hexagon descent. After the first ring, a move to one of the six
         // vertices leaves three of the new ring's points already scored
@@ -810,7 +829,7 @@ impl<S: Sample> Search<'_, '_, S> {
             &mut bcost,
         );
         debug_assert!(self.inside(best.0, best.1));
-        self.refine(Mv::new((best.0 * 4) as i16, (best.1 * 4) as i16), cfg)
+        (Mv::new((best.0 * 4) as i16, (best.1 * 4) as i16), bcost)
     }
 
     /// Sub-sample refinement from `mv`: square rings at half, then quarter
