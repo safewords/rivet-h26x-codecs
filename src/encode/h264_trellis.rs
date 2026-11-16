@@ -881,6 +881,15 @@ impl Trellis {
             c_lo = vsetq_lane_f32::<0>(tail, c_lo);
             let mut c_hi = c_hi;
             let mut from = [const { std::mem::MaybeUninit::<U>::uninit() }; N];
+            // Each position's source lanes again, times eight, a byte each:
+            // the walk back's chain (see `quant_ones`).
+            let mut src = [const { std::mem::MaybeUninit::<u64>::uninit() }; N];
+            let src_bytes = |lo: C, hi: C| -> u64 {
+                let lo = vandq_u32(vshrq_n_u32::<21>(lo), vdupq_n_u32(0x38));
+                let hi = vandq_u32(vshrq_n_u32::<21>(hi), vdupq_n_u32(0x38));
+                let b = vmovn_u16(vcombine_u16(vmovn_u32(lo), vmovn_u32(hi)));
+                vget_lane_u64::<0>(vreinterpret_u64_u8(b))
+            };
             for i in (0..=last).rev() {
                 let t = top[i];
                 let coded_sig = i < max_idx;
@@ -906,6 +915,7 @@ impl Trellis {
                     c_hi = vaddq_f32(vaddq_f32(c_hi, dv), z);
                     vst1q_u32(fp, stay_lo);
                     vst1q_u32(fp.add(4), stay_hi);
+                    src[i].write(0x3830_2820_1810_0800);
                     continue;
                 }
                 let (zs, os, l0, l1) = if coded_sig {
@@ -1036,6 +1046,7 @@ impl Trellis {
                 c_hi = nc_hi;
                 vst1q_u32(fp, nf_lo);
                 vst1q_u32(fp.add(4), nf_hi);
+                src[i].write(src_bytes(nf_lo, nf_hi));
             }
             // The coded block flag: an all-zero block saves it.
             if let Some(cb) = cbf_base {
@@ -1054,11 +1065,12 @@ impl Trellis {
                 }
             }
             let mut nz = 0;
+            let mut at = (lane as u32) << 3;
             for i in 0..=last {
                 // SAFETY: every position up to `last` was written above.
-                let e = from[i].assume_init_ref()[lane];
+                let e = from[i].assume_init_ref()[(at >> 3) as usize & 7];
                 nz += put_level(levels, coeffs, scan[start + i] as usize, e & 0xff_ffff);
-                lane = (e >> 24) as usize;
+                at = (src[i].assume_init() >> at) as u32 & 0x38;
             }
             nz
         }
@@ -1088,9 +1100,10 @@ impl Trellis {
         fn add4(a: V4, b: V4) -> V4 {
             [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
         }
-        /// `from` code: the source lane and the level (0 or 1).
+        /// `from` code: the source lane (times eight, the bit offset of its
+        /// code in the position's word) and the level (0 or 1).
         const fn c4(lane: u8, lv: u8) -> u8 {
-            (lane << 1) | lv
+            (lane << 3) | lv
         }
         const STAY4: [u8; 4] = [c4(0, 0), c4(1, 0), c4(2, 0), c4(3, 0)];
         let (scan, start, count): (&[u8], usize, usize) = match kind {
@@ -1180,12 +1193,17 @@ impl Trellis {
                 lane = j;
             }
         }
+        // The walk back through the chosen path: a position's four codes
+        // are one word, and the next lane's offset in it is the code at
+        // this one's — a shift and a mask from one position to the next,
+        // where an indexed load was four cycles more each.
         let mut nz = 0;
+        let mut at = (lane as u32) << 3;
         for i in 0..=last {
             // SAFETY: every position up to `last` was written above.
-            let e = unsafe { from[i].assume_init_ref() }[lane];
-            nz += put_level(levels, coeffs, scan[start + i] as usize, (e & 1) as u32);
-            lane = (e >> 1) as usize;
+            let e = u32::from_le_bytes(unsafe { from[i].assume_init() }) >> at;
+            nz += put_level(levels, coeffs, scan[start + i] as usize, e & 1);
+            at = e & 0x18;
         }
         nz
     }
