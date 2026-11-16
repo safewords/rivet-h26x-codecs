@@ -267,10 +267,11 @@ impl Trellis {
         let scale = 1.0 / (1u64 << qbits) as f32;
         // In raster order first, where the arithmetic is one vector
         // expression, then taken into the scan.
-        let mut xr = [0f32; N];
-        for ((o, &c), &m) in xr.iter_mut().zip(&coeffs[..N]).zip(&mf[..N]) {
-            *o = (c.unsigned_abs() as f32) * m as f32 * scale;
-        }
+        // Built element by element: a zeroed array first was a call to
+        // `memset` per 8x8 block.
+        let (coeffs, mf) = (&coeffs[..N], &mf[..N]);
+        let xr: [f32; N] =
+            std::array::from_fn(|i| (coeffs[i].unsigned_abs() as f32) * mf[i] as f32 * scale);
         // A block every coefficient of which rounds to zero codes nothing,
         // and is 44 % of the blocks: found from the largest exact level
         // before the scan is gathered. The magnitudes are non-negative, so
