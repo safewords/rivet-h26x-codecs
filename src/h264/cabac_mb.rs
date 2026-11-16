@@ -3573,7 +3573,7 @@ mod residual_round_trip {
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
                 let r = (seed >> 33) as u32;
-                if r % (1 + trial % 9) == 0 {
+                if r.is_multiple_of(1 + trial % 9) {
                     *v = (r >> 4) as i16;
                 }
             }
