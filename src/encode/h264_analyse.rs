@@ -292,6 +292,7 @@ impl<'a, S: Sample> PicAn<'a, S> {
                 ctx,
                 lambda: 0.0,
                 bd_off: 6 * (bit_depth as i32 - 8),
+                simd: Trellis::simd_default(),
             });
         }
         self

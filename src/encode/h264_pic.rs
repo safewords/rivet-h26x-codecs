@@ -806,6 +806,7 @@ pub(crate) fn code_intra_picture<S: Sample>(
             ctx,
             lambda: 0.0,
             bd_off: 6 * (g.bit_depth as i32 - 8),
+            simd: crate::encode::h264_trellis::Trellis::simd_default(),
         });
     for mb_y in 0..mbs_high {
         let mut left_modes: [Option<u8>; 4] = [None; 4];
