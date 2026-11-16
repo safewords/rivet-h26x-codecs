@@ -387,9 +387,11 @@ The same `--preset veryfast | medium | slow` selects the H.265 encoder's
 tier (`Config::preset`, Medium by default; `src/encode/h265_tune.rs`). Under
 `--codec h265` the flag also sets that codec's structure — three B pictures
 in the scheduler's pyramid, SAO, references 1 / 2 / 4 — and the tier's
-quantiser offsets: the configured QP is a P picture's, I pictures code 3
-below it, the reference B 2 above and the others 4 above (only under
-`Config::pyramid`, so a constant-QP stream without one stays constant).
+quantiser offsets: the configured QP is a P picture's, the reference B
+codes 2 above it and the others 4 above, and an I picture between 6 below
+and level with it as the lookahead propagation over the next sixteen
+pictures says (below; only under `Config::pyramid`, so a constant-QP
+stream without one stays constant).
 `Config::legacy_decisions` gives the untiered decisions.
 
 What every tier decides with (`h265_me`, `h265_intra`, `h265_search`,
@@ -408,12 +410,17 @@ tree split once into four quarter TUs where that is cheaper, tried in 8x8
 CUs (4x4 luma TUs, the 4:2:0 chroma left whole); sign data hiding;
 rate-distortion optimised quantisation of intra units and of inter units'
 luma (inter chroma takes the plain quantiser); no SAO in pictures nothing
-references. Slow adds RDOQ in those pictures too. Medium and veryfast
+references. Slow adds RDOQ in those pictures too, iterative bi-prediction
+refinement and a Lagrangian at 0.7 of the conventional one. Medium and veryfast
 prune: a skip cheaper than 0.5 λ per sample (veryfast: every skip) is not
 split, intra is coded only where its best mode's SATD cost beats the inter
 search (slow: comes within 1.5x of it), angles are searched coarse to
-fine, and pictures nothing references take the cheapest settings, RDOQ
-off; veryfast's intra pictures do not split their transform.
+fine, pictures nothing references take the cheapest settings, RDOQ
+off, and the 8x8 transform split is tried only where the whole TU kept
+four luma levels; veryfast's intra pictures do not split their
+transform, a unit above 8x8 whose search costs more than 2.5 SATD
+Lagrangians a sample is split without being coded whole, and three of the
+five merge candidates are scored.
 
 Measured with `parity.py` (30 frames, QP 22/27/32/37 against x265 `--tune
 psnr --crf 18/23/28/33`, x265 one thread; BD-rate, negative = fewer bits
@@ -422,36 +429,41 @@ loaded machine, indicative to about ±0.05x):
 
 | `--preset medium` vs x265 medium | BD PSNR-Y | BD PSNR-avg | CPU |
 |---|---:|---:|---:|
-| foreman CIF | −14.84 % | −14.49 % | 1.09x |
-| mobile CIF | −9.14 % | −6.35 % | 1.03x |
-| akiyo CIF | −21.79 % | −20.22 % | 1.05x |
-| ducks_take_off 720p | −3.60 % | −2.69 % | 0.90x |
-| park_joy 720p | −3.39 % | −2.10 % | 1.06x |
-| **mean** | **−10.55 %** | **−9.17 %** | **0.98x** |
+| foreman CIF | −14.84 % | −14.48 % | 1.08x |
+| mobile CIF | −8.96 % | −6.35 % | 1.02x |
+| akiyo CIF | −22.73 % | −22.33 % | 1.05x |
+| ducks_take_off 720p | −5.63 % | −4.40 % | 0.88x |
+| park_joy 720p | −4.51 % | −3.14 % | 1.05x |
+| **mean** | **−11.33 %** | **−10.14 %** | **0.96x** |
 
 | `--preset veryfast` vs x265 veryfast | BD PSNR-Y | BD PSNR-avg | CPU |
 |---|---:|---:|---:|
-| foreman CIF | −13.23 % | −12.48 % | 1.15x |
-| mobile CIF | −7.08 % | −4.27 % | 1.15x |
-| akiyo CIF | −22.17 % | −20.60 % | 1.01x |
-| ducks_take_off 720p | −10.76 % | −9.32 % | 1.02x |
-| park_joy 720p | −6.19 % | −4.91 % | 1.17x |
-| **mean** | **−11.88 %** | **−10.32 %** | **1.09x** |
+| foreman CIF | −12.46 % | −11.80 % | 1.35x |
+| mobile CIF | −6.46 % | −3.69 % | 1.16x |
+| akiyo CIF | −21.50 % | −21.28 % | 1.10x |
+| ducks_take_off 720p | −7.00 % | −4.96 % | 1.00x |
+| park_joy 720p | −5.04 % | −3.86 % | 1.10x |
+| **mean** | **−10.49 %** | **−9.11 %** | **1.07x** |
 
 | `--preset slow` vs x265 slow | BD PSNR-Y | BD PSNR-avg | CPU |
 |---|---:|---:|---:|
-| foreman CIF | −0.77 % | −1.90 % | 0.78x |
-| mobile CIF | +2.82 % | +4.96 % | 0.75x |
-| akiyo CIF | −13.81 % | −13.83 % | 0.97x |
-| ducks_take_off 720p | +7.96 % | +8.40 % | 0.74x |
-| park_joy 720p | +6.70 % | +7.43 % | 0.84x |
-| **mean** | **+0.58 %** | **+1.01 %** | **0.79x** |
+| foreman CIF | −2.82 % | −3.10 % | 0.92x |
+| mobile CIF | +0.91 % | +4.26 % | 0.88x |
+| akiyo CIF | −16.54 % | −17.11 % | 1.21x |
+| ducks_take_off 720p | +3.20 % | +4.99 % | 0.88x |
+| park_joy 720p | +3.70 % | +5.14 % | 0.96x |
+| **mean** | **−2.31 %** | **−1.16 %** | **0.92x** |
 
-The CPU column of these tables is round 3's (2026-11-15), measured with
-develop's binary run back to back at the same load: develop took 1.27x /
-1.05x / 1.09x (veryfast / medium / slow) in the same session where the
-user's own measurement of it was 1.22x / 1.05x / 1.13x, so the ratios
-above are within about 0.05x of that machine's state.
+These tables are round 4's (2026-11-15, branch head), each preset run back
+to back with develop's binary, which measured 1.10x / 0.98x / 0.79x
+(veryfast / medium / slow) in the same session against round 3's 1.27x /
+1.05x / 1.09x and the user's 1.22x / 1.05x / 1.13x: the `--jobs 4` CPU
+column moves by ±0.05x per clip with the machine's load (foreman's
+veryfast 1.35x here is one such outlier). The steadier ratio is
+interleaved one-thread runs of the two binaries on the same encodes, two
+repetitions: round 4 against develop 0.90x at veryfast (CIF 0.94–1.00x,
+720p 0.89–0.90x), 0.98x at medium, 1.15x at slow — which puts the means at
+about 0.99x / 0.96x / 0.91x of x265 on this session's develop figures.
 
 Where it started (the same harness, `--bframes 3 --refs 4 --sao` at constant
 QP): +46.7 % against medium at 2.31x the CPU, +65.7 % against slow, +40.5 %
@@ -490,24 +502,95 @@ veryfast (medium −10.28 % at 0.95x the CPU of −10.38 %; veryfast −9.11 →
 (veryfast −12.06 %, medium −10.55 %, slow +0.58 %, each at 0.92–0.95x);
 veryfast's intra pictures without a transform split (−11.88 % at 0.97x).
 
-What is left, and why. Medium and veryfast now beat x265 on every clip;
-medium's mean CPU is under x265's but its CIF clips are 1.03–1.09x, and
-veryfast is 1.09x (1.15x on foreman, mobile and park_joy). Veryfast's
-remaining CPU is the full RD decision at every quadtree node (residual,
+The fourth round (2026-11-15). x265 as a black box first: added one at a
+time to x265 medium on ducks, park_joy and mobile, `--rdoq-level 2`
+bought −7.9 % (ducks −12.8 %), `--rect --limit-modes` −4.0 % (mobile
+−7.7 %), `--no-early-skip` −2.8 %, four references −0.4 %, the star search
+and `--subme 3` nothing; taken away from x265 slow, one reference cost
++4.2 % (mobile +12.0 %), RDOQ level 1 +7.7 %, no rectangular partitions
++3.9 %. Rivet against x265 with matched structure located the slow gap in
+inter pictures, not intra: intra-only rivet is −7.8 % (ducks), −2.4 %
+(park_joy), −10.8 % (mobile) against x265 slow `--keyint 1`, but P-only at
+a constant quantiser +7.5 / +3.6 / +1.4 %; with RDOQ off on both sides
+ducks is +2.4 %, so most of what is left there is what RDOQ buys x265
+and not rivet. x265's frame quantisers (its CSV, crf 28) also showed its
+intra picture at the P pictures' quantiser on the 720p clips and 1.5–4
+below on the CIF ones, where rivet's was a fixed 3 below everywhere.
+
+What it bought, in commit order:
+- **An intra picture's offset from the lookahead propagation** (every
+  tier): `h265_cutree`'s inheritance over sixteen pictures, at strength 1,
+  sets only the intra picture's quantiser, 4.5 × (mean + 1.45) clamped to
+  [−6, 0], and no unit carries a delta. The means order the clips the
+  way the sweeps want them (foreman −2.1, mobile −2.0, akiyo −3.8,
+  park_joy −0.8, ducks −1.4; fixed offsets 0 / −1 / −3 / −5 put ducks at
+  +5.8 / +6.2 / +8.0 / +10.8 % and akiyo at −6.1 / −8.3 / −13.8 / −16.4 %):
+  slow +0.58 → −0.59 %, medium −10.55 → −11.45 %, veryfast −11.88 →
+  −12.52 %, CPU unchanged.
+- **Iterative bi-prediction refinement** (slow): the list whose own search
+  did worse is searched again, whole samples then the sub-sample rings,
+  against twice the source less the other list's prediction, then the
+  other list, a move kept only where the pair's exact SATD plus vector
+  bits falls; tried only where the unrefined pair comes within 1.1x of
+  the better one-list shape. Alone +0.58 → +0.01 %.
+- **A Lagrangian per picture kind** (`Tune::lambda`, a thread-local scale
+  every decision's λ reads): slow at 0.7 for every kind. Alone 0.8 gave
+  −0.36 %, 0.65 −0.50 %, 0.5 +0.30 % (the CIF clips lose below 0.8, the
+  720p ones want it lower still); with the two above, −0.59 → −2.30 %
+  (−2.09 % at 0.8), and the refinement's gate kept that at 0.95x the CPU.
+- **Veryfast's CPU**: an early split (`split_gate`: a unit above 8x8 whose
+  2Nx2N search costs more than 2.5 SATD Lagrangians a sample, and is not
+  a merge, goes straight to its children), the 8x8 transform split only
+  where the whole TU kept four luma levels or more (`tu_split_nz`, also
+  at medium), and three of the five merge candidates scored: −12.52 →
+  −10.49 % at 0.89x the CPU by interleaved one-thread runs (medium:
+  −11.45 → −11.33 % at 0.98x).
+- SAO band statistics tallied per row in plain integers, byte-identical.
+
+Tried and dropped this round: symmetric partitions at slow (mobile
++2.82 → +1.06 %, park_joy +6.70 → +5.32 %, at 1.8x x265's CPU); RDOQ
+priced at the live contexts (P-only ducks +7.5 → +9.4 %, mobile +1.4 →
++0.5 %); RDOQ's own Lagrangian at 0.8 / 0.6 of the decisions' (slow −0.15
+/ −0.08 %, subsumed by the per-picture Lagrangian); slow's Lagrangian by
+kind, non-reference B at 0.5 (−1.86 %) or P and B at 0.6 (−2.03 %), against
+0.7 everywhere (−2.30 %); at veryfast the early split at 1.5 (−10.02 %,
+ducks −3.87 %), on 32x32 and 64x64 units only (−12.02 % for 4 %), on 64x64
+units only (never fires: their searches are merges), no unit coded whole at
+64x64 (−8.93 % at no saving), SAO off in reference pictures too (−10.29 %
+for 3.5 %), quarter-sample refinement on a cross (mobile −6.97 → −4.11 %
+for 2 %), merge candidates no longer seeding a unit that has its parent's
+vector (no saving); the early split at medium (ducks −5.6 → −2.6 %).
+
+What is left, and why. Medium and veryfast beat x265 on every clip, by
+−11.3 % and −10.5 %. Slow is −2.3 % in the mean but still above x265 on
+ducks (+3.2 %), park_joy (+3.7 %) and mobile (+0.9 %). The causes, from
+this round's black-box work: on ducks most of it is what RDOQ buys x265
+and not rivet in inter pictures (equal without RDOQ on both sides within
+2.4 %, P-only); on mobile, references — x265 slow loses 12 % on mobile
+with one reference, and rivet's B pictures still take one reference per
+list (its P pictures four); on mobile and park_joy, rectangular
+partitions, which rivet has but which cost 1.8x x265's CPU here for about
+half of what x265 gets from them. Each is a structural piece of work —
+more than one reference per list in B slices through the decision, the
+reference lists and the slice header; partitions searched from the
+2Nx2N unit's motion rather than from scratch — rather than a setting.
+The CPU of veryfast's and medium's CIF clips stays above x265's per clip
+(1.0–1.1x): at that size the per-picture work (fractional planes for
+each reference, SAO, deblocking, the lookahead) is a larger share, and the
+early split that saves 12 % at 720p saves 6–7 % there.
+
+Earlier rounds' summary of the same, kept for its numbers: veryfast's
+remaining CPU was the full RD decision at every quadtree node (residual,
 RDOQ and pricing of each candidate, ~40 % of its time), SAO decisions in
 the reference pictures (~8 %) and intra in inter pictures (~9 %); dropping
 the 8x8 transform split there buys 6 % for 1.4 % BD (mobile −7.1 → −3.3 %),
 quarter-sample refinement on a cross 1.3 % for 1.1 %, SAO in reference
-pictures off 11 % for 2.4 % — none kept. Slow is +0.58 % at 0.79x: ducks
-+8.0 %, park_joy +6.7 %, mobile +2.8 %. Its spare CPU found nothing to
-buy: the split transform tried in 16x16 and 32x32 CUs (+0.57 / +0.48 % at
-1.06 / 1.11x), intra transform splits in inter pictures (+0.57 %), a
-second widening ring (+0.57 %), the losing merge/AMVP shape coded too and
-the cheaper kept (+0.56 % at 1.2x), quantiser offsets I −4 / B +1, +3, +5
-(+0.48 / +0.84 / +0.92 / +0.93 %). The 720p gap is inter coding of fine
-moving texture (the second round's per-picture finding, P pictures 0.2–0.3
-dB below x265 at matched bits) and is not a tool this encoder lacks among
-those tried.
+pictures off 11 % for 2.4 % — none kept. Slow's spare CPU in round 3
+found nothing to buy: the split transform tried in 16x16 and 32x32 CUs
+(+0.57 / +0.48 % at 1.06 / 1.11x), intra transform splits in inter
+pictures (+0.57 %), a second widening ring (+0.57 %), the losing
+merge/AMVP shape coded too and the cheaper kept (+0.56 % at 1.2x),
+quantiser offsets I −4 / B +1, +3, +5 (+0.48 / +0.84 / +0.92 / +0.93 %).
 
 The lookahead quantiser propagation (`h265_cutree`, `--tree N`) is not the
 720p gap, though x265 loses 21.9 % on ducks and 14.3 % on park_joy without
@@ -519,7 +602,9 @@ rather than propagation sets. Rivet's propagation on top of its offsets
 doubles the frame-level part (medium, strength 2.0: −3.35 → +3.09 %);
 mean-normalised to the spatial part alone it is neutral (−2.37 % at 2.0,
 −3.11 % at 1.0); replacing the offsets with it (I 0, B 0 / +4) loses
-(+0.62 % at 2.0, −2.02 % at 1.0). No tier turns it on.
+(+0.62 % at 2.0, −2.02 % at 1.0). Round 4 turns on its frame-level part
+for the intra picture alone (above), which is the one place the fixed
+offsets were wrong by content.
 
 Tried and dropped (medium unless named): an early skip (best merge coded
 first, kept when nothing survives) −0.5 % BD for 0.99x; diamond sub-sample

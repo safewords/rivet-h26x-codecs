@@ -48,7 +48,8 @@ pub fn apply_preset(cfg: &mut Config, p: Preset) {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Tune {
     /// Quantiser offset of an intra picture against the configured QP,
-    /// which is a P picture's.
+    /// which is a P picture's; under `tree_frame_only` the propagation's
+    /// offset replaces it.
     pub i_qp_offset: i32,
     /// Quantiser offset of a B picture by its layer
     /// ([`super::gop::Coded::layer`]): index 0 is layer 1, the top of a
@@ -104,10 +105,10 @@ pub(crate) struct Tune {
     pub limit_refs: bool,
     /// Lookahead quantiser propagation strength (`h265_cutree`), applied
     /// over `Config::tree_lookahead` pictures when that is nonzero (the
-    /// shared `--tree`). No tier sets the window for H.265 yet: as first
-    /// measured (2026-11-15, medium) propagation at 2.0 took BD-rate from
-    /// -3.31% to +2.58% and at 1.0 to -1.57%, where x265 loses 14-22% on
-    /// the 720p clips without its own.
+    /// shared `--tree`). Per unit it lost when first measured (2026-11-15,
+    /// medium: -3.31% BD-rate to +2.58% at 2.0, to -1.57% at 1.0), where
+    /// x265 loses 14-22% on the 720p clips without its own; the tiers use
+    /// it for an intra picture's offset alone (`tree_frame_only`).
     pub cutree: f32,
     /// Decisions price their bins at the contexts the picture has
     /// reached (each CTU decided is run through the writer), rather than
