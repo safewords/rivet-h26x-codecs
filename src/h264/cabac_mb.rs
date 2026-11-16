@@ -2263,12 +2263,12 @@ fn residual_block_cabac(
 pub(crate) trait Level: Copy {
     /// The value.
     fn get(self) -> i32;
-    /// Bit `pos` set where `levels[scan[pos]]` is nonzero (`scan` at most
-    /// sixty-four positions).
+    /// Bit `pos` set where `levels[scan[start + pos]]` is nonzero, for
+    /// the `n` positions from `start` (at most sixty-four).
     #[inline]
-    fn sig_mask(levels: &[Self], scan: &[u8]) -> u64 {
+    fn sig_mask(levels: &[Self], scan: &[u8], start: usize, n: usize) -> u64 {
         let mut m = 0u64;
-        for (pos, &r) in scan.iter().enumerate() {
+        for (pos, &r) in scan[start..start + n].iter().enumerate() {
             m |= ((levels[r as usize].get() != 0) as u64) << pos;
         }
         m
@@ -2287,20 +2287,20 @@ impl Level for i16 {
     fn get(self) -> i32 {
         self as i32
     }
-    #[inline]
-    fn sig_mask(levels: &[i16], scan: &[u8]) -> u64 {
+    #[inline(always)]
+    fn sig_mask(levels: &[i16], scan: &[u8], start: usize, n: usize) -> u64 {
         #[cfg(target_arch = "aarch64")]
         if sig_mask_simd() {
             // SAFETY: NEON is baseline on AArch64; the lengths are checked.
-            if scan.len() <= 16 && levels.len() >= 16 {
-                return unsafe { sig_mask16_neon(levels, scan) };
+            if scan.len() == 16 && start + n == 16 && levels.len() >= 16 {
+                return unsafe { sig_mask16_neon(levels, scan, start) };
             }
-            if scan.len() == 64 && levels.len() >= 64 {
+            if scan.len() == 64 && start == 0 && n == 64 && levels.len() >= 64 {
                 return unsafe { sig_mask64_neon(levels, scan) };
             }
         }
         let mut m = 0u64;
-        for (pos, &r) in scan.iter().enumerate() {
+        for (pos, &r) in scan[start..start + n].iter().enumerate() {
             m |= ((levels[r as usize] != 0) as u64) << pos;
         }
         m
@@ -2341,18 +2341,24 @@ unsafe fn bytes_to_bits16(v: std::arch::aarch64::uint8x16_t) -> u64 {
     }
 }
 
-/// [`Level::sig_mask`] for a 4x4 block's raster of sixteen and a scan of
-/// up to sixteen positions: the nonzero bytes permuted into the scan by
-/// one table lookup (a position past the scan reads as zero).
+/// [`Level::sig_mask`] for a 4x4 block's raster of sixteen and its scan of
+/// sixteen from `start` (0, or 1 for the AC blocks): the nonzero bytes
+/// permuted into the scan by one table lookup (the positions past the
+/// scan's end read as zero).
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn sig_mask16_neon(levels: &[i16], scan: &[u8]) -> u64 {
+unsafe fn sig_mask16_neon(levels: &[i16], scan: &[u8], start: usize) -> u64 {
     use std::arch::aarch64::*;
     unsafe {
-        let mut idx = [0xffu8; 16];
-        idx[..scan.len()].copy_from_slice(scan);
+        let idx = vld1q_u8(scan.as_ptr());
+        // From `start`: the indices moved down, 0xff (out of range) in.
+        let idx = if start == 0 {
+            idx
+        } else {
+            vextq_u8::<1>(idx, vdupq_n_u8(0xff))
+        };
         let nz = nz_bytes16(levels.as_ptr());
-        bytes_to_bits16(vqtbl1q_u8(nz, vld1q_u8(idx.as_ptr())))
+        bytes_to_bits16(vqtbl1q_u8(nz, idx))
     }
 }
 
@@ -2407,8 +2413,8 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc, L: Level>(
     // or a loop per coefficient where the CPU has the vectors: a block is
     // mostly zeros in an unpredictable pattern, and this runs for every
     // block every candidate prices. The bins below walk its set bits.
+    let mask = L::sig_mask(levels, scan, start, max_coeff);
     let scan = &scan[start..start + max_coeff];
-    let mask = L::sig_mask(levels, scan);
     let n_sig = mask.count_ones() as usize;
     // Every context index below is under NUM_CTX by construction; the
     // mask says so to the compiler, which otherwise checks each bin.
@@ -3481,13 +3487,16 @@ mod residual_round_trip {
                 }
             }
             for &(scan, start, n) in &scans {
-                let scan = &scan[start..start + n];
-                let want = scan
+                let want = scan[start..start + n]
                     .iter()
                     .enumerate()
                     .fold(0u64, |m, (p, &r)| m | (((lv[r as usize] != 0) as u64) << p));
                 let lv = if n == 64 { &lv[..] } else { &lv[..16] };
-                assert_eq!(<i16 as Level>::sig_mask(lv, scan), want, "trial {trial}");
+                assert_eq!(
+                    <i16 as Level>::sig_mask(lv, scan, start, n),
+                    want,
+                    "trial {trial}"
+                );
             }
         }
     }

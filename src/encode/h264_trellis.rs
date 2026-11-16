@@ -280,15 +280,19 @@ impl Trellis {
         if (f32::from_bits(mx) + 0.5) as u32 == 0 {
             return 0;
         }
-        let mut x = [0f32; N];
-        let mut top = [0u32; N];
+        // Built element by element (no zeroing pass first: for an 8x8 that
+        // was two calls into `memset`); an AC block's sixteenth is unused.
+        let x: [f32; N] = std::array::from_fn(|i| {
+            if i < count {
+                xr[scan[start + i] as usize & (N - 1)]
+            } else {
+                0.0
+            }
+        });
+        let top: [u32; N] = std::array::from_fn(|i| (x[i] + 0.5) as u32);
         let mut last = usize::MAX;
         let mut top_max = 0;
-        for i in 0..count {
-            let v = xr[scan[start + i] as usize & (N - 1)];
-            x[i] = v;
-            let t = (v + 0.5) as u32;
-            top[i] = t;
+        for (i, &t) in top.iter().enumerate().take(count) {
             top_max = top_max.max(t);
             last = if t != 0 { i } else { last };
         }
