@@ -1660,21 +1660,24 @@ presets with `parity.py`'s command line and reports, for each rivet preset,
 the CPU x265 needs to reach rivet's BD-rate, interpolated in log CPU along
 x265's non-dominated presets (BD-rate PSNR-Y against x265 medium, the five
 clips, 30 frames; the x265 ladder and both binaries timed again in one
-shuffled run, the least of two repetitions of every encode):
+shuffled run, the least of two repetitions of every encode; "before" is
+develop 5dd8656, after round 13B's speedups, and the round's changes were
+measured on 502b334 before it, where the same three gave 0.45x / 0.33x /
+0.14x before and 0.43x / 0.23x / 0.11x after):
 
 | x265 | ultrafast | superfast | fast | medium | slow | slower | veryslow |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | BD-rate | +36.94 % | +4.32 % | −0.18 % | 0 | −13.70 % | −18.56 % | −20.11 % |
-| CPU | 0.31x | 0.57x | 0.82x | 1.00x | 2.27x | 9.39x | 16.31x |
+| CPU | 0.31x | 0.56x | 0.80x | 1.00x | 2.23x | 9.37x | 16.29x |
 
 (veryfast and faster, +6.01 / +5.82 % at 0.68x, are dominated by
 superfast, and medium by fast.)
 
 | rivet | before | CPU | x265's time at equal BD | after | CPU | x265's time at equal BD |
 |---|---:|---:|---:|---:|---:|---:|
-| veryfast | −7.84 % | 0.66x | 0.45x | −7.67 % | 0.62x | 0.43x |
-| medium | −14.45 % | 0.95x | 0.33x | −15.93 % | 1.02x | 0.23x |
-| slow | −19.97 % | 2.22x | 0.14x | −20.71 % | 2.21x | 0.11x |
+| veryfast | −7.84 % | 0.53x | 0.37x | −7.67 % | 0.51x | 0.36x |
+| medium | −14.45 % | 0.74x | 0.27x | −15.93 % | 0.84x | 0.19x |
+| slow | −19.97 % | 1.80x | 0.12x | −20.71 % | 1.84x | 0.09x |
 
 Slow is now past x265 veryslow, so its figure extrapolates the last
 segment of the ladder. x265's ladder is steep where veryfast sits (fast to
@@ -1699,7 +1702,7 @@ this round bought speed at veryfast and quality at medium and slow:
   — all split, the CTB is not coded whole and the walk goes straight to
   its four 16x16 units. Veryfast −7.84 → −7.67 % at 0.96x the CPU
   (ducks −0.59 → +0.28 %; with two neighbours −7.57 %, ducks +0.91 %);
-  medium neutral on the frontier (0.238x either way), kept to hold medium
+  medium neutral on the frontier (0.238x either way, on 502b334), kept to hold medium
   near x265 medium's CPU.
 
 Tried and dropped (each against the round's own baseline, interleaved):
@@ -1727,14 +1730,14 @@ was left. `i_split_depth` 2 (no tier uses it) codes streams the decoder
 does not reconstruct as the encoder did; it is not touched here.
 
 `parity.py` after the round (x265 at the same preset, CPU against
-`ref_cache.json`'s x265 times, `--jobs 4` while another build ran; develop's
-binary measured in the same session beside it):
+`ref_cache.json`'s x265 times, `--jobs 4`; develop 5dd8656's binary
+measured in the same session beside it):
 
 | preset | develop | CPU | round 13A | CPU |
 |---|---:|---:|---:|---:|
-| veryfast | −13.38 % | 0.87x | −13.23 % | 0.84x |
-| medium | −14.45 % | 0.89x | −15.93 % | 0.99x |
-| slow | −7.06 % | 0.91x | −7.93 % | 0.96x |
+| veryfast | −13.38 % | 0.71x | −13.23 % | 0.70x |
+| medium | −14.45 % | 0.74x | −15.93 % | 0.82x |
+| slow | −7.06 % | 0.79x | −7.93 % | 0.81x |
 
 What is left, and why. Every clip now beats x265 at every preset:
 veryfast −13.4 %, medium −14.5 %, slow −7.1 %, at 0.96x / 0.92x / 0.93x
