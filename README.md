@@ -1386,7 +1386,7 @@ The same `--preset veryfast | medium | slow` selects the H.265 encoder's
 tier (`Config::preset`, Medium by default; `src/encode/h265_tune.rs`). Under
 `--codec h265` the flag also sets that codec's structure — three B pictures
 in the scheduler's pyramid, SAO, references 1 / 2 / 4 (a B picture's lists
-one each, at slow two each), symmetric partitions at slow — and the tier's
+one each, at medium two each, at slow three), symmetric partitions at slow — and the tier's
 quantiser offsets: the configured QP is a P picture's, the reference B
 codes 2 above it and the others 4 above, and an I picture between 6 below
 and level with it as the lookahead propagation over the next sixteen
@@ -1412,16 +1412,21 @@ level moved weighed in distortion and roughly in bins; rate-distortion
 optimised quantisation of every unit, luma and chroma, which weighs each
 block against coding nothing and searches its last position from the last
 coefficient of 0.7 of a step; no SAO in pictures nothing references.
-Slow adds RDOQ in those pictures too, iterative bi-prediction refinement, a
-Lagrangian at 0.7 of the conventional one, two references per list in B
-pictures, and 2NxN / Nx2N partitions searched from the 2Nx2N unit's motion
-where that unit is not a merge, with a skip cheaper than 0.5 λ per sample
-ending the recursion. Medium and veryfast
-prune: a skip cheaper than 0.5 λ per sample (veryfast: every skip) is not
+Slow adds RDOQ in those pictures too, a Lagrangian at 0.8 of the
+conventional one, three references per list in B pictures, an intra
+picture's 2Nx2N units coding their five best luma modes by SATD and keeping
+the cheapest in SSD + λ·bits, and 2NxN / Nx2N partitions searched from the
+2Nx2N unit's motion where that unit is not a merge, with a skip cheaper
+than 0.5 λ per sample ending the recursion. Slow and medium refine
+bi-prediction iteratively; medium takes two references per list in B
+pictures and a Lagrangian at 0.85. Medium and veryfast skip coding a CTB
+whole where the CTBs coded around it (two at least at medium, three at
+veryfast) all split it. Medium and veryfast
+prune: a skip cheaper than 0.25 λ per sample (veryfast: every skip) is not
 split, intra is coded only where its best mode's SATD cost beats the inter
 search (slow: comes within 1.5x of it), angles are searched coarse to
 fine, pictures nothing references take the cheapest settings, RDOQ
-off, and the 8x8 transform split is tried only where the whole TU kept
+off, and (veryfast) the 8x8 transform split is tried only where the whole TU kept
 four luma levels; veryfast's intra pictures do not split their
 transform, a unit above 8x8 whose search costs more than 2.5 SATD
 Lagrangians a sample (2.0) is split without being coded whole, three of
@@ -1648,6 +1653,88 @@ develop's CPU); no inter transform split (−12.04 %, mobile −5.4 %, for
 every quarter phase interpolated on demand costs more than the planes);
 two merge candidates (no saving); an all-zero test at 0.7 of a step
 before RDOQ (0.5 %).
+
+Round 13A (2026-11-16): the presets on x265's preset ladder. A companion
+to `frontier.py` for H.265 (`frontier265.py`) times x265 at all nine
+presets with `parity.py`'s command line and reports, for each rivet preset,
+the CPU x265 needs to reach rivet's BD-rate, interpolated in log CPU along
+x265's non-dominated presets (BD-rate PSNR-Y against x265 medium, the five
+clips, 30 frames; the x265 ladder and both binaries timed again in one
+shuffled run, the least of two repetitions of every encode):
+
+| x265 | ultrafast | superfast | fast | medium | slow | slower | veryslow |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BD-rate | +36.94 % | +4.32 % | −0.18 % | 0 | −13.70 % | −18.56 % | −20.11 % |
+| CPU | 0.31x | 0.57x | 0.82x | 1.00x | 2.27x | 9.39x | 16.31x |
+
+(veryfast and faster, +6.01 / +5.82 % at 0.68x, are dominated by
+superfast, and medium by fast.)
+
+| rivet | before | CPU | x265's time at equal BD | after | CPU | x265's time at equal BD |
+|---|---:|---:|---:|---:|---:|---:|
+| veryfast | −7.84 % | 0.66x | 0.45x | −7.67 % | 0.62x | 0.43x |
+| medium | −14.45 % | 0.95x | 0.33x | −15.93 % | 1.02x | 0.23x |
+| slow | −19.97 % | 2.22x | 0.14x | −20.71 % | 2.21x | 0.11x |
+
+Slow is now past x265 veryslow, so its figure extrapolates the last
+segment of the ladder. x265's ladder is steep where veryfast sits (fast to
+slow: about 13 points of BD-rate per e-fold of time, so a point is worth
+about 8 % of the CPU) and flat where medium and slow sit (slow to
+veryslow: about 3 points per e-fold, a point worth 1.3–1.4x the CPU), so
+this round bought speed at veryfast and quality at medium and slow:
+- **Slow**: an intra picture's 2Nx2N units code their five cheapest luma
+  modes by SATD, each with its own chroma mode, and keep the cheapest in
+  SSD + λ·bits (`Tune::i_rdo_modes`, `h265_intra::set_rdo_modes`): −20.13 →
+  −20.71 % at 1.05x the CPU (three modes −20.55 %); the Lagrangian at 0.8
+  and three references per list in B slices, −19.97 → −20.13 % at 0.97x.
+- **Medium**: two references per list in B slices (limited as at slow,
+  −14.97 % at 1.02x on its own), a round of bi-prediction refinement
+  behind slow's gate (−15.01 % at 1.06x), the Lagrangian at 0.85
+  (−14.78 % at 1.02x), a skip ending the recursion only below 0.25 λ a
+  sample and the 8x8 transform split tried whatever the TU kept: −16.18 %
+  at 1.19x together; then the next item, −15.93 % at 0.93x of that.
+- **The whole CTB skipped where its neighbours split it**
+  (`Tune::depth_skip`): where the CTBs left, above, above-left and
+  above-right that are coded — two at least at medium, three at veryfast
+  — all split, the CTB is not coded whole and the walk goes straight to
+  its four 16x16 units. Veryfast −7.84 → −7.67 % at 0.96x the CPU
+  (ducks −0.59 → +0.28 %; with two neighbours −7.57 %, ducks +0.91 %);
+  medium neutral on the frontier (0.238x either way), kept to hold medium
+  near x265 medium's CPU.
+
+Tried and dropped (each against the round's own baseline, interleaved):
+a merge taken before the motion search where it costs below 1 / 2 SATD
+λ a sample (veryfast −4.23 / +4.05 %, medium −11.31 % at 0.94x, slow
+−17.64 %); a no-residual 2Nx2N unit ending the recursion like a skip
+(veryfast −6.39 % at 0.95x, medium −15.32 % at 0.98x); a unit below the
+CTB not split where no neighbouring CTB went deeper (medium −12.49 %);
+non-reference pictures without 8x8 units (veryfast −5.48 % at 0.97x);
+intra modes coded by RD in inter pictures' intra units (slow −20.27 % at
+1.12x) and in intra pictures at medium and veryfast (no better than their
+CPU); at medium symmetric partitions (−15.54 % at 1.25x), a widening ring,
+intra trials within 1.5x of the search, B offsets +2/+3/+5 and +1/+3/+4,
+non-reference B at a Lagrangian of 1.0, per-unit propagation at 0.5
+(−14.80 %); at veryfast two B references, bi refinement, Lagrangians 0.7 to
+1.2, the early split at 1.5, two merge candidates, one SAO edge class,
+RDOQ's last position from a whole step, the 8x8 split above eight levels
+and no trial without residual (all at or behind the frontier); at slow the
+Lagrangian at 0.6 / 0.75, four B references, the inter transform split up
+to 16x16, a second widening ring, a 0.25 recursion skip, the partition
+margin at 0.3, intra trials within 2x, intra transform splits in inter
+pictures, RDOQ's last position from 0.6, two rounds of bi refinement. The
+intra picture's offset at `i_adapt_k` 5.5 moves only foreman (−0.4 %), and
+was left. `i_split_depth` 2 (no tier uses it) codes streams the decoder
+does not reconstruct as the encoder did; it is not touched here.
+
+`parity.py` after the round (x265 at the same preset, CPU against
+`ref_cache.json`'s x265 times, `--jobs 4` while another build ran; develop's
+binary measured in the same session beside it):
+
+| preset | develop | CPU | round 13A | CPU |
+|---|---:|---:|---:|---:|
+| veryfast | −13.38 % | 0.87x | −13.23 % | 0.84x |
+| medium | −14.45 % | 0.89x | −15.93 % | 0.99x |
+| slow | −7.06 % | 0.91x | −7.93 % | 0.96x |
 
 What is left, and why. Every clip now beats x265 at every preset:
 veryfast −13.4 %, medium −14.5 %, slow −7.1 %, at 0.96x / 0.92x / 0.93x
