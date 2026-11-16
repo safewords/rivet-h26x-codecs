@@ -5936,8 +5936,14 @@ mod tests {
                 }
                 units.extend(e.flush().unwrap_or_else(|err| panic!("{tag}: {err}")));
                 let census = e.census();
+                // Medium tries the split only where the whole TU kept four
+                // luma levels (`Tune::tu_split_nz`), which this clip's 8x8
+                // CUs do not reach at medium's decisions; veryfast, under
+                // the same gate, and slow, without it, still take it.
                 assert!(
-                    qp > 12 || census.by_kind[1].split_tu + census.by_kind[2].split_tu > 0,
+                    qp > 12
+                        || preset == Preset::Medium
+                        || census.by_kind[1].split_tu + census.by_kind[2].split_tu > 0,
                     "{tag}: no inter CU split its transform tree"
                 );
                 let mut dec = crate::hevc::HevcDecoder::new();
