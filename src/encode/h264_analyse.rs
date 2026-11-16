@@ -1847,6 +1847,9 @@ pub(crate) fn b_mb<S: Sample>(
 
     // Luma SATD of a rectangle under `dir` at `mv`: through the planes
     // where the prediction is plain, the decoder's kernels where weighted.
+    // The two lists' quarter-sample buffers live across calls (a call
+    // writes what it reads), not zeroed afresh by each.
+    let bufs = std::cell::RefCell::new([[S::default(); 256]; 2]);
     let satd =
         |(x, y, w, h): (usize, usize, usize, usize), dir: u8, mv: [Mv; 2], rf: [i8; 2]| -> u32 {
             let used = lists(dir);
@@ -1862,17 +1865,28 @@ pub(crate) fn b_mb<S: Sample>(
                 !used[l] || (mx >= lx && mx < hx && my >= ly && my < hy)
             };
             if matches!(wt, Weighting::Default) && inside(0) && inside(1) {
-                let mut b0 = [S::default(); 256];
-                let mut b1 = [S::default(); 256];
+                let mut bufs = bufs.borrow_mut();
+                let [b0, b1] = &mut *bufs;
                 if used[0] && used[1] {
-                    let (p0, s0) = me_at(0, rf[0]).pred(ax, ay, mv[0], w, h, &mut b0);
-                    let (p1, s1) = me_at(1, rf[1]).pred(ax, ay, mv[1], w, h, &mut b1);
+                    let (p0, s0) = me_at(0, rf[0]).pred(ax, ay, mv[0], w, h, b0);
+                    let (p1, s1) = me_at(1, rf[1]).pred(ax, ay, mv[1], w, h, b1);
+                    // The average and its SATD in one pass where the CPU
+                    // has the fused kernel (its definition is this pair).
+                    if let Some(f) = ctx.enc.satd_avg
+                        && S::BYTES == 1
+                    {
+                        // SAFETY: a one-byte `Sample` is `u8`.
+                        let as8 = |v: &[S]| unsafe {
+                            std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len())
+                        };
+                        return f(as8(s), src.ys, as8(p0), s0, as8(p1), s1, w, h);
+                    }
                     let mut avg = [S::default(); 256];
                     avg_into(&mut avg, 16, p0, s0, p1, s1, w, h);
                     return (ctx.dist.satd)(s, src.ys, &avg, 16, w, h);
                 }
                 let l = if used[0] { 0 } else { 1 };
-                let (p, ps) = me_at(l, rf[l]).pred(ax, ay, mv[l], w, h, &mut b0);
+                let (p, ps) = me_at(l, rf[l]).pred(ax, ay, mv[l], w, h, b0);
                 return (ctx.dist.satd)(s, src.ys, p, ps, w, h);
             }
             rect_satd_under(
