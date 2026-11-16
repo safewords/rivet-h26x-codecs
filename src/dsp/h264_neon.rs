@@ -280,20 +280,25 @@ fn chroma_neon(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf
         let c = ((8 - xf) * yf) as i16;
         let d = (xf * yf) as i16;
         let s = src.as_ptr();
-        for y in 0..h {
-            let mut x0 = 0;
-            while x0 < w {
-                let r0 = s.add(y * stride + x0);
+        // Column strips of eight, each source row loaded once: row `y + 1`
+        // is the lower pair of output row `y` and the upper of `y + 1`.
+        // (Integer sums, so the order they are taken in changes nothing.)
+        let mut x0 = 0;
+        while x0 < w {
+            let mut up = (load8(s.add(x0)), load8(s.add(x0 + 1)));
+            for y in 0..h {
                 let r1 = s.add((y + 1) * stride + x0);
+                let lo = (load8(r1), load8(r1.add(1)));
                 let mut v = vdupq_n_s16(32);
-                v = vmlaq_n_s16(v, load8(r0), a);
-                v = vmlaq_n_s16(v, load8(r0.add(1)), b);
-                v = vmlaq_n_s16(v, load8(r1), c);
-                v = vmlaq_n_s16(v, load8(r1.add(1)), d);
+                v = vmlaq_n_s16(v, up.0, a);
+                v = vmlaq_n_s16(v, up.1, b);
+                v = vmlaq_n_s16(v, lo.0, c);
+                v = vmlaq_n_s16(v, lo.1, d);
                 let p = vqmovun_s16(vshrq_n_s16::<6>(v));
                 vst1_u8(dst.as_mut_ptr().add(y * PRED_STRIDE + x0), p);
-                x0 += 8;
+                up = lo;
             }
+            x0 += 8;
         }
     }
 }
