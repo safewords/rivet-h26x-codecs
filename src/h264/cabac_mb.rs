@@ -2258,32 +2258,158 @@ fn residual_block_cabac(
 /// lines twice. A change to one that is not made to the other is a desync,
 /// and a desync is invisible until a later macroblock decodes as rubbish, so
 /// the defence worth having is that the two are on the same screen.
+/// A coefficient as [`write_residual_block_cabac`] takes it: the encoder's
+/// blocks are `i16`, the round-trip tests' `i32`.
+pub(crate) trait Level: Copy {
+    /// The value.
+    fn get(self) -> i32;
+    /// Bit `pos` set where `levels[scan[pos]]` is nonzero (`scan` at most
+    /// sixty-four positions).
+    #[inline]
+    fn sig_mask(levels: &[Self], scan: &[u8]) -> u64 {
+        let mut m = 0u64;
+        for (pos, &r) in scan.iter().enumerate() {
+            m |= ((levels[r as usize].get() != 0) as u64) << pos;
+        }
+        m
+    }
+}
+
+impl Level for i32 {
+    #[inline(always)]
+    fn get(self) -> i32 {
+        self
+    }
+}
+
+impl Level for i16 {
+    #[inline(always)]
+    fn get(self) -> i32 {
+        self as i32
+    }
+    #[inline]
+    fn sig_mask(levels: &[i16], scan: &[u8]) -> u64 {
+        #[cfg(target_arch = "aarch64")]
+        if sig_mask_simd() {
+            // SAFETY: NEON is baseline on AArch64; the lengths are checked.
+            if scan.len() <= 16 && levels.len() >= 16 {
+                return unsafe { sig_mask16_neon(levels, scan) };
+            }
+            if scan.len() == 64 && levels.len() >= 64 {
+                return unsafe { sig_mask64_neon(levels, scan) };
+            }
+        }
+        let mut m = 0u64;
+        for (pos, &r) in scan.iter().enumerate() {
+            m |= ((levels[r as usize] != 0) as u64) << pos;
+        }
+        m
+    }
+}
+
+/// Whether [`Level::sig_mask`] takes its NEON form: where the `h264_enc`
+/// table would take NEON (not under `H26X_NO_SIMD`, `H26X_MAX_SIMD=none`
+/// or `H26X_ENC_NO_SIMD`), decided once.
+#[cfg(target_arch = "aarch64")]
+fn sig_mask_simd() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        crate::dsp::Cpu::detect_honouring_env().neon && !crate::dsp::enc_simd_disabled("h264_enc")
+    })
+}
+
+/// The nonzero bytes of sixteen raster `i16`s, 0xff or 0.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn nz_bytes16(p: *const i16) -> std::arch::aarch64::uint8x16_t {
+    use std::arch::aarch64::*;
+    unsafe {
+        let (a, b) = (vld1q_s16(p), vld1q_s16(p.add(8)));
+        vcombine_u8(vmovn_u16(vtstq_s16(a, a)), vmovn_u16(vtstq_s16(b, b)))
+    }
+}
+
+/// Sixteen 0xff / 0 bytes as a 16-bit mask, byte `i` to bit `i`.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn bytes_to_bits16(v: std::arch::aarch64::uint8x16_t) -> u64 {
+    use std::arch::aarch64::*;
+    unsafe {
+        const W: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let m = vandq_u8(v, vld1q_u8(W.as_ptr()));
+        (vaddv_u8(vget_low_u8(m)) as u64) | ((vaddv_u8(vget_high_u8(m)) as u64) << 8)
+    }
+}
+
+/// [`Level::sig_mask`] for a 4x4 block's raster of sixteen and a scan of
+/// up to sixteen positions: the nonzero bytes permuted into the scan by
+/// one table lookup (a position past the scan reads as zero).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sig_mask16_neon(levels: &[i16], scan: &[u8]) -> u64 {
+    use std::arch::aarch64::*;
+    unsafe {
+        let mut idx = [0xffu8; 16];
+        idx[..scan.len()].copy_from_slice(scan);
+        let nz = nz_bytes16(levels.as_ptr());
+        bytes_to_bits16(vqtbl1q_u8(nz, vld1q_u8(idx.as_ptr())))
+    }
+}
+
+/// [`Level::sig_mask`] for an 8x8 block: sixty-four nonzero bytes, each
+/// sixteen scan positions one four-register table lookup.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sig_mask64_neon(levels: &[i16], scan: &[u8]) -> u64 {
+    use std::arch::aarch64::*;
+    unsafe {
+        let p = levels.as_ptr();
+        let t = uint8x16x4_t(
+            nz_bytes16(p),
+            nz_bytes16(p.add(16)),
+            nz_bytes16(p.add(32)),
+            nz_bytes16(p.add(48)),
+        );
+        let mut m = 0u64;
+        for q in 0..4 {
+            let v = vqtbl4q_u8(t, vld1q_u8(scan.as_ptr().add(16 * q)));
+            m |= bytes_to_bits16(v) << (16 * q);
+        }
+        m
+    }
+}
+
+/// Write one residual block's coefficients: the inverse of
+/// [`residual_block_cabac`]. `levels` is the block in raster order, the
+/// layout that function decodes *into*, and `scan` maps scan position to it
+/// the same way. Returns the number of significant coefficients written.
+///
+/// It lives beside the reader on purpose. The two are exact inverses over a
+/// binarisation with a lot of small rules — an inferred last coefficient, a
+/// unary prefix that stops one bin early at its cap, an escape whose length
+/// is implied — and every one of those rules has to be read off the same
+/// lines twice. A change to one that is not made to the other is a desync,
+/// and a desync is invisible until a later macroblock decodes as rubbish, so
+/// the defence worth having is that the two are on the same screen.
 #[allow(clippy::too_many_arguments, dead_code)]
-pub(crate) fn write_residual_block_cabac<E: BinEnc>(
+pub(crate) fn write_residual_block_cabac<E: BinEnc, L: Level>(
     e: &mut E,
     st: &mut CabacState,
     field: bool,
     cat: usize,
     cbf_inc: Option<usize>,
-    levels: &[i32],
+    levels: &[L],
     scan: &[u8],
     start: usize,
     max_coeff: usize,
 ) -> usize {
-    // The levels in scan order and the significant positions, gathered
-    // without a branch per coefficient: a block is mostly zeros in an
-    // unpredictable pattern, and this loop runs for every block every
-    // candidate prices.
+    // The significant scan positions as one mask, found without a branch
+    // or a loop per coefficient where the CPU has the vectors: a block is
+    // mostly zeros in an unpredictable pattern, and this runs for every
+    // block every candidate prices. The bins below walk its set bits.
     let scan = &scan[start..start + max_coeff];
-    let mut lv = [0i32; 64];
-    let mut sig_pos = [0u8; 64];
-    let mut n_sig = 0usize;
-    for (pos, &r) in scan.iter().enumerate() {
-        let v = levels[r as usize];
-        lv[pos & 63] = v;
-        sig_pos[n_sig & 63] = pos as u8;
-        n_sig += (v != 0) as usize;
-    }
+    let mask = L::sig_mask(levels, scan);
+    let n_sig = mask.count_ones() as usize;
     // Every context index below is under NUM_CTX by construction; the
     // mask says so to the compiler, which otherwise checks each bin.
     let ctx = &mut st.ctx;
@@ -2341,8 +2467,10 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc>(
     // bin it never reads.
     let last = max_coeff - 1;
     let mut i = 0usize;
-    for k in 0..n_sig {
-        let p = sig_pos[k] as usize;
+    let mut rest = mask;
+    while rest != 0 {
+        let p = rest.trailing_zeros() as usize;
+        rest &= rest - 1;
         while i < p {
             c.decision(out, &mut ctx[(sig_base + sig_off[i] as usize) & M], 0);
             i += 1;
@@ -2354,7 +2482,7 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc>(
         c.decision(
             out,
             &mut ctx[(last_base + last_off[p] as usize) & M],
-            (k + 1 == n_sig) as u32,
+            (rest == 0) as u32,
         );
         i = p + 1;
     }
@@ -2363,8 +2491,11 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc>(
     let mut num_gt1 = 0usize;
     let mut num_eq1 = 0usize;
     let inc1_cap = if cat == CAT_CHROMA_DC { 3 } else { 4 };
-    for k in (0..n_sig).rev() {
-        let level = lv[sig_pos[k] as usize & 63];
+    let mut rest = mask;
+    while rest != 0 {
+        let p = 63 - rest.leading_zeros() as usize;
+        rest &= !(1u64 << p);
+        let level = levels[scan[p] as usize].get();
         let abs = level.unsigned_abs();
         let abs_m1 = abs - 1;
         let inc0 = if num_gt1 != 0 {
@@ -2809,17 +2940,13 @@ fn write_plane_residual_cabac(
     let [cat_dc, cat_ac, cat_4x4, cat_8x8] = PLANE_CATS[p];
     let scan4: &[u8; 16] = if field { &FIELD_SCAN4X4 } else { &ZIGZAG4X4 };
     let scan8: &[u8; 64] = if field { &FIELD_SCAN8X8 } else { &ZIGZAG8X8 };
-    let mut buf = [0i32; 16];
     if let Some(dc) = dc {
         debug_assert!(
             !cur.transform_8x8,
             "Intra_16x16 carries no transform_size_8x8_flag"
         );
-        for (o, &v) in buf.iter_mut().zip(dc) {
-            *o = v as i32;
-        }
         let inc = enc_cbf_ctx_inc(cur, left, above, rows, cat_dc, 0, 0, 0, 0);
-        write_residual_block_cabac(e, st, field, cat_dc, Some(inc), &buf, scan4, 0, 16);
+        write_residual_block_cabac(e, st, field, cat_dc, Some(inc), &dc[..], scan4, 0, 16);
     }
     for blk8 in 0..4 {
         let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
@@ -2854,16 +2981,10 @@ fn write_plane_residual_cabac(
             // and no coefficient unspellable — the decision has to clear
             // the bit instead, and `write_residual_block_cabac` asserts
             // so rather than emitting a block the reader cannot parse.
-            let mut buf8 = [0i32; 64];
-            for (o, &v) in buf8
-                .iter_mut()
-                .zip(&levels.as_flattened()[blk8 * 64..blk8 * 64 + 64])
-            {
-                *o = v as i32;
-            }
+            let b8 = &levels.as_flattened()[blk8 * 64..blk8 * 64 + 64];
             let cbf =
                 c444.then(|| enc_cbf_ctx_inc(cur, left, above, rows, cat_8x8, bx8, by8, 0, 0));
-            let n = write_residual_block_cabac(e, st, field, cat_8x8, cbf, &buf8, scan8, 0, 64);
+            let n = write_residual_block_cabac(e, st, field, cat_8x8, cbf, b8, scan8, 0, 64);
             debug_assert_eq!(
                 n,
                 quad_total(cur.nz_plane(p), blk8),
@@ -2874,9 +2995,7 @@ fn write_plane_residual_cabac(
         for sub in 0..4 {
             let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
             let raster = by * 4 + bx;
-            for (o, &v) in buf.iter_mut().zip(&levels[raster]) {
-                *o = v as i32;
-            }
+            let buf = &levels[raster];
             // Intra_16x16 codes the 15 AC coefficients (position 0 lives
             // in the DC block); everything else codes all 16.
             let (cat, start, max_coeff) = if dc.is_some() {
@@ -2895,7 +3014,7 @@ fn write_plane_residual_cabac(
                 field,
                 cat,
                 Some(inc),
-                &buf,
+                buf,
                 scan4,
                 start,
                 max_coeff,
@@ -2970,7 +3089,6 @@ fn write_residual_walk_cabac(
         return;
     }
     let scan4: &[u8; 16] = if field { &FIELD_SCAN4X4 } else { &ZIGZAG4X4 };
-    let mut buf = [0i32; 16];
     let n_dc = if c422 { 8 } else { 4 };
     let dc_scan: &[u8] = if c422 {
         &SCAN_CHROMA_DC_422[..]
@@ -2982,10 +3100,6 @@ fn write_residual_walk_cabac(
             c422 || chroma_dc[comp][4..].iter().all(|&v| v == 0),
             "4:2:0 chroma DC has four coefficients"
         );
-        buf = [0; 16];
-        for (o, &v) in buf.iter_mut().zip(&chroma_dc[comp][..n_dc]) {
-            *o = v as i32;
-        }
         let inc = enc_cbf_ctx_inc(cur, left, above, rows, CAT_CHROMA_DC, 0, 0, comp, 0);
         write_residual_block_cabac(
             e,
@@ -2993,7 +3107,7 @@ fn write_residual_walk_cabac(
             field,
             CAT_CHROMA_DC,
             Some(inc),
-            &buf,
+            &chroma_dc[comp][..n_dc],
             dc_scan,
             0,
             n_dc,
@@ -3002,9 +3116,7 @@ fn write_residual_walk_cabac(
     if cbp_chroma == 2 {
         for comp in 0..2 {
             for blk in 0..2 * rows {
-                for (o, &v) in buf.iter_mut().zip(&chroma_ac[comp][blk]) {
-                    *o = v as i32;
-                }
+                let buf = &chroma_ac[comp][blk];
                 debug_assert!(buf[0] == 0, "chroma AC keeps position 0 free");
                 let inc = enc_cbf_ctx_inc(cur, left, above, rows, CAT_CHROMA_AC, 0, 0, comp, blk);
                 let n = write_residual_block_cabac(
@@ -3013,7 +3125,7 @@ fn write_residual_walk_cabac(
                     field,
                     CAT_CHROMA_AC,
                     Some(inc),
-                    &buf,
+                    buf,
                     scan4,
                     1,
                     15,
@@ -3342,6 +3454,42 @@ mod residual_round_trip {
         }
         assert!(decode_end_of_slice(&mut c));
         assert_eq!(enc_st.ctx, dec_st.ctx, "context states diverged");
+    }
+
+    /// The significance mask of an `i16` block (NEON where it runs) is the
+    /// definition's, over every scan the writer takes.
+    #[test]
+    fn sig_mask_matches_the_definition() {
+        let mut seed = 11u64;
+        let scans: [(&[u8], usize, usize); 6] = [
+            (&ZIGZAG4X4[..], 0, 16),
+            (&ZIGZAG4X4[..], 1, 15),
+            (&FIELD_SCAN4X4[..], 0, 16),
+            (&FIELD_SCAN4X4[..], 1, 15),
+            (&ZIGZAG8X8[..], 0, 64),
+            (&FIELD_SCAN8X8[..], 0, 64),
+        ];
+        for trial in 0..3000 {
+            let mut lv = [0i16; 64];
+            for v in lv.iter_mut() {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let r = (seed >> 33) as u32;
+                if r % (1 + trial % 9) == 0 {
+                    *v = (r >> 4) as i16;
+                }
+            }
+            for &(scan, start, n) in &scans {
+                let scan = &scan[start..start + n];
+                let want = scan
+                    .iter()
+                    .enumerate()
+                    .fold(0u64, |m, (p, &r)| m | (((lv[r as usize] != 0) as u64) << p));
+                let lv = if n == 64 { &lv[..] } else { &lv[..16] };
+                assert_eq!(<i16 as Level>::sig_mask(lv, scan), want, "trial {trial}");
+            }
+        }
     }
 
     /// Encode a block, decode it with the production reader, and require the
