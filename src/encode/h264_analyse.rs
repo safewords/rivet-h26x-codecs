@@ -78,10 +78,9 @@ pub(crate) struct AnalysisCfg {
     /// Quantise every candidate the comparison codes by the trellis too,
     /// so the decision sees the levels it would write (CABAC streams).
     pub(crate) trellis_rd: bool,
-    /// The trellis runs in B pictures nothing references too. (Off in
-    /// veryfast: +0.9 % BD-rate for 6 % less time, the cheapest trade of
-    /// the ones measured — the trellis off everywhere is +6.6 % for 20 %,
-    /// Intra_4x4 off in inter pictures +1.6 % for 4 %.)
+    /// The trellis runs in B pictures nothing references too. (On in
+    /// every tier since the eighth round: veryfast's -1.2 % BD-rate for
+    /// 2.3 % more instructions is past x264's slope where that tier sits.)
     pub(crate) trellis_nonref: bool,
     /// Decide by coding candidates and pricing them (`SSD + lambda * R`);
     /// false decides on the estimates alone and codes only the winner
@@ -170,7 +169,14 @@ impl AnalysisCfg {
     /// shape, skip and intra in every macroblock: +1.9 % BD-rate against
     /// x264 veryfast for 24 % fewer instructions. (The estimate decision
     /// had measured +35 % when skip competed on its prediction's error,
-    /// which the coded candidates' estimates do not include.)
+    /// which the coded candidates' estimates do not include.) The eighth
+    /// round placed the tier on x264's preset ladder, where it sat between
+    /// x264's veryfast and faster in time, and every tool that bought more
+    /// than x264's own slope there (0.2 % BD-rate per 1 % of time) went
+    /// back in: two P references (-1.3 % for +3 % instructions), the
+    /// trellis in B pictures nothing references (-1.2 % for +2.3 %) and
+    /// intra analysed within 1.2x of the best inter estimate (-0.7 % for
+    /// +1 %).
     pub(crate) const VERYFAST: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -191,14 +197,14 @@ impl AnalysisCfg {
         early_skip: true,
         skip_ssd: 0.1,
         i4x4: false,
-        intra_ratio: 1.0,
+        intra_ratio: 1.2,
         rd_ratio: 1.0,
         rd_max: 1,
         trellis: true,
         trellis_rd: false,
-        trellis_nonref: false,
+        trellis_nonref: true,
         rd: false,
-        refs: 1,
+        refs: 2,
         b_refs: 1,
         mixed_refs: 1.0,
         bi_refine: 1,
