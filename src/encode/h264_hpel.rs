@@ -399,21 +399,33 @@ pub(crate) const MV_SPAN: i32 = 4096;
 /// The rate side of a vector's cost at one multiplier: `lambda` times
 /// [`mvd_bits`], tabulated over `-MV_SPAN..=MV_SPAN` in whole units.
 pub(crate) struct MvCostTable {
-    tab: Vec<u16>,
+    tab: Box<[u16; MV_TAB]>,
+}
+
+/// [`MvCostTable`]'s entries: `-MV_SPAN..=MV_SPAN`.
+const MV_TAB: usize = 2 * MV_SPAN as usize + 1;
+
+/// The cost of differing from the predictor by `d` in one component, in
+/// an [`MvCostTable`]'s entries (no bounds check: the index is clamped
+/// to the array's own length).
+#[inline(always)]
+fn mv_comp(tab: &[u16; MV_TAB], d: i32) -> u32 {
+    tab[(d.clamp(-MV_SPAN, MV_SPAN) + MV_SPAN) as usize] as u32
 }
 
 impl MvCostTable {
     pub(crate) fn new(lambda: f32) -> Self {
-        let tab = (-MV_SPAN..=MV_SPAN)
-            .map(|d| (lambda * mvd_bits(d) + 0.5).min(65535.0) as u16)
-            .collect();
+        let mut tab = Box::new([0u16; MV_TAB]);
+        for (t, d) in tab.iter_mut().zip(-MV_SPAN..=MV_SPAN) {
+            *t = (lambda * mvd_bits(d) + 0.5).min(65535.0) as u16;
+        }
         MvCostTable { tab }
     }
 
     /// The cost of differing from the predictor by `d` in one component.
     #[inline(always)]
     pub(crate) fn comp(&self, d: i32) -> u32 {
-        self.tab[(d.clamp(-MV_SPAN, MV_SPAN) + MV_SPAN) as usize] as u32
+        mv_comp(&self.tab, d)
     }
 
     /// The cost of `mv` against predictor `p`.
@@ -519,60 +531,110 @@ impl Pts {
     }
 }
 
+/// What a search reads for every candidate, read out of the search's
+/// references once: past an opaque call (every kernel is one, through
+/// its table) the compiler cannot know the planes and the rate table did
+/// not move, and reloads each through two or three dependent loads per
+/// candidate otherwise.
+#[derive(Clone, Copy)]
+struct Hot<'a, S: Sample> {
+    /// `[G, b, h, j]`, as [`MeRef`] holds them.
+    planes: [&'a [S]; 4],
+    stride: isize,
+    /// The block's first sample, in every plane.
+    org: isize,
+    tab: &'a [u16; MV_TAB],
+    /// The vector predictor.
+    pred: (i32, i32),
+}
+
+impl<'a, S: Sample> Hot<'a, S> {
+    /// Plane `plane` from whole-sample offset `(dx, dy)` of the block.
+    #[inline(always)]
+    fn at(&self, plane: u8, dx: i32, dy: i32) -> &'a [S] {
+        &self.planes[plane as usize]
+            [(self.org + dy as isize * self.stride + dx as isize) as usize..]
+    }
+
+    /// [`MeRef::pair`] for the block.
+    #[inline(always)]
+    fn pair(&self, mv: Mv) -> (&'a [S], &'a [S]) {
+        let (xi, yi) = (mv.x as i32 >> 2, mv.y as i32 >> 2);
+        let (p1, dx1, dy1, p2, dx2, dy2) = QPEL[((mv.y & 3) * 4 + (mv.x & 3)) as usize];
+        let a = self.at(p1, xi + dx1 as i32, yi + dy1 as i32);
+        if p2 == 255 {
+            (a, a)
+        } else {
+            (a, self.at(p2, xi + dx2 as i32, yi + dy2 as i32))
+        }
+    }
+
+    /// The rate of the quarter-sample vector `(x, y)`.
+    #[inline(always)]
+    fn rate(&self, x: i32, y: i32) -> u32 {
+        mv_comp(self.tab, x - self.pred.0) + mv_comp(self.tab, y - self.pred.1)
+    }
+}
+
 impl<S: Sample> Search<'_, '_, S> {
+    #[inline(always)]
+    fn hot(&self) -> Hot<'_, S> {
+        let g = self.r.g;
+        Hot {
+            planes: self.r.planes,
+            stride: g.stride as isize,
+            org: g.offset(self.x as isize, self.y as isize) as isize,
+            tab: &self.cost.tab,
+            pred: (self.pred.x as i32, self.pred.y as i32),
+        }
+    }
+
     #[inline]
-    fn sad_full(&self, fx: i32, fy: i32) -> u32 {
-        let r = self.r.g;
-        let off = r.offset((self.x + fx) as isize, (self.y + fy) as isize);
+    fn sad_full(&self, hot: &Hot<'_, S>, fx: i32, fy: i32) -> u32 {
         (self.dist.sad)(
             self.src,
             self.src_stride,
-            &r.data[off..],
-            r.stride,
+            hot.at(0, fx, fy),
+            hot.stride as usize,
             self.w,
             self.h,
-        ) + self
-            .cost
-            .of(Mv::new((fx * 4) as i16, (fy * 4) as i16), self.pred)
+        ) + hot.rate(fx * 4, fy * 4)
     }
 
     /// [`Search::sad_full`] at every point of `pts`, in order: four at a
     /// time through the four-way kernel where there is one.
     #[inline]
-    fn sad_pts(&self, pts: &Pts) -> [u32; 16] {
+    fn sad_pts(&self, hot: &Hot<'_, S>, pts: &Pts) -> [u32; 16] {
         let mut out = [0u32; 16];
         let n = pts.n;
         if let Some(f) = self.sad_x4.filter(|_| S::BYTES == 1 && n > 1) {
-            let r = self.r.g;
             // SAFETY: a one-byte `Sample` is `u8`.
             let as8 =
                 |v: &[S]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
             let at = |k: usize| {
                 let (fx, fy) = pts.p[k.min(n - 1)];
-                as8(&r.data[r.offset((self.x + fx) as isize, (self.y + fy) as isize)..])
+                as8(hot.at(0, fx, fy))
             };
+            let s8 = as8(self.src);
             let mut k = 0;
             while k < n {
                 let d = f(
-                    as8(self.src),
+                    s8,
                     self.src_stride,
                     [at(k), at(k + 1), at(k + 2), at(k + 3)],
-                    r.stride,
+                    hot.stride as usize,
                     self.w,
                     self.h,
                 );
                 for j in 0..4.min(n - k) {
                     let (fx, fy) = pts.p[k + j];
-                    out[k + j] = d[j]
-                        + self
-                            .cost
-                            .of(Mv::new((fx * 4) as i16, (fy * 4) as i16), self.pred);
+                    out[k + j] = d[j] + hot.rate(fx * 4, fy * 4);
                 }
                 k += 4;
             }
         } else {
             for k in 0..n {
-                out[k] = self.sad_full(pts.p[k].0, pts.p[k].1);
+                out[k] = self.sad_full(hot, pts.p[k].0, pts.p[k].1);
             }
         }
         out
@@ -586,16 +648,14 @@ impl<S: Sample> Search<'_, '_, S> {
 
     /// SATD of the prediction at `mv` (no rate).
     #[inline]
-    pub(crate) fn satd(&self, mv: Mv, buf: &mut [S; 256]) -> u32 {
+    fn satd(&self, hot: &Hot<'_, S>, mv: Mv, buf: &mut [S; 256]) -> u32 {
         if let Some(f) = self.satd_avg
             && S::BYTES == 1
         {
-            let (xi, yi) = (self.x + (mv.x as i32 >> 2), self.y + (mv.y as i32 >> 2));
-            let (p1, dx1, dy1, p2, dx2, dy2) = QPEL[((mv.y & 3) * 4 + (mv.x & 3)) as usize];
+            let (_, _, _, p2, _, _) = QPEL[((mv.y & 3) * 4 + (mv.x & 3)) as usize];
             if p2 != 255 {
-                let a = self.r.at(p1, xi + dx1 as i32, yi + dy1 as i32);
-                let b = self.r.at(p2, xi + dx2 as i32, yi + dy2 as i32);
-                let rs = self.r.g.stride;
+                let (a, b) = hot.pair(mv);
+                let rs = hot.stride as usize;
                 // SAFETY: a one-byte `Sample` is `u8`.
                 let (s8, a8, b8) = unsafe {
                     (
@@ -615,17 +675,17 @@ impl<S: Sample> Search<'_, '_, S> {
     /// time through the four-way kernel where there is one — each the
     /// value [`Search::satd`] gives.
     #[inline]
-    fn satd_n(&self, mvs: &[Mv; 8], n: usize, buf: &mut [S; 256]) -> [u32; 8] {
+    fn satd_n(&self, hot: &Hot<'_, S>, mvs: &[Mv; 8], n: usize, buf: &mut [S; 256]) -> [u32; 8] {
         let mut out = [0u32; 8];
         if let Some(f) = self.satd_x4.filter(|_| S::BYTES == 1 && n > 1) {
-            let rs = self.r.g.stride;
+            let rs = hot.stride as usize;
             // SAFETY: a one-byte `Sample` is `u8`.
             let as8 =
                 |v: &[S]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
             // A plane sample is the pair of one view twice: its rounded
             // average is itself.
             let pair = |k: usize| {
-                let (a, b) = self.r.pair(self.x, self.y, mvs[k.min(n - 1)]);
+                let (a, b) = hot.pair(mvs[k.min(n - 1)]);
                 (as8(a), as8(b))
             };
             let s8 = as8(self.src);
@@ -644,18 +704,10 @@ impl<S: Sample> Search<'_, '_, S> {
             }
         } else {
             for k in 0..n {
-                out[k] = self.satd(mvs[k], buf);
+                out[k] = self.satd(hot, mvs[k], buf);
             }
         }
         out
-    }
-
-    /// The vector in quarter samples is inside the window.
-    #[inline]
-    pub(crate) fn inside_q(&self, mv: Mv) -> bool {
-        let (lx, hx, ly, hy) = self.bounds;
-        let (x, y) = (mv.x as i32, mv.y as i32);
-        x >= lx * 4 && x <= hx * 4 && y >= ly * 4 && y <= hy * 4
     }
 
     /// Run the search from `cands` (quarter-sample vectors; rounded to
@@ -669,6 +721,7 @@ impl<S: Sample> Search<'_, '_, S> {
     /// The whole-sample stage of [`Search::run`]: the best whole-sample
     /// vector (in quarter samples) and its cost, SAD plus rate.
     pub(crate) fn int_search(&self, cands: &[Mv], cfg: &MeCfg) -> (Mv, u32) {
+        let hot = self.hot();
         let (lx, hx, ly, hy) = self.bounds;
         let clampf = |m: Mv| {
             (
@@ -696,7 +749,7 @@ impl<S: Sample> Search<'_, '_, S> {
             // Callers pass at most eight candidates; the batch holds sixteen.
             pts.push(f);
         }
-        let sc = self.sad_pts(&pts);
+        let sc = self.sad_pts(&hot, &pts);
         let mut bcost = sc[0];
         for k in 1..pts.n {
             if sc[k] < bcost {
@@ -722,7 +775,7 @@ impl<S: Sample> Search<'_, '_, S> {
                     pts.push((fx, fy));
                 }
             }
-            let sc = self.sad_pts(&pts);
+            let sc = self.sad_pts(&hot, &pts);
             let mut moved = usize::MAX;
             for k in 0..pts.n {
                 if sc[k] < *bcost {
@@ -735,7 +788,7 @@ impl<S: Sample> Search<'_, '_, S> {
         };
         let try_at = |fx: i32, fy: i32, best: &mut (i32, i32), bcost: &mut u32| {
             if ok(fx, fy) && (fx, fy) != *best {
-                let s = self.sad_full(fx, fy);
+                let s = self.sad_full(&hot, fx, fy);
                 if s < *bcost {
                     *bcost = s;
                     *best = (fx, fy);
@@ -835,10 +888,13 @@ impl<S: Sample> Search<'_, '_, S> {
     /// Sub-sample refinement from `mv`: square rings at half, then quarter
     /// samples, scored by SATD plus rate. Returns `(mv, satd, cost)`.
     pub(crate) fn refine(&self, mv: Mv, cfg: &MeCfg) -> (Mv, u32, u32) {
+        let hot = self.hot();
+        let (lx, hx, ly, hy) = self.bounds;
+        let (lx, hx, ly, hy) = (lx * 4, hx * 4, ly * 4, hy * 4);
         let mut buf = [S::default(); 256];
         let mut best = mv;
-        let mut bsatd = self.satd(best, &mut buf);
-        let mut bcost = bsatd + self.cost.of(best, self.pred);
+        let mut bsatd = self.satd(&hot, best, &mut buf);
+        let mut bcost = bsatd + hot.rate(best.x as i32, best.y as i32);
         const RING: [(i16, i16); 8] = [
             (0, -1),
             (-1, 0),
@@ -870,7 +926,8 @@ impl<S: Sample> Search<'_, '_, S> {
                 let mut n = 0;
                 for &(dx, dy) in &RING[..pts] {
                     let m = Mv::new(c.x + dx * step, c.y + dy * step);
-                    if !self.inside_q(m)
+                    let (x, y) = (m.x as i32, m.y as i32);
+                    if !(x >= lx && x <= hx && y >= ly && y <= hy)
                         || prev
                             .is_some_and(|p| (m.x - p.x).abs() <= step && (m.y - p.y).abs() <= step)
                     {
@@ -879,9 +936,9 @@ impl<S: Sample> Search<'_, '_, S> {
                     ms[n] = m;
                     n += 1;
                 }
-                let ss = self.satd_n(&ms, n, &mut buf);
+                let ss = self.satd_n(&hot, &ms, n, &mut buf);
                 for (&m, &s) in ms[..n].iter().zip(&ss[..n]) {
-                    let rc = self.cost.of(m, self.pred);
+                    let rc = hot.rate(m.x as i32, m.y as i32);
                     if s + rc < bcost {
                         bcost = s + rc;
                         bsatd = s;
