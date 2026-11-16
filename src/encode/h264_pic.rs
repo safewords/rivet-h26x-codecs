@@ -557,16 +557,15 @@ fn edge_modes(kind: MbKind, modes: &[u8; 16]) -> ([Option<u8>; 4], [Option<u8>; 
 /// rectangle hides these samples, and repeating the edge keeps the coded
 /// picture free of an artificial boundary that would cost bits.
 fn pad_to<S: Sample>(src: &Plane<'_, S>, w: usize, h: usize) -> Vec<S> {
-    let mut out = vec![S::default(); w * h];
+    // Built by appending, each sample written once: a zeroed vector first
+    // was a pass over the picture for nothing.
+    let mut out = Vec::with_capacity(w * h);
     let sw = (src.width as usize).min(w);
     for y in 0..h {
         let sy = y.min(src.height as usize - 1);
         let row = &src.data[sy * src.stride..sy * src.stride + sw];
-        let dst = &mut out[y * w..y * w + w];
-        dst[..sw].copy_from_slice(row);
-        for d in dst[sw..].iter_mut() {
-            *d = row[sw - 1];
-        }
+        out.extend_from_slice(row);
+        out.resize(out.len() + (w - sw), row[sw - 1]);
     }
     out
 }
@@ -1005,6 +1004,15 @@ pub(crate) fn code_p_picture<S: Sample>(
         c: [src_cb, src_cr],
         cs: pc.chroma_stride,
     };
+    // A macroblock's decision is used where the analysis left it: a
+    // record is about 2 KB, and moving it out of the analysis's answer,
+    // or building a default one for each intra macroblock, was a copy of
+    // it each time. An intra macroblock's points at this one, which
+    // nothing writes.
+    let mut use_intra = InterDecision {
+        kind: InterMbKind::UseIntra,
+        ..InterDecision::default()
+    };
     for mb_y in 0..mbs_high {
         let mut left_modes: [Option<u8>; 4] = [None; 4];
         for mb_x in 0..mbs_wide {
@@ -1012,8 +1020,8 @@ pub(crate) fn code_p_picture<S: Sample>(
             st.start(&pm.frame, &pm.info, addr, &mut dnb);
             let mctx = pc.ctx_at(pc.mb_qp(addr));
             let ctx = &mctx;
-            let mut decided_intra = None;
-            let mut dec = if let Some(an) = an.as_mut() {
+            let mut choice;
+            let dec: &mut InterDecision = if let Some(an) = an.as_mut() {
                 if let Some(l) = live {
                     an.refresh_trellis(&l.borrow());
                 }
@@ -1036,7 +1044,7 @@ pub(crate) fn code_p_picture<S: Sample>(
                     cands,
                     ncands,
                 };
-                match p_mb(
+                choice = p_mb(
                     an,
                     ctx,
                     rec,
@@ -1049,18 +1057,13 @@ pub(crate) fn code_p_picture<S: Sample>(
                     &nb,
                     chain.prev,
                     &mut |m: PMb<'_>| emit(mb_x, mb_y, m, true),
-                ) {
+                );
+                match &mut choice {
                     MbChoice::Inter(d) => d,
-                    MbChoice::Intra(d, modes) => {
-                        decided_intra = Some((d, modes));
-                        InterDecision {
-                            kind: InterMbKind::UseIntra,
-                            ..InterDecision::default()
-                        }
-                    }
+                    MbChoice::Intra(..) => &mut use_intra,
                 }
             } else {
-                code_macroblock_p(
+                choice = MbChoice::Inter(code_macroblock_p(
                     ctx,
                     rec,
                     &pref,
@@ -1071,7 +1074,11 @@ pub(crate) fn code_p_picture<S: Sample>(
                     [src_cb, src_cr],
                     pc.chroma_stride,
                     &mut st,
-                )
+                ));
+                match &mut choice {
+                    MbChoice::Inter(d) => d,
+                    MbChoice::Intra(..) => unreachable!(),
+                }
             };
             // The weighting's model check, at the vectors this macroblock
             // chose (a skip's is the derived one, over the whole 16x16).
@@ -1142,21 +1149,26 @@ pub(crate) fn code_p_picture<S: Sample>(
                         top_left: mb_x > 0 && mb_y > 0,
                         top_right: mb_y > 0 && mb_x + 1 < mbs_wide,
                     };
-                    let (mut idec, modes) = decided_intra.take().unwrap_or_else(|| {
-                        code_macroblock(
-                            ctx,
-                            rec,
-                            mb_x,
-                            mb_y,
-                            src_y,
-                            pc.luma_stride,
-                            [src_cb, src_cr],
-                            pc.chroma_stride,
-                            mb,
-                            &left_modes,
-                            &top_modes[mb_x],
-                        )
-                    });
+                    let mut coded;
+                    let (idec, modes): (&mut MbDecision, [u8; 16]) = match &mut choice {
+                        MbChoice::Intra(d, m) => (d, *m),
+                        MbChoice::Inter(_) => {
+                            coded = code_macroblock(
+                                ctx,
+                                rec,
+                                mb_x,
+                                mb_y,
+                                src_y,
+                                pc.luma_stride,
+                                [src_cb, src_cr],
+                                pc.chroma_stride,
+                                mb,
+                                &left_modes,
+                                &top_modes[mb_x],
+                            );
+                            (&mut coded.0, coded.1)
+                        }
+                    };
                     let q = chain.settle(
                         ctx.qp,
                         has_residual(
@@ -1324,6 +1336,15 @@ pub(crate) fn code_b_picture<S: Sample>(
         c: [src_cb, src_cr],
         cs: pc.chroma_stride,
     };
+    // A macroblock's decision is used where the analysis left it: a
+    // record is about 2 KB, and moving it out of the analysis's answer,
+    // or building a default one for each intra macroblock, was a copy of
+    // it each time. An intra macroblock's points at this one, which
+    // nothing writes.
+    let mut use_intra = BDecision {
+        kind: BMbKind::UseIntra,
+        ..BDecision::default()
+    };
     for mb_y in 0..mbs_high {
         let mut left_modes: [Option<u8>; 4] = [None; 4];
         for mb_x in 0..mbs_wide {
@@ -1331,8 +1352,8 @@ pub(crate) fn code_b_picture<S: Sample>(
             st.start(&pm.frame, &pm.info, addr, &mut dnb);
             let mctx = pc.ctx_at(pc.mb_qp(addr));
             let ctx = &mctx;
-            let mut decided_intra = None;
-            let mut dec = if let Some(an) = an.as_mut() {
+            let mut choice;
+            let dec: &mut BDecision = if let Some(an) = an.as_mut() {
                 if let Some(l) = live {
                     an.refresh_trellis(&l.borrow());
                 }
@@ -1355,7 +1376,7 @@ pub(crate) fn code_b_picture<S: Sample>(
                     cands,
                     ncands,
                 };
-                match b_mb(
+                choice = b_mb(
                     an,
                     ctx,
                     rec,
@@ -1369,18 +1390,13 @@ pub(crate) fn code_b_picture<S: Sample>(
                     &nb,
                     chain.prev,
                     &mut |m: BMb<'_>| emit(mb_x, mb_y, m, true),
-                ) {
+                );
+                match &mut choice {
                     MbChoice::Inter(d) => d,
-                    MbChoice::Intra(d, modes) => {
-                        decided_intra = Some((d, modes));
-                        BDecision {
-                            kind: BMbKind::UseIntra,
-                            ..BDecision::default()
-                        }
-                    }
+                    MbChoice::Intra(..) => &mut use_intra,
                 }
             } else {
-                code_macroblock_b(
+                choice = MbChoice::Inter(code_macroblock_b(
                     ctx,
                     rec,
                     &brefs,
@@ -1395,7 +1411,11 @@ pub(crate) fn code_b_picture<S: Sample>(
                     addr,
                     false,
                     col.map.cur_parity,
-                )
+                ));
+                match &mut choice {
+                    MbChoice::Inter(d) => d,
+                    MbChoice::Intra(..) => unreachable!(),
+                }
             };
             // The weighting's model check, at the vectors and lists this
             // macroblock chose (direct and skip at their derived ones).
@@ -1422,21 +1442,26 @@ pub(crate) fn code_b_picture<S: Sample>(
                     top_left: mb_x > 0 && mb_y > 0,
                     top_right: mb_y > 0 && mb_x + 1 < mbs_wide,
                 };
-                let (mut idec, modes) = decided_intra.take().unwrap_or_else(|| {
-                    code_macroblock(
-                        ctx,
-                        rec,
-                        mb_x,
-                        mb_y,
-                        src_y,
-                        pc.luma_stride,
-                        [src_cb, src_cr],
-                        pc.chroma_stride,
-                        mb,
-                        &left_modes,
-                        &top_modes[mb_x],
-                    )
-                });
+                let mut coded;
+                let (idec, modes): (&mut MbDecision, [u8; 16]) = match &mut choice {
+                    MbChoice::Intra(d, m) => (d, *m),
+                    MbChoice::Inter(_) => {
+                        coded = code_macroblock(
+                            ctx,
+                            rec,
+                            mb_x,
+                            mb_y,
+                            src_y,
+                            pc.luma_stride,
+                            [src_cb, src_cr],
+                            pc.chroma_stride,
+                            mb,
+                            &left_modes,
+                            &top_modes[mb_x],
+                        );
+                        (&mut coded.0, coded.1)
+                    }
+                };
                 let q = chain.settle(
                     ctx.qp,
                     has_residual(
