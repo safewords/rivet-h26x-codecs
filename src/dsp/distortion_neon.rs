@@ -54,10 +54,51 @@ pub(super) unsafe fn load4x2(p: *const u8, q: *const u8) -> uint8x8_t {
 unsafe fn sad_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, h: usize) -> u32 {
     unsafe {
         let mut acc = vdupq_n_u32(0);
-        for y in 0..h {
+        let mut row = vdupq_n_u16(0);
+        let mut y = 0;
+        if w == 8 || w == 4 {
+            // Narrow blocks: two (eight wide) or four (four wide) rows to
+            // a vector. A step adds at most 510 to a u16 lane, so the
+            // lanes are folded into u32 every 64 steps.
+            let mut steps = 0;
+            while y + 16 / w <= h {
+                let (va, vb) = if w == 8 {
+                    (
+                        vcombine_u8(vld1_u8(a.add(y * sa)), vld1_u8(a.add((y + 1) * sa))),
+                        vcombine_u8(vld1_u8(b.add(y * sb)), vld1_u8(b.add((y + 1) * sb))),
+                    )
+                } else {
+                    (
+                        vcombine_u8(
+                            load4x2(a.add(y * sa), a.add((y + 1) * sa)),
+                            load4x2(a.add((y + 2) * sa), a.add((y + 3) * sa)),
+                        ),
+                        vcombine_u8(
+                            load4x2(b.add(y * sb), b.add((y + 1) * sb)),
+                            load4x2(b.add((y + 2) * sb), b.add((y + 3) * sb)),
+                        ),
+                    )
+                };
+                row = vpadalq_u8(row, vabdq_u8(va, vb));
+                y += 16 / w;
+                steps += 1;
+                if steps == 64 {
+                    acc = vpadalq_u16(acc, row);
+                    row = vdupq_n_u16(0);
+                    steps = 0;
+                }
+            }
+            acc = vpadalq_u16(acc, row);
+            row = vdupq_n_u16(0);
+        }
+        // A row adds at most 510 to a u16 lane per sixteen columns and
+        // 510 for an eight- and a four-column tail together: the lanes
+        // are folded into u32 every `fold` rows, before any can wrap.
+        let fold = (65535 / (510 * (w / 16 + 1))).max(1);
+        let mut rows = 0;
+        while y < h {
             let ra = a.add(y * sa);
             let rb = b.add(y * sb);
-            let mut row = vdupq_n_u16(0);
             let mut x = 0;
             while x + 16 <= w {
                 let d = vabdq_u8(vld1q_u8(ra.add(x)), vld1q_u8(rb.add(x)));
@@ -71,8 +112,15 @@ unsafe fn sad_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, h
             if x + 4 <= w {
                 row = vaddq_u16(row, vabdl_u8(load4(ra.add(x)), load4(rb.add(x))));
             }
-            acc = vpadalq_u16(acc, row);
+            y += 1;
+            rows += 1;
+            if rows == fold {
+                acc = vpadalq_u16(acc, row);
+                row = vdupq_n_u16(0);
+                rows = 0;
+            }
         }
+        acc = vpadalq_u16(acc, row);
         vaddvq_u32(acc)
     }
 }
@@ -467,9 +515,14 @@ mod tests {
         (*seed >> 33) as u32
     }
 
-    const SIZES: [(usize, usize); 16] = [
+    const SIZES: [(usize, usize); 21] = [
         (4, 4),
+        (4, 7),
         (4, 8),
+        (4, 64),
+        (8, 5),
+        (8, 64),
+        (16, 3),
         (4, 16),
         (8, 4),
         (8, 8),
@@ -563,5 +616,32 @@ mod tests {
             (d.satd)(&a, 64, &b, 64, 64, 64),
             256 * ((16 * 255 + 1) >> 1)
         );
+    }
+
+    /// SAD at full deflection over tall blocks, so every narrow and wide
+    /// path folds its u16 lanes at least once, and with odd heights that
+    /// leave the narrow paths a tail of rows.
+    #[test]
+    fn sad_folds_before_wrapping() {
+        let (w_max, h_max) = (80usize, 300usize);
+        let a = vec![0u8; w_max * h_max];
+        let b = vec![255u8; w_max * h_max];
+        let mut d = DistortionDsp::<u8>::scalar();
+        install(
+            &mut d,
+            Cpu {
+                neon: true,
+                ..Cpu::SCALAR
+            },
+        );
+        for w in [4usize, 8, 12, 16, 20, 32, 48, 64, 80] {
+            for h in [1usize, 3, 129, 130, 131, 257, 300] {
+                assert_eq!(
+                    (d.sad)(&a, w_max, &b, w_max, w, h),
+                    255 * (w * h) as u32,
+                    "sad {w}x{h}"
+                );
+            }
+        }
     }
 }
