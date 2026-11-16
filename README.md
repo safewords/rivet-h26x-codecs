@@ -532,6 +532,126 @@ before round 10A): the four-way SATD kernels about a ninth, the trellis
 a fifth, the estimator 8 %, the integer search with its SAD kernel 7 %,
 the refinement's own code 4 %.
 
+#### Round 11A: intra modes chosen by pricing in I pictures
+
+(2026-11-16. The eleventh round was split in two; this part had the
+compression decisions, the other the speed of the estimator, the
+residual walk, the trellis, the writer and the kernels. Veryfast is
+untouched: its streams are byte-identical to round 10B's.)
+
+The count first. An Intra_4x4 or Intra_8x8 block took the mode with
+the least SATD plus `lambda` times one or four bits; the comparison
+priced only the whole macroblock after that, at each type's estimated
+modes. Coding a block's near modes and pricing each as the stream
+would (its squared error, plus `lambda` times its mode bins and its
+residual's bins from the live context states) changes the mode of 42 %
+of the 4x4 blocks that have a second mode within 1.2x of the best
+(park_joy, medium, QP 27, every picture: 89,000 of 212,000) and 33 % of
+the 8x8 ones — the estimate is a poor guide this close. And in I
+pictures each candidate was coded by the plain quantiser, the winner by
+the trellis only afterwards, so every block's mode was chosen against
+neighbours that were not the ones the stream carries.
+
+Three changes, all in I pictures (`AnalysisCfg::i_trellis_rd`,
+`i_rd_ratio`, `i_rd_modes`, `i_rd_i16`, `i_rd_chroma`), medium and slow.
+BD-rate Y against x264 at the same preset; cycles and instructions at
+QP 27 over the five clips, minimum of three interleaved runs,
+`/usr/bin/time -l`, against round 10B's tree (52f4398; 10.87G / 17.49G
+cycles); the slope is the BD-rate bought per 1 % of cycles, x264's own
+0.05 % (medium) and 0.04 % (slow):
+
+| change | medium | slow |
+|---|---:|---:|
+| I pictures quantise every candidate by the trellis, not only the winner (as `trellis_rd` already did in P and B pictures) | +0.36 → +0.16 %, +0.4 % cycles (+0.3 % ins) | +1.44 → +1.02 %, +0.2 % (+0.4 %) |
+| ... each Intra_4x4 / Intra_8x8 block's modes within 1.5x (slow 2.0x) of the best estimate, at most 4 (slow 9), coded and priced: SSD plus `lambda` times the mode's `prev_intra_pred_mode_flag` / `rem_intra_pred_mode` bins and the block's significance map, levels and signs, from the macroblock's context states (`BlockRd`, new) | → -0.50 %, +3.8 % (+3.1 %) | → +0.33 %, +6.0 % (+4.9 %) |
+| ... the best two (slow four) Intra_16x16 modes by estimate coded and priced, and the best two (four) chroma modes priced with the chosen luma | → -0.58 %, +1.0 % (+0.7 %) | → +0.22 %, +1.1 % (+1.0 %) |
+| **all three** | **-0.94 points, +5.2 % cycles (+4.1 % ins): 0.18 % per 1 %** | **-1.22 points, +7.3 % (+6.3 %): 0.17 % per 1 %** |
+
+Per clip, medium: foreman +1.51 → +0.62 %, mobile +2.22 → +1.97 %,
+akiyo -4.85 → -7.90 %, ducks_take_off -0.56 → -0.79 %, park_joy +3.49
+→ +3.18 %; slow: +2.04 → +0.99, +2.12 → +1.72, -1.91 → -5.88, +2.22 →
++1.87, +2.73 → +2.42 %. Akiyo moves most: thirty pictures of a still
+scene are mostly their I picture's bits. The I picture costs little
+time against what it weighs in the rate (one picture in thirty, every
+other picture predicting from it), which is why pricing pays there at
+three to four times x264's slope and does not elsewhere (below). Of
+foreman's I picture at medium, 35 % of the 4x4 blocks and 37 % of the
+8x8 blocks that had a second mode in range changed it, and a quarter of
+the macroblocks their chroma mode.
+
+On x264's ladder (`frontier.py`, x264 timed again in the same shuffled
+batch, four at a time, minimum of three runs; BD-rate Y against x264
+medium):
+
+| rivet | BD-rate Y | CPU | x264's BD-rate at this CPU | x264's CPU at this BD-rate | rivet's time at equal BD-rate |
+|---|---:|---:|---:|---:|---:|
+| veryfast, round 10B (52f4398) | +13.09 % | 0.508x | +12.28 % | 0.489x | 1.04x |
+| veryfast, now | +13.09 % | 0.511x | +12.16 % | 0.489x | **1.04x** |
+| medium, round 10B | +0.36 % | 1.121x | -0.55 % | 0.979x | 1.15x |
+| medium, now | -0.58 % | 1.174x | -0.77 % | 1.129x | **1.04x** |
+| slow, round 10B | -2.21 % | 1.812x | -2.85 % | 1.584x | 1.14x |
+| slow, now | -3.38 % | 1.950x | -3.20 % | 2.026x | **0.96x** |
+
+(Round 10B's own run read 1.04x / 1.15x / 1.14x: the measurement
+repeats to the digit.) Slow is now on the far side of x264's frontier —
+at its time x264 is 0.18 points worse — and lands where x264 slow is
+(-3.58 % at 2.11x); medium is 0.19 points short at its time, where it
+was 0.91.
+
+H.265 is untouched: 18 streams (three CIF clips, three presets, QP 22
+and 32) are byte-identical before and after; H.265 medium parity is
+still -14.45 %. The decoder is untouched: 56 streams (the 53 fixtures
+and `tests/data`) decode to the same MD5s with round 10B's decoder and
+this one.
+
+Tried and dropped (BD-rate Y against x264 at the same preset, cycles
+against round 10B's tree unless said otherwise):
+
+- The same per-block pricing of intra modes in P and B pictures too.
+  Before the I-picture trellis, medium with modes within 1.1x, at most
+  two, in every picture: -0.42 points for +5.1 % cycles, against -0.26
+  for +1.9 % in I pictures alone (1.2x, three) — the P and B part about
+  0.05 % per 1 %, x264's slope. Slow, on top of every mode within 2.0x
+  in I pictures: P and B at 1.1x / two, a further -0.16 for +4.0 %
+  (0.04); at 1.2x / three, -0.08 more for +3.5 % (0.02).
+- The priced modes quantised plainly (the winner then trellised):
+  medium, I pictures at 1.5x / four, -0.35 points for +2.8 %, against
+  -0.65 for +5.0 % by the trellis; every picture at 1.1x / two, -0.33
+  for +4.5 % against -0.42 for +5.1 %. Plain first and the trellis on
+  the two best only: -0.19 points against the trellis on all, for no
+  fewer cycles.
+- Medium wider or narrower: 1.2x / three (Intra_16x16 and chroma at
+  one) -0.68 points for +2.2 % — 1.5x / four is a further -0.18 for
+  +2.1 %, 0.09 % per 1 %; Intra_16x16 / Intra_4x4 analysed within 2.0x
+  of the best type's estimate in I pictures (was 1.15x), -0.04 for
+  +1.5 %. Slow: 1.5x / four with four Intra_16x16 and chroma modes,
+  -1.00 points for +4.8 % (2.0x / nine: a further -0.22 for +3.5 %,
+  0.06 % per 1 %, kept); every mode (ratio 10), +0.15 points worse for
+  +1.5 %; the type gate at 2.0x, -0.09 for +1.2 %.
+- I-picture lambda at 0.7x / 0.8x / 1.2x (decisions and trellis), on
+  top of medium's kept configuration: -0.56 / -0.66 / -0.35 % against
+  -0.58 %, inside the corpus's noise (0.8x on the decisions alone,
+  -0.64 %); the frame offsets already code the I picture two steps
+  finer than P.
+- Veryfast: the I-picture trellis alone, -0.19 points for +1.3 %
+  (0.15 % per 1 %); with modes within 1.2x / three priced, -0.74 for
+  +6.0 % (0.12 %) — under x264's 0.2 % between veryfast and faster.
+- Counted, not built. Pruning intra types in P pictures by their
+  estimates: of park_joy's priced intra analyses (medium, QP 27), the
+  cheapest estimate's type won only 63 %, and 12 % of the winners'
+  estimates were more than 1.1x the cheapest — nothing safe to cut.
+  Implicit weighted bi-prediction: the only unequal-distance pairs are
+  list 0's second index in B pictures nothing references, and of
+  foreman's bi-predicted B partitions (medium, QP 27) 491 of 8,530 use
+  it (2.7 % of all 18,253 B partitions); `BRefs` also keeps one weighting
+  per direction, not per reference pair, which implicit weights at
+  further indices would need. RD refinement of inter vectors (x264's
+  subme 8) was not tried again: the second round's priced
+  quarter-sample neighbours of the P 16x16 winner bought -0.15 % for
+  +11 % at slow, far under the slope; nor per-partition B references,
+  whose second index exists only in list 0 of non-reference B
+  pictures.
+
 The eighth round, for the record (its frontier: 1.15x / 1.45x / 1.46x).
 
 What the eighth round did (BD-rate Y against x264 at the same preset,
