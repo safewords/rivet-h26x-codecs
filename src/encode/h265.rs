@@ -5597,7 +5597,7 @@ mod tests {
         // is short enough that the coder emits none of them.
         let emitted = |d: &InterCuDecision, qp: i32| -> f32 {
             let mut cx = Contexts::new(1, qp);
-            let mut e = CabacEncoder::estimating();
+            let mut e = crate::cabac_enc::CabacEstimator::new();
             // The unit's `split_cu_flag`, which the tree walk writes
             // ahead of every unit above the minimum coding block, at the
             // neutral neighbour context `Rate` prices it in.
