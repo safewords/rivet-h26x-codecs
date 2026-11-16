@@ -176,29 +176,30 @@ one loaded Apple M-series machine, summed over the four rate points:
 
 | `--preset` | clip | BD-rate Y | BD-rate avg | time vs x264 |
 |---|---|---:|---:|---:|
-| veryfast | foreman CIF | +2.50 % | +2.67 % | 1.34x |
-|  | mobile CIF | -9.15 % | -9.78 % | 1.46x |
-|  | akiyo CIF | -6.56 % | -5.97 % | 1.95x |
-|  | ducks_take_off 720p | -12.17 % | -13.36 % | 1.33x |
-|  | park_joy 720p | -3.76 % | -3.61 % | 1.32x |
-|  | **mean** | **-5.83 %** | **-6.01 %** | **1.34x** |
-| medium | foreman CIF | +0.62 % | +0.93 % | 1.17x |
-|  | mobile CIF | +1.97 % | +1.83 % | 1.19x |
-|  | akiyo CIF | -7.90 % | -7.63 % | 1.47x |
-|  | ducks_take_off 720p | -0.79 % | -3.32 % | 1.11x |
-|  | park_joy 720p | +3.18 % | +3.42 % | 1.08x |
-|  | **mean** | **-0.58 %** | **-0.96 %** | **1.11x** |
-| slow | foreman CIF | +0.99 % | +1.31 % | 1.02x |
-|  | mobile CIF | +1.72 % | +1.40 % | 0.83x |
-|  | akiyo CIF | -5.88 % | -5.46 % | 1.39x |
-|  | ducks_take_off 720p | +1.87 % | -1.65 % | 0.79x |
-|  | park_joy 720p | +2.42 % | +2.48 % | 0.78x |
-|  | **mean** | **+0.22 %** | **-0.38 %** | **0.80x** |
+| veryfast | foreman CIF | +0.71 % | +0.64 % | 1.31x |
+|  | mobile CIF | -9.49 % | -10.28 % | 1.45x |
+|  | akiyo CIF | -9.50 % | -9.13 % | 1.69x |
+|  | ducks_take_off 720p | -13.27 % | -14.45 % | 1.34x |
+|  | park_joy 720p | -4.00 % | -3.79 % | 1.31x |
+|  | **mean** | **-7.11 %** | **-7.40 %** | **1.34x** |
+| medium | foreman CIF | -0.02 % | +0.34 % | 1.21x |
+|  | mobile CIF | +0.77 % | +0.65 % | 1.22x |
+|  | akiyo CIF | -8.01 % | -7.71 % | 1.47x |
+|  | ducks_take_off 720p | -0.77 % | -3.28 % | 1.16x |
+|  | park_joy 720p | +3.01 % | +3.26 % | 1.11x |
+|  | **mean** | **-1.00 %** | **-1.35 %** | **1.15x** |
+| slow | foreman CIF | +0.99 % | +1.31 % | 1.00x |
+|  | mobile CIF | +1.72 % | +1.40 % | 0.82x |
+|  | akiyo CIF | -5.88 % | -5.46 % | 1.34x |
+|  | ducks_take_off 720p | +1.87 % | -1.65 % | 0.78x |
+|  | park_joy 720p | +2.42 % | +2.48 % | 0.77x |
+|  | **mean** | **+0.22 %** | **-0.38 %** | **0.79x** |
 
-(After round 11B, 499f145, 2026-11-16, rivet at --jobs 4 against the
-cached x264 times; the frontier runs below and under rounds 10A to 11B
-timed x264 again beside rivet; at equal BD-rate rivet now needs 1.03x /
-1.02x / 0.94x x264's time, slow past x264's frontier. Round 10B's table
+(After round 12A, caac4a5, 2026-11-16, rivet at --jobs 4 against the
+cached x264 times; the frontier runs below and under rounds 10A to 12A
+timed x264 again beside rivet; at equal BD-rate rivet now needs 0.96x /
+0.97x / 0.92x x264's time, all three past x264's frontier. Round 11B's
+table read -5.83 / -0.58 / +0.22 % at 1.34x / 1.11x / 0.80x; round 10B's
 read -5.83 / +0.36 / +1.44 % at 1.35x / 1.07x / 0.76x. The ninth round's table read
 1.44x / 1.19x / 0.82x at -5.83 / +0.33 / +1.44 %; its notes follow. Cycles at
 QP 27 over the five clips, minimum of three runs, `/usr/bin/time -l`:
@@ -1352,9 +1353,9 @@ reference choice (rivet binds the macroblock to one per list) and the
 implicit weighting between unequal distances are what is left of that.
 Intra modes in I pictures are chosen on real cost at medium and slow
 since round 11A; RD refinement of vectors (x264's subme 8) is still
-missing. Measured against x264's whole ladder after round 11B,
-rivet needs 1.03x / 1.02x / 0.94x the time x264 needs for the same
-BD-rate (1.04x / 1.15x / 1.14x after round 10B, 1.12x / 1.25x / 1.23x after the ninth round, 1.16x / 1.44x /
+missing. Measured against x264's whole ladder after round 12A,
+rivet needs 0.96x / 0.97x / 0.92x the time x264 needs for the same
+BD-rate — every preset past x264's frontier (1.03x / 1.02x / 0.94x after round 11B, 1.04x / 1.15x / 1.14x after round 10B, 1.12x / 1.25x / 1.23x after the ninth round, 1.16x / 1.44x /
 1.45x before it, 1.30x / 1.54x / 1.55x before the eighth); veryfast is 5.8 % ahead of x264 veryfast. Rivet runs 1.9x /
 1.6x / 1.2x x264's instructions at a higher IPC (1.5x / 1.2x / 0.9x its
 cycles at QP 27). Veryfast's cuts still cost about 0.3 % per
@@ -2022,9 +2023,9 @@ compares (280 identical, 0 moved) — so this is speed and nothing else.
 encode-side tables scalar for a measurement; `H26X_MAX_SIMD` caps the
 ladder as it does for the decoders. Neither encoder is threaded yet:
 `--threads` is accepted and unused. Against x264 at matched tiers see
-"H.264 compression against x264" above: 0.80x to 1.34x x264's
-single-thread time at the same-named preset, 0.94x to 1.03x the time x264
-needs for the same BD-rate (round 11B; slow is past x264's frontier), the gap in rivet's trellis,
+"H.264 compression against x264" above: 0.79x to 1.34x x264's
+single-thread time at the same-named preset, 0.92x to 0.97x the time x264
+needs for the same BD-rate (round 12A; every preset past x264's frontier), the gap in rivet's trellis,
 candidate pricing, residual coding and sub-sample SATD rather than in how
 much it searches.
 
