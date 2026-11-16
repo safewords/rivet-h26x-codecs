@@ -73,6 +73,11 @@ impl Block {
     }
 }
 
+/// Below this exact level (in quantiser steps) every coefficient of a
+/// block is zero without a trellis: where the plain inter quantiser's
+/// rounding offset of 1/6 leaves a level of zero.
+const DEAD_ZONE: f32 = 5.0 / 6.0;
+
 /// `Qstep` at `qp` (8.5's step table, doubling every six). The doubling
 /// is the power of two built from its exponent bits — exactly what `exp2`
 /// returns at an integer, without the library call every block paid.
@@ -225,7 +230,8 @@ impl Trellis {
     /// Quantise `coeffs` (raster, `n` = 16 or 64) into `levels` by the
     /// trellis: `mf` and `qbits` the quantiser's, `qp` the block's own
     /// quantiser, primed (for its step). AC blocks leave position 0 at zero
-    /// (its DC is coded elsewhere). Returns the nonzero count.
+    /// (its DC is coded elsewhere). `levels` must arrive zeroed; only the
+    /// nonzero positions are written. Returns the nonzero count.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn quant(
         &self,
@@ -260,9 +266,10 @@ impl Trellis {
             Block::Luma4 => (&ZIGZAG4X4[..], 0, 16),
             _ => (&ZIGZAG4X4[..], 1, 15),
         };
-        for l in levels.iter_mut().take(N) {
-            *l = 0;
-        }
+        // `levels` arrives zeroed (every caller's is a fresh array): a
+        // second zeroing here was a call to `bzero` per 8x8 block, most of
+        // which then quantise to nothing.
+        debug_assert!(levels[..N].iter().all(|&l| l == 0), "levels arrive zeroed");
         // Exact levels and their rounded magnitudes, in scan order.
         let scale = 1.0 / (1u64 << qbits) as f32;
         // In raster order first, where the arithmetic is one vector
@@ -272,15 +279,21 @@ impl Trellis {
         let (coeffs, mf) = (&coeffs[..N], &mf[..N]);
         let xr: [f32; N] =
             std::array::from_fn(|i| (coeffs[i].unsigned_abs() as f32) * mf[i] as f32 * scale);
-        // A block every coefficient of which rounds to zero codes nothing,
-        // and is 44 % of the blocks: found from the largest exact level
-        // before the scan is gathered. The magnitudes are non-negative, so
-        // their bit patterns order as they do (an integer maximum, one
-        // vector reduction), and rounding is monotonic, so the largest
-        // rounds to zero exactly when every one does. An AC block's raster
-        // position 0 is outside its scan.
+        // A block the plain inter quantiser (a dead zone rounding at 1/6)
+        // leaves all zero is not trellised: it codes nothing. Of such blocks
+        // the trellis itself kept a level in 2 % (park_joy, veryfast and
+        // medium), and leaving them zero measured better at medium and
+        // slow and next to no worse at veryfast (BD-rate Y against x264:
+        // +0.39 -> +0.23 %, +1.38 -> +1.25 %, -2.80 -> -2.66 %) for 3 %
+        // fewer instructions. Most of
+        // the blocks are below a half (44 % of the calls) and cost nothing
+        // either way; the rest (a fifth of the calls) were a whole trellis
+        // pass each. Found from the largest exact level before the scan is
+        // gathered: the magnitudes are non-negative, so their bit patterns
+        // order as they do (an integer maximum, one vector reduction). An
+        // AC block's raster position 0 is outside its scan.
         let mx = xr[start..].iter().map(|v| v.to_bits()).max().unwrap_or(0);
-        if (f32::from_bits(mx) + 0.5) as u32 == 0 {
+        if f32::from_bits(mx) < DEAD_ZONE {
             return 0;
         }
         // Built element by element (no zeroing pass first: for an 8x8 that
