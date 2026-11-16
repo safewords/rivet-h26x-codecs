@@ -440,14 +440,26 @@ impl<S: Sample> Comp<'_, S> {
             let r0 = self.rec.offset(self.x0 as isize, y as isize);
             let rec = &self.rec.data[r0..r0 + self.w];
             let src = &self.src[y * self.src_stride + self.x0..][..self.w];
+            // Count and sum per band in the integers a row cannot
+            // overflow, and only a sample within reach of a rail visits
+            // the rail buckets: the same statistics as `Cat::add` makes.
+            let mut cnt = [0i32; 32];
+            let mut sum = [0i32; 32];
+            let lo = self.reach as i32;
+            let hi = self.max - self.reach as i32;
             for (r, s) in rec.iter().zip(src) {
                 let v = r.to_i32();
-                cats[((v >> self.shift) & 31) as usize].add(
-                    v,
-                    i64::from(s.to_i32() - v),
-                    self.max,
-                    self.reach,
-                );
+                let b = ((v >> self.shift) & 31) as usize;
+                let e = s.to_i32() - v;
+                cnt[b] += 1;
+                sum[b] += e;
+                if v < lo || v > hi {
+                    cats[b].add_rail(v, i64::from(e), self.max, self.reach);
+                }
+            }
+            for (c, (n, e)) in cats.iter_mut().zip(cnt.iter().zip(&sum)) {
+                c.all.count += i64::from(*n);
+                c.all.sum += i64::from(*e);
             }
         }
     }
