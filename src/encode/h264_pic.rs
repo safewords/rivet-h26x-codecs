@@ -842,6 +842,7 @@ pub(crate) fn code_intra_picture<S: Sample>(
                     &nb,
                     chain.prev,
                     trellis.as_ref(),
+                    None,
                     f64::INFINITY,
                     &mut |d: &MbDecision| emit(mb_x, mb_y, d, true),
                 );

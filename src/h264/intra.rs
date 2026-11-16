@@ -689,9 +689,11 @@ pub fn predict_chroma<S: Sample>(
     }
 }
 
-/// Vertical / horizontal / DC / plane for a square block of `size` 8 or 16
-/// (the luma 16x16 and chroma 8x8 predictors share this shape). Modes use
-/// the *luma* numbering (0 V, 1 H, 2 DC, 3 plane); chroma passes 3 only.
+/// Vertical / horizontal / DC / plane for the 16x16 luma block (8.3.3).
+/// Modes use the luma numbering (0 V, 1 H, 2 DC, 3 plane). Each row is
+/// written as one fixed-width slice, so a row is a few vector stores
+/// rather than a call into `memset` / `memmove`, and the plane rows are
+/// one vector expression.
 #[allow(clippy::too_many_arguments)]
 fn predict_planar_block<S: Sample>(
     p: &mut PaddedPlane<S>,
@@ -700,13 +702,20 @@ fn predict_planar_block<S: Sample>(
     size: usize,
     mode: u8,
     av: IntraAvail,
-    bmul: i32,
-    cmul: i32,
+    _bmul: i32,
+    _cmul: i32,
     _n: usize,
     what: &str,
     bit_depth: u32,
 ) -> Result<()> {
+    const N: usize = 16;
+    debug_assert_eq!(size, N);
     let max = (1i32 << bit_depth) - 1;
+    // Every row the block writes, bounds-checked once here.
+    let rows = |data: &mut [S]| -> usize {
+        assert!(data.len() >= off + (N - 1) * stride + N);
+        off
+    };
     match mode {
         0 => {
             if !av.top {
@@ -714,10 +723,15 @@ fn predict_planar_block<S: Sample>(
                     "{what} vertical prediction without top samples"
                 )));
             }
-            let mut top = [S::default(); 16];
-            top[..size].copy_from_slice(&p.data[off - stride..off - stride + size]);
-            for y in 0..size {
-                p.data[off + y * stride..off + y * stride + size].copy_from_slice(&top[..size]);
+            let top: [S; N] = p.data[off - stride..off - stride + N]
+                .try_into()
+                .expect("sixteen samples");
+            let o = rows(&mut p.data);
+            for y in 0..N {
+                let r: &mut [S; N] = (&mut p.data[o + y * stride..o + y * stride + N])
+                    .try_into()
+                    .expect("sixteen samples");
+                *r = top;
             }
         }
         1 => {
@@ -726,33 +740,41 @@ fn predict_planar_block<S: Sample>(
                     "{what} horizontal prediction without left samples"
                 )));
             }
-            for y in 0..size {
-                let v = p.data[off + y * stride - 1];
-                p.data[off + y * stride..off + y * stride + size].fill(v);
+            let o = rows(&mut p.data);
+            for y in 0..N {
+                let v = p.data[o + y * stride - 1];
+                let r: &mut [S; N] = (&mut p.data[o + y * stride..o + y * stride + N])
+                    .try_into()
+                    .expect("sixteen samples");
+                *r = [v; N];
             }
         }
         2 => {
             let mut st = 0i32;
             let mut sl = 0i32;
             if av.top {
-                for x in 0..size {
+                for x in 0..N {
                     st += p.data[off - stride + x].to_i32();
                 }
             }
             if av.left {
-                for y in 0..size {
+                for y in 0..N {
                     sl += p.data[off + y * stride - 1].to_i32();
                 }
             }
-            let shift = if size == 16 { 4 } else { 3 };
             let v = match (av.top, av.left) {
-                (true, true) => (st + sl + size as i32) >> (shift + 1),
-                (true, false) => (st + (size as i32 >> 1)) >> shift,
-                (false, true) => (sl + (size as i32 >> 1)) >> shift,
+                (true, true) => (st + sl + 16) >> 5,
+                (true, false) => (st + 8) >> 4,
+                (false, true) => (sl + 8) >> 4,
                 (false, false) => 1 << (bit_depth - 1),
             };
-            for y in 0..size {
-                p.data[off + y * stride..off + y * stride + size].fill(S::from_i32(v));
+            let v = S::from_i32(v);
+            let o = rows(&mut p.data);
+            for y in 0..N {
+                let r: &mut [S; N] = (&mut p.data[o + y * stride..o + y * stride + N])
+                    .try_into()
+                    .expect("sixteen samples");
+                *r = [v; N];
             }
         }
         3 => {
@@ -761,9 +783,6 @@ fn predict_planar_block<S: Sample>(
                     "{what} plane prediction without neighbours"
                 )));
             }
-            let half = (size / 2) as i32;
-            let mut h = 0i32;
-            let mut v = 0i32;
             let at_top = |x: i32| -> i32 {
                 if x < 0 {
                     p.data[off - stride - 1].to_i32()
@@ -778,21 +797,25 @@ fn predict_planar_block<S: Sample>(
                     p.data[off + y as usize * stride - 1].to_i32()
                 }
             };
-            for i in 0..half {
-                h += (i + 1) * (at_top(half + i) - at_top(half - 2 - i));
-                v += (i + 1) * (at_left(half + i) - at_left(half - 2 - i));
+            let mut h = 0i32;
+            let mut v = 0i32;
+            for i in 0..8 {
+                h += (i + 1) * (at_top(8 + i) - at_top(6 - i));
+                v += (i + 1) * (at_left(8 + i) - at_left(6 - i));
             }
-            let (b, c) = if size == 16 {
-                ((5 * h + 32) >> 6, (5 * v + 32) >> 6)
-            } else {
-                ((34 * h + 32) >> 6, (34 * v + 32) >> 6)
-            };
-            let _ = (bmul, cmul);
-            let a = 16 * (at_left(size as i32 - 1) + at_top(size as i32 - 1));
-            for y in 0..size as i32 {
-                for x in 0..size as i32 {
-                    let val = (a + b * (x - half + 1) + c * (y - half + 1) + 16) >> 5;
-                    p.data[off + y as usize * stride + x as usize] = S::from_i32(val.clamp(0, max));
+            let (b, c) = ((5 * h + 32) >> 6, (5 * v + 32) >> 6);
+            let a = 16 * (at_left(15) + at_top(15));
+            // Row y is `(a + c * (y - 7) + 16 + b * (x - 7)) >> 5`, the
+            // sum in that order's value (integer addition associates).
+            let bx: [i32; N] = std::array::from_fn(|x| b * (x as i32 - 7));
+            let o = rows(&mut p.data);
+            for y in 0..N {
+                let base = a + c * (y as i32 - 7) + 16;
+                let r: &mut [S; N] = (&mut p.data[o + y * stride..o + y * stride + N])
+                    .try_into()
+                    .expect("sixteen samples");
+                for x in 0..N {
+                    r[x] = S::from_i32(((base + bx[x]) >> 5).clamp(0, max));
                 }
             }
         }

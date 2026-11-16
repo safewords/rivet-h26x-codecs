@@ -768,7 +768,9 @@ fn best_chroma_mode<S: Sample>(
 
 /// The cheapest intra estimate this macroblock has — Intra_16x16's —
 /// predicting into `rec`. What the inter decisions compare against before
-/// paying for a full intra analysis.
+/// paying for a full intra analysis; `(estimate, mode)`, which
+/// [`intra_mb`] takes back rather than finding the same mode again (it
+/// reads only the neighbours, which nothing between the two calls moves).
 pub(crate) fn intra_estimate<S: Sample>(
     ctx: &IntraCtx<S>,
     rec: &mut [Recon<S>],
@@ -776,7 +778,7 @@ pub(crate) fn intra_estimate<S: Sample>(
     mb_y: usize,
     src: &SrcMb<S>,
     mb: MbAvail,
-) -> f32 {
+) -> (f32, u8) {
     let (px, py) = (mb_x * 16, mb_y * 16);
     best_i16(
         ctx,
@@ -788,7 +790,6 @@ pub(crate) fn intra_estimate<S: Sample>(
         mb,
         lambda_satd(ctx.qp),
     )
-    .0
 }
 
 /// Decide and code one macroblock as intra: chroma mode by SATD, the
@@ -808,6 +809,7 @@ pub(crate) fn intra_mb<S: Sample>(
     nb: &Nb,
     qp_pred: i32,
     trellis: Option<&Trellis>,
+    i16: Option<(f32, u8)>,
     bound: f64,
     rate: &mut dyn FnMut(&MbDecision) -> f64,
 ) -> (MbDecision, [u8; 16], f64) {
@@ -855,7 +857,8 @@ pub(crate) fn intra_mb<S: Sample>(
         );
     }
     let sy = &src.y[py * src.ys + px..];
-    let (e16, m16) = best_i16(ctx, &mut rec[0], px, py, sy, src.ys, nb.avail, lam1);
+    let (e16, m16) =
+        i16.unwrap_or_else(|| best_i16(ctx, &mut rec[0], px, py, sy, src.ys, nb.avail, lam1));
     // A candidate the caller compares against `bound` (with the chroma
     // error joined) and whose luma error alone already reaches it, or the
     // best one here, cannot win: rate is never negative and wins are
@@ -1368,7 +1371,8 @@ pub(crate) fn p_mb<S: Sample>(
         .fold(f32::MAX, f32::min);
 
     // Intra: estimated cheaply first, analysed only when it might win.
-    let i_est = intra_estimate(ctx, rec, mb_x, mb_y, src, nb.avail);
+    let i16 = intra_estimate(ctx, rec, mb_x, mb_y, src, nb.avail);
+    let i_est = i16.0;
 
     if !cfg.rd {
         // Decided on the estimates; only the winner is coded.
@@ -1389,6 +1393,7 @@ pub(crate) fn p_mb<S: Sample>(
                 nb,
                 qp_pred,
                 None,
+                Some(i16),
                 f64::INFINITY,
                 &mut |_: &MbDecision| 0.0,
             );
@@ -1588,6 +1593,7 @@ pub(crate) fn p_mb<S: Sample>(
             nb,
             qp_pred,
             None,
+            Some(i16),
             best_j,
             &mut |d: &MbDecision| rate(PMb::Intra(d)),
         );
@@ -2266,7 +2272,8 @@ pub(crate) fn b_mb<S: Sample>(
         .flatten()
         .map(|c| c.est)
         .fold(f32::MAX, f32::min);
-    let i_est = intra_estimate(ctx, rec, mb_x, mb_y, src, nb.avail);
+    let i16 = intra_estimate(ctx, rec, mb_x, mb_y, src, nb.avail);
+    let i_est = i16.0;
 
     if !cfg.rd {
         let best = *shapes
@@ -2285,6 +2292,7 @@ pub(crate) fn b_mb<S: Sample>(
                 nb,
                 qp_pred,
                 None,
+                Some(i16),
                 f64::INFINITY,
                 &mut |_: &MbDecision| 0.0,
             );
@@ -2445,6 +2453,7 @@ pub(crate) fn b_mb<S: Sample>(
             nb,
             qp_pred,
             None,
+            Some(i16),
             best_j,
             &mut |d: &MbDecision| rate(BMb::Intra(d)),
         );
