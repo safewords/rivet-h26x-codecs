@@ -125,7 +125,7 @@ the B pyramid and the lookahead; slow keeps five references):
   (veryfast: small diamond) descent on SAD plus
   lambda times the vector's rate, then half- and quarter-sample refinement
   on SATD plus rate, each ring's points scored four at a time
-  (`satd_avg_x4`). P pictures search up to 3 (veryfast 2, slow 5) references, B pictures nothing
+  (`satd_avg_x4`). P pictures search up to 4 (veryfast 2, slow 5) references, B pictures nothing
   references two in list 0 (medium and slow), and a
   P partition below 16x16 picks its own among those whose 16x16 cost came
   within 1.25x (slow 1.5x) of the best (mixed references). A B pair is
@@ -133,11 +133,11 @@ the B pyramid and the lookahead; slow keeps five references):
   other held, scored as the average they make, the held list's
   prediction made once a ring (16x16: one round in veryfast, two
   otherwise, and only from within 1.05x of the better list; slow refines
-  its partitions' pairs too, from within 1.1x), and
+  and medium its partitions' pairs too, from within 1.1x), and
   list 1's search also starts from list 0's vector mirrored.
 - **Decision**: shapes, B directions and intra modes are estimated at SATD
   plus rate. A P macroblock whose 16x16 estimate already trails
-  Intra_16x16's (medium 1.0x, slow 1.1x) searches no partitions, and one
+  Intra_16x16's (medium and slow 1.1x) searches no partitions, and one
   whose best inter estimate trails it by 1.1x (slow 1.2x) codes no inter
   candidate (medium also stops searching references at 1.2x); then skip, the best one to three inter shapes at both transform
   sizes and the best intra type are then coded and compared on
@@ -145,11 +145,12 @@ the B pyramid and the lookahead; slow keeps five references):
   its live context states (`CabacEncoder::estimating`) — no table of what
   syntax "usually" costs (`CabacEstimator`, the same writers compiled for
   pricing). Early skip when the skip prediction quantises to nothing and
-  its error is small. Veryfast (since the seventh round) prices only I
+  its error is small (veryfast also, without quantising, when the error
+  is under 0.02 squared steps a sample). Veryfast (since the seventh round) prices only I
   pictures: a P or B macroblock is decided on the estimates and only the
   winner is coded, its transform size from the residual's 4x4 and 8x8
   Hadamard SATDs, with skip priced against it where skip's estimate is no
-  worse, intra analysed within 1.2x of the best inter estimate, and
+  worse, intra analysed within 1.5x of the best inter estimate, and
   Intra_4x4 analysed in I pictures only.
 - **Quantisation**: the chosen macroblock is re-quantised by a trellis over
   each block's level choices, priced from the live contexts
@@ -732,6 +733,121 @@ Tried and dropped (byte-identical unless said otherwise):
   The SATD kernels are at round 10B's floor: the four-point Hadamard's
   last stage is already folded into a maximum, and transposes merged
   with the butterflies come to the same count of vector operations.
+
+#### Round 12B: veryfast and medium moved toward x264's frontier
+
+(2026-11-16. The twelfth round was split in two; this part had the
+compression decisions at veryfast and medium, the other speed that
+changes no stream. Slow is byte-identical to round 11B's.)
+
+Every earlier round judged a trade by its rate against x264's slope
+where the preset sits (0.2 % BD-rate per 1 % of time between x264
+veryfast and faster, 0.05 % between medium and slow) and took only
+cuts. This round measured the other direction too: tools that cost time
+but buy BD-rate faster than the slope also move a preset toward the
+frontier, and since rounds 9 to 11 made the search kernels cheaper, some
+that sat at the slope in the eighth round no longer do. BD-rate Y
+against x264 at the same preset (parity script); cycles and
+instructions at QP 27 over the five clips, minimum of three runs,
+interleaved in one batch, each change on its own against round 11B's
+tree (f4623a3); the slope is the BD-rate bought per 1 % of cycles:
+
+| change | BD-rate Y | cycles (instructions) | slope |
+|---|---:|---:|---:|
+| veryfast: quarter samples refined on the eight-point square, not the diamond (`MeCfg::qpel_diamond`) | -5.83 → -6.62 % | +2.4 % (+3.0 %) | 0.33 |
+| veryfast: intra analysed within 1.5x of the best inter estimate (was 1.2x) | → -6.08 % | +0.8 % (+1.3 %) | 0.33 |
+| veryfast: lookahead propagation over 15 pictures (`--tree`, was 10) | → -6.13 % | +0.4 % (+0.35 %) | 0.75 |
+| veryfast: a skip prediction whose luma error is under 0.02 squared steps a sample (chroma half that) taken without quantising its residual, P and B (`skip_loose`) | → -5.79 % | -1.2 % (-1.1 %) | 0.03 sold |
+| **veryfast, all four** | **-5.83 → -7.11 %** | **+4.3 % (+4.7 %)** | **0.30** |
+| medium: four P references (was three) | -0.58 → -0.77 % | +2.1 % (+2.2 %) | 0.09 |
+| medium: partitions searched while the 16x16 estimate is under 1.1x Intra_16x16's (`part_lead`, was 1.0x) | → -0.70 % | +1.4 % (+1.6 %) | 0.09 |
+| medium: B partition pairs refined from within 1.1x of the better list (`bi_part_ratio`, was never) | → -0.73 % | +1.9 % (+2.5 %) | 0.08 |
+| **medium, all three** | **-0.58 → -1.00 %** | **+5.6 % (+6.2 %)** | **0.075** |
+
+Per clip, veryfast: foreman +2.50 → +0.71 %, mobile -9.15 → -9.49 %,
+akiyo -6.56 → -9.50 %, ducks_take_off -12.17 → -13.27 %, park_joy -3.76
+→ -4.00 %; medium: +0.62 → -0.02, +1.97 → +0.77, -7.90 → -8.01, -0.79 →
+-0.77, +3.18 → +3.01 %. The lookahead's gain is akiyo's (a still scene
+whose I picture the longer propagation codes finer; on 30-frame clips
+fifteen pictures reach half the clip), and the other clips move inside
+the corpus's noise with it. The loose skip sells time at a sixth of the
+slope; it was counted first (QP 27, five clips): of the B macroblocks
+whose skip prediction left a luma error between 0.01 and 0.02 squared
+steps a sample, 97 % ended as B_Skip (by the early test or after the analysis), between
+0.02 and 0.05 83 % (0.03 measured +0.43 % for -1.6 %: past the slope),
+and of the P ones 93 % and 68 %.
+
+On x264's ladder (`frontier.py`, x264 timed again in the same shuffled
+batch, four at a time, minimum of three runs; BD-rate Y against x264
+medium):
+
+| rivet | BD-rate Y | CPU | x264's BD-rate at this CPU | x264's CPU at this BD-rate | rivet's time at equal BD-rate |
+|---|---:|---:|---:|---:|---:|
+| veryfast, round 11B (f4623a3) | +13.09 % | 0.500x | +12.38 % | 0.484x | 1.03x |
+| veryfast, now | +11.58 % | 0.518x | +11.64 % | 0.519x | **1.00x** (0.997) |
+| medium, round 11B | -0.58 % | 1.140x | -0.64 % | 1.127x | 1.01x |
+| medium, now | -1.00 % | 1.205x | -0.91 % | 1.229x | **0.98x** |
+| slow, round 11B | -3.38 % | 1.875x | -3.06 % | 2.004x | 0.94x |
+| slow, now (byte-identical) | -3.38 % | 1.880x | -3.07 % | 2.004x | **0.94x** |
+
+(Round 11B's own run of its tree read 1.03x / 1.02x / 0.94x.) All three
+presets are now on or past x264's frontier: veryfast on it, 0.06 points
+better than x264 at its time, medium 0.10 points better, slow 0.31.
+
+H.265 is untouched: 18 streams (three CIF clips, three presets, QP 22
+and 37) are byte-identical before and after (the CLI's veryfast
+lookahead length is H.264's; `h265_tune::apply_preset` sets its own),
+and H.265 medium parity is still -14.45 %. The decoder is untouched:
+56
+streams (the 53 regenerated fixtures and `tests/data`) decode to the
+same MD5s with round 11B's decoder and this one.
+
+Tried and dropped (BD-rate Y against x264 at the same preset, cycles
+against round 11B's tree unless said otherwise; x264's slope 0.2 % per
+1 % at veryfast, 0.05 % at medium):
+
+- Veryfast cuts, all past the slope: skip no longer priced against the
+  coded winner (`skip_rd` 0), +0.78 % for -1.4 % (0.56); B pair
+  refinement off, +1.06 %; the loose skip at 0.03 in B pictures, +0.43 %
+  for -1.6 %; a further reference searched only within 1.3x
+  (`refine_ratio`), +0.12 % (not timed); search range 8, B
+  pair gate at 1.0 / 1.02, B intra within 0.5 to 0.9x: no time
+  (B intra is analysed in too few macroblocks to matter) and BD-rate
+  within the noise. The early skip's error ceiling (`skip_ssd` 0.1) is
+  not what binds: 0.15 to 0.5 changes no stream at QP 27 — the test that
+  the residual quantises to nothing is. Lookahead over 5 or 7 pictures,
+  +0.56 %.
+- Veryfast additions at or under the slope: two quarter-sample rounds
+  on the square, a further -0.33 % for +3.2 % (0.10); two half-sample
+  rounds, -0.27 % for +2.3 % (0.12); three P references, -0.67 % for
+  +3.6 % (0.19); a second list-0 reference in non-reference B pictures,
+  -0.29 % for +4.2 %; two B pair rounds, -0.27 % for +1.3 % (0.22, and
+  -0.28 % for +1.3 % on top of the kept set); the B pair on the square,
+  -0.20 % for +1.3 % (0.16); the hexagon descent, -0.22 % for +1.5 %
+  (0.15); Intra_4x4 in inter pictures, +0.55 % worse; lookahead over 20
+  pictures, a further -0.08 % for +0.4 %.
+- Medium cuts, each within the noise and under 1 % of cycles: the third
+  reference stopped at 1.1x Intra_16x16's estimate, partitions at 0.95x,
+  inter candidates at 1.05x, mixed references within 1.2x, B pair gate
+  at 1.02, B intra within 0.8x, search range 12. Partitions skipped
+  where the 16x16 estimate is small (under half a quantiser step a
+  sample of SATD), counted first: of the P macroblocks below that, 9 %
+  still took a partition shape, of the B ones 23 %; built, +0.53 % (P)
+  and +0.42 % (B) for -0.7 / -1.8 % (0.5 to 0.7 per 1 %). The same
+  count in every band of the 16x16 cost: partitions won 9 to 65 % (P),
+  23 to 95 % (B) — there is no band they can be dropped from.
+- Medium additions at or under the slope: Intra_4x4 / Intra_8x8 modes
+  priced per block in P and B pictures only where the second mode's
+  estimate is within 1.02x / 1.05x / 1.1x of the best (round 11A's
+  narrower trigger), -0.02 / -0.11 / -0.19 % for +1.7 / +3.0 / +4.2 %
+  (0.01 to 0.045); inter shapes coded within 1.1x, -0.22 % for +7.1 %;
+  three shapes, -0.39 % for +12.5 %; intra within 2.0x, -0.16 % for
+  +2.9 % (0.055); the B partition gate at 1.02, -0.23 % for +7.7 %; two
+  quarter-sample rounds for partitions, -0.09 % for +2.1 %.
+- Byte-identical: an intra candidate decided on its estimates (veryfast
+  P and B) that loses to the caller's bound is not re-quantised by the
+  trellis — 845 of park_joy's analyses, -0.2 % instructions, no
+  measurable cycles.
 
 The eighth round, for the record (its frontier: 1.15x / 1.45x / 1.46x).
 
