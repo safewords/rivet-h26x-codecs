@@ -110,6 +110,26 @@ pub(crate) struct AnalysisCfg {
     /// candidates per 8x8 quadrant, unsearched, comes within this factor
     /// of the best 16x16 or direct estimate (0: always searched).
     pub(crate) b_part_gate: f32,
+    /// A P macroblock whose best 16x16 estimate is this factor of
+    /// Intra_16x16's estimate or more searches no partitions below 16x16
+    /// (0: always does). Where intra leads, inter rarely wins at all: of
+    /// park_joy's P macroblocks (medium, QP 27) whose 16x16 estimate was
+    /// 1.2x Intra_16x16's or more, 11,500 went intra and 20 to a
+    /// partition shape.
+    pub(crate) part_lead: f32,
+    /// ... and one whose best inter estimate is this factor of it or more
+    /// codes no inter candidate for the comparison: intra or skip wins
+    /// (0: never). From 1.2x up no inter candidate won in the measurement,
+    /// and 3 of 1,940 between 1.1x and 1.2x.
+    pub(crate) rd_lead: f32,
+    /// ... and one whose best 16x16 estimate so far is this factor of it
+    /// or more searches no further reference (0: every reference).
+    pub(crate) ref_lead: f32,
+    /// A B macroblock's 16x16 pair is refined only when it starts within
+    /// this factor of the better single list's cost (0: always). A pair
+    /// starting 1.1x behind never ended as the macroblock's 16x16 choice
+    /// in the measurement (park_joy, ducks_take_off, foreman, mobile).
+    pub(crate) bi_ratio: f32,
 }
 
 impl AnalysisCfg {
@@ -121,7 +141,12 @@ impl AnalysisCfg {
     /// BD-rate for 8 % fewer cycles) and B partitions are searched only
     /// within 0.98x (was 1.02: with the shape ratio, +0.41 % for 13 %).
     /// B pictures analyse intra only within 1.0x (+0.08 % for 2.4 % fewer
-    /// instructions).
+    /// instructions). Since the ninth round a P macroblock whose 16x16
+    /// estimate is no better than Intra_16x16's searches no partitions and
+    /// no third reference past 1.2x, and one whose best inter estimate is
+    /// 1.1x behind it codes no inter candidate (inter almost never wins
+    /// there); a B pair is refined only from within 1.05x of the better
+    /// list (together +0.10 % BD-rate for 13 % fewer cycles).
     pub(crate) const MEDIUM: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -158,6 +183,10 @@ impl AnalysisCfg {
         bi_diamond: false,
         bi_part_ratio: 0.0,
         b_part_gate: 0.98,
+        part_lead: 1.0,
+        rd_lead: 1.1,
+        ref_lead: 1.2,
+        bi_ratio: 1.05,
     };
 
     /// The fastest tier: a diamond search, one refinement round each, and
@@ -176,7 +205,8 @@ impl AnalysisCfg {
     /// back in: two P references (-1.3 % for +3 % instructions), the
     /// trellis in B pictures nothing references (-1.2 % for +2.3 %) and
     /// intra analysed within 1.2x of the best inter estimate (-0.7 % for
-    /// +1 %).
+    /// +1 %). A B pair is refined only from within 1.05x of the better
+    /// list (ninth round: +0.01 % for 0.5 % fewer cycles).
     pub(crate) const VERYFAST: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 16,
@@ -213,6 +243,10 @@ impl AnalysisCfg {
         bi_diamond: true,
         bi_part_ratio: 0.0,
         b_part_gate: 0.0,
+        part_lead: 0.0,
+        rd_lead: 0.0,
+        ref_lead: 0.0,
+        bi_ratio: 1.05,
     };
 
     /// The most thorough tier: more references, refinement and candidates
@@ -220,6 +254,11 @@ impl AnalysisCfg {
     /// 17 % of its instructions; without it, and with intra analysed up to
     /// 2.0x the best inter estimate, it is +0.05 % for 12 % fewer. B
     /// pictures analyse intra within 1.25x: -0.02 % for 3.4 % fewer.)
+    /// The ninth round: medium's intra-lead pruning at 1.1x / 1.2x and its
+    /// pair gate, more inter shapes coded only within 1.1x of the best
+    /// estimate (was 1.25x), partition pairs refined only from within
+    /// 1.1x (was 1.2x) and one quarter-sample round for partitions (was
+    /// two): +0.19 % BD-rate for 20 % fewer cycles.
     pub(crate) const SLOW: AnalysisCfg = AnalysisCfg {
         me: MeCfg {
             range: 24,
@@ -232,7 +271,7 @@ impl AnalysisCfg {
         me_sub: MeCfg {
             range: 8,
             hpel_iters: 2,
-            qpel_iters: 2,
+            qpel_iters: 1,
             umh: false,
             qpel_diamond: false,
             dia: false,
@@ -241,7 +280,7 @@ impl AnalysisCfg {
         skip_ssd: 0.01,
         i4x4: true,
         intra_ratio: 2.0,
-        rd_ratio: 1.25,
+        rd_ratio: 1.1,
         rd_max: 3,
         trellis: true,
         trellis_rd: true,
@@ -254,8 +293,12 @@ impl AnalysisCfg {
         b_intra_ratio: 1.25,
         skip_rd: 0.0,
         bi_diamond: false,
-        bi_part_ratio: 1.2,
+        bi_part_ratio: 1.1,
         b_part_gate: 1.02,
+        part_lead: 1.1,
+        rd_lead: 1.2,
+        ref_lead: 0.0,
+        bi_ratio: 1.05,
     };
 
     /// The tier for a preset.
@@ -1209,6 +1252,23 @@ impl PCand {
     }
 }
 
+/// The indices of the candidates `shapes` holds, cheapest estimate
+/// first (ties in slot order), and how many: the order the comparison
+/// codes them in, without a vector allocated per macroblock.
+fn ranked<T>(shapes: &[Option<T>; 4], est: impl Fn(&T) -> f32) -> ([usize; 4], usize) {
+    let mut idx = [0usize; 4];
+    let mut n = 0;
+    for (i, s) in shapes.iter().enumerate() {
+        if s.is_some() {
+            idx[n] = i;
+            n += 1;
+        }
+    }
+    let key = |i: usize| est(shapes[i].as_ref().expect("filled"));
+    idx[..n].sort_by(|&a, &b| key(a).total_cmp(&key(b)));
+    (idx, n)
+}
+
 #[inline]
 fn sub(a: Mv, b: Mv) -> Mv {
     Mv::new(a.x - b.x, a.y - b.y)
@@ -1375,6 +1435,7 @@ pub(crate) fn p_mb<S: Sample>(
                 bounds: search_bounds(pref.search, (px + x) as i32, (py + y) as i32, w, h, vr),
                 satd_avg: ctx.enc.satd_avg,
                 sad_x4: ctx.enc.sad_x4,
+                satd_x4: ctx.enc.satd_avg_x4,
             };
             s.run(cands, mc)
         };
@@ -1393,7 +1454,15 @@ pub(crate) fn p_mb<S: Sample>(
     // Each reference's own 16x16 vector and cost, for the partitions.
     let mut mv16r = [Mv::ZERO; 16];
     let mut c16r = [u32::MAX; 16];
+    // Intra: estimated cheaply first, analysed only when it might win. (It
+    // predicts into the macroblock's samples, which nothing reads before
+    // the candidates are predicted again below.)
+    let i16 = intra_estimate(ctx, rec, mb_x, mb_y, src, nb.avail);
+    let i_est = i16.0;
     for r in 0..nref {
+        if r > 0 && cfg.ref_lead > 0.0 && c16 as f32 + lam1 >= cfg.ref_lead * i_est {
+            break;
+        }
         let p = if r == 0 {
             pmv
         } else {
@@ -1423,7 +1492,7 @@ pub(crate) fn p_mb<S: Sample>(
     };
     c16v.fill((0, 0, 16, 16), mv16, sub(mv16, pmv16));
     let mut shapes: [Option<PCand>; 4] = [Some(c16v), None, None, None];
-    if ctx.subparts {
+    if ctx.subparts && !(cfg.part_lead > 0.0 && c16v.est >= cfg.part_lead * i_est) {
         // Each partition chooses its own reference among those whose 16x16
         // search came within a margin of the best one's (a reference far
         // behind at 16x16 rarely wins a part), at its own predictor and
@@ -1507,10 +1576,6 @@ pub(crate) fn p_mb<S: Sample>(
         .flatten()
         .map(|c| c.est)
         .fold(f32::MAX, f32::min);
-
-    // Intra: estimated cheaply first, analysed only when it might win.
-    let i16 = intra_estimate(ctx, rec, mb_x, mb_y, src, nb.avail);
-    let i_est = i16.0;
 
     if !cfg.rd {
         // Decided on the estimates; only the winner is coded, by the
@@ -1637,9 +1702,18 @@ pub(crate) fn p_mb<S: Sample>(
     let mut pred_pix = MbPix::new();
     let mut best_pred = MbPix::new();
     let mut best_t8 = (false, false);
-    let mut order: Vec<&PCand> = shapes.iter().flatten().collect();
-    order.sort_by(|a, b| a.est.total_cmp(&b.est));
-    for cand in order.into_iter().take(cfg.rd_max) {
+    let (order, n_order) = ranked(&shapes, |c| c.est);
+    let order = order[..n_order]
+        .iter()
+        .map(|&i| shapes[i].as_ref().expect("ranked"));
+    // Far behind Intra_16x16's estimate, no inter candidate is coded: intra
+    // or skip wins.
+    let inter_rd = if cfg.rd_lead > 0.0 && best_est >= cfg.rd_lead * i_est {
+        0
+    } else {
+        cfg.rd_max
+    };
+    for cand in order.take(inter_rd) {
         if cand.est > best_est * cfg.rd_ratio {
             continue;
         }
@@ -2152,6 +2226,7 @@ pub(crate) fn b_mb<S: Sample>(
             bounds: search_bounds(refs.search[l], (px + x) as i32, (py + y) as i32, w, h, vr),
             satd_avg: ctx.enc.satd_avg,
             sad_x4: ctx.enc.sad_x4,
+            satd_x4: ctx.enc.satd_avg_x4,
         };
         s.run(cands, mc)
     };
@@ -2213,11 +2288,30 @@ pub(crate) fn b_mb<S: Sample>(
             let rounds = if bi_cost > limit { 0 } else { cfg.bi_refine };
             // The diamond's four, or the square's eight.
             let npts = if cfg.bi_diamond { 4 } else { 8 };
+            let (x, y, w, h) = r;
+            let (ax, ay) = ((px + x) as i32, (py + y) as i32);
+            // A list's vector reads inside its search planes (see `satd`).
+            let inside = |l: usize, mv: Mv| {
+                let (lx, hx, ly, hy) = search_bounds(refs.search[l], ax, ay, w, h, i32::MAX);
+                let (mx, my) = (mv.x as i32 >> 2, mv.y as i32 >> 2);
+                mx >= lx && mx < hx && my >= ly && my < hy
+            };
+            let plain = matches!(refs.weighting_for([true, true]), Weighting::Default);
+            let fast = ctx.enc.satd_bi_x4.filter(|_| S::BYTES == 1 && plain);
+            let mut held_buf = [S::default(); 256];
             for _ in 0..rounds {
                 let before = mbi;
                 for l in 0..2 {
                     let c = mbi[l];
-                    for &(dx, dy) in &[
+                    // The ring around list `l`'s vector, the other list's
+                    // held: scored together (four at a time against the
+                    // held list's prediction, made once, where the kernel
+                    // and the planes allow), then taken in order where
+                    // strictly cheaper, as one at a time would (a point
+                    // whose rate alone reaches the best cost cannot win,
+                    // scored or not).
+                    let mut ms = [mbi; 8];
+                    for (k, &(dx, dy)) in [
                         (0, -1),
                         (-1, 0),
                         (1, 0),
@@ -2227,17 +2321,62 @@ pub(crate) fn b_mb<S: Sample>(
                         (-1, 1),
                         (1, 1),
                     ][..npts]
+                        .iter()
+                        .enumerate()
                     {
-                        let mut m = mbi;
-                        m[l] = Mv::new(c.x + dx, c.y + dy);
+                        ms[k][l] = Mv::new(c.x + dx, c.y + dy);
+                    }
+                    let hl = 1 - l;
+                    let mut sc = [0u32; 8];
+                    match fast {
+                        Some(f)
+                            if inside(hl, mbi[hl])
+                                && ms[..npts].iter().all(|m| inside(l, m[l])) =>
+                        {
+                            let (hp, hs) =
+                                me_at(hl, br[hl]).pred(ax, ay, mbi[hl], w, h, &mut held_buf);
+                            let mr = me_at(l, br[l]);
+                            let rs = mr.p[0].stride;
+                            // SAFETY: a one-byte `Sample` is `u8`.
+                            let as8 = |v: &[S]| unsafe {
+                                std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len())
+                            };
+                            let pair = |k: usize| {
+                                let (a, b) = mr.pair(ax, ay, ms[k.min(npts - 1)][l]);
+                                (as8(a), as8(b))
+                            };
+                            let s8 = as8(&sy[y * src.ys + x..]);
+                            let h8 = as8(hp);
+                            let mut k = 0;
+                            while k < npts {
+                                let d = f(
+                                    s8,
+                                    src.ys,
+                                    [pair(k), pair(k + 1), pair(k + 2), pair(k + 3)],
+                                    rs,
+                                    h8,
+                                    hs,
+                                    w,
+                                    h,
+                                );
+                                sc[k..k + 4].copy_from_slice(&d);
+                                k += 4;
+                            }
+                        }
+                        _ => {
+                            for k in 0..npts {
+                                sc[k] = satd(r, PRED_BI, ms[k], br);
+                            }
+                        }
+                    }
+                    for (m, &s) in ms[..npts].iter().zip(&sc[..npts]) {
                         let rc = costs.of(m[0], p[0]) + costs.of(m[1], p[1]);
                         if rc >= bi_cost {
                             continue;
                         }
-                        let k = satd(r, PRED_BI, m, br) + rc;
-                        if k < bi_cost {
-                            bi_cost = k;
-                            mbi = m;
+                        if s + rc < bi_cost {
+                            bi_cost = s + rc;
+                            mbi = *m;
                         }
                     }
                 }
@@ -2247,7 +2386,12 @@ pub(crate) fn b_mb<S: Sample>(
             }
             (mbi, bi_cost)
         };
-    let (mbi, bi_cost) = bi_refine((0, 0, 16, 16), m16, pmv, u32::MAX);
+    let bi_limit = if cfg.bi_ratio > 0.0 {
+        (c16[0].min(c16[1]) as f32 * cfg.bi_ratio) as u32
+    } else {
+        u32::MAX
+    };
+    let (mbi, bi_cost) = bi_refine((0, 0, 16, 16), m16, pmv, bi_limit);
     let mvdbi = [sub(mbi[0], pmv[0]), sub(mbi[1], pmv[1])];
     let mut best16 = BCand::new(BMbKind::B16);
     let mut b16_est = f32::MAX;
@@ -2550,9 +2694,11 @@ pub(crate) fn b_mb<S: Sample>(
     let mut pred_pix = MbPix::new();
     let mut best_pred = MbPix::new();
     let mut best_t8 = (false, false);
-    let mut order: Vec<&BCand> = shapes.iter().flatten().collect();
-    order.sort_by(|a, b| a.est.total_cmp(&b.est));
-    for cand in order.into_iter().take(cfg.rd_max) {
+    let (order, n_order) = ranked(&shapes, |c| c.est);
+    let order = order[..n_order]
+        .iter()
+        .map(|&i| shapes[i].as_ref().expect("ranked"));
+    for cand in order.take(cfg.rd_max) {
         if cand.est > best_est * cfg.rd_ratio {
             continue;
         }

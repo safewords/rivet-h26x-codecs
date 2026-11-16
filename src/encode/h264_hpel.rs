@@ -137,6 +137,21 @@ impl<'a, S: Sample> MeRef<'a, S> {
         &r.data[r.offset(x as isize, y as isize)..]
     }
 
+    /// The two plane views whose rounded average is the prediction of the
+    /// block at picture position `(x, y)` for vector `mv` (one view twice
+    /// where the position is a plane sample: its own average).
+    #[inline]
+    pub(crate) fn pair(&self, x: i32, y: i32, mv: Mv) -> (&'a [S], &'a [S]) {
+        let (xi, yi) = (x + (mv.x as i32 >> 2), y + (mv.y as i32 >> 2));
+        let (p1, dx1, dy1, p2, dx2, dy2) = QPEL[((mv.y & 3) * 4 + (mv.x & 3)) as usize];
+        let a = self.at(p1, xi + dx1 as i32, yi + dy1 as i32);
+        if p2 == 255 {
+            (a, a)
+        } else {
+            (a, self.at(p2, xi + dx2 as i32, yi + dy2 as i32))
+        }
+    }
+
     /// The `w` by `h` luma prediction of the block at picture position
     /// `(x, y)` for vector `mv`, as `(samples, stride)`: a view straight
     /// into a plane where the position is one, else the average of two
@@ -402,6 +417,8 @@ pub(crate) struct Search<'a, 'b, S: Sample> {
     pub(crate) satd_avg: Option<crate::dsp::h264_enc::SatdAvgFn>,
     /// The encode table's four-way SAD, where the CPU has one.
     pub(crate) sad_x4: Option<crate::dsp::h264_enc::SadX4Fn>,
+    /// The encode table's four-way average-SATD, where the CPU has one.
+    pub(crate) satd_x4: Option<crate::dsp::h264_enc::SatdAvgX4Fn>,
 }
 
 /// Whole-sample points a search step scores together, at most sixteen.
@@ -515,6 +532,45 @@ impl<S: Sample> Search<'_, '_, S> {
         }
         let (p, ps) = self.r.pred(self.x, self.y, mv, self.w, self.h, buf);
         (self.dist.satd)(self.src, self.src_stride, p, ps, self.w, self.h)
+    }
+
+    /// The SATDs of the predictions at `mvs[..n]` (no rate), four at a
+    /// time through the four-way kernel where there is one — each the
+    /// value [`Search::satd`] gives.
+    #[inline]
+    fn satd_n(&self, mvs: &[Mv; 8], n: usize, buf: &mut [S; 256]) -> [u32; 8] {
+        let mut out = [0u32; 8];
+        if let Some(f) = self.satd_x4.filter(|_| S::BYTES == 1 && n > 1) {
+            let rs = self.r.p[0].stride;
+            // SAFETY: a one-byte `Sample` is `u8`.
+            let as8 =
+                |v: &[S]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
+            // A plane sample is the pair of one view twice: its rounded
+            // average is itself.
+            let pair = |k: usize| {
+                let (a, b) = self.r.pair(self.x, self.y, mvs[k.min(n - 1)]);
+                (as8(a), as8(b))
+            };
+            let s8 = as8(self.src);
+            let mut k = 0;
+            while k < n {
+                let d = f(
+                    s8,
+                    self.src_stride,
+                    [pair(k), pair(k + 1), pair(k + 2), pair(k + 3)],
+                    rs,
+                    self.w,
+                    self.h,
+                );
+                out[k..(k + 4).min(8)].copy_from_slice(&d[..(8 - k).min(4)]);
+                k += 4;
+            }
+        } else {
+            for k in 0..n {
+                out[k] = self.satd(mvs[k], buf);
+            }
+        }
+        out
     }
 
     /// The vector in quarter samples is inside the window.
@@ -721,6 +777,13 @@ impl<S: Sample> Search<'_, '_, S> {
             let mut prev: Option<Mv> = None;
             for _ in 0..iters {
                 let c = best;
+                // The ring's points are scored together (four at a time),
+                // then taken in order where strictly cheaper, as one at a
+                // time would: a point's score is its own. (A point whose
+                // rate alone reaches the best cost cannot win; scoring it
+                // anyway changes nothing.)
+                let mut ms = [Mv::ZERO; 8];
+                let mut n = 0;
                 for &(dx, dy) in &RING[..pts] {
                     let m = Mv::new(c.x + dx * step, c.y + dy * step);
                     if !self.inside_q(m)
@@ -729,11 +792,12 @@ impl<S: Sample> Search<'_, '_, S> {
                     {
                         continue;
                     }
+                    ms[n] = m;
+                    n += 1;
+                }
+                let ss = self.satd_n(&ms, n, &mut buf);
+                for (&m, &s) in ms[..n].iter().zip(&ss[..n]) {
                     let rc = self.cost.of(m, self.pred);
-                    if rc >= bcost {
-                        continue;
-                    }
-                    let s = self.satd(m, &mut buf);
                     if s + rc < bcost {
                         bcost = s + rc;
                         bsatd = s;

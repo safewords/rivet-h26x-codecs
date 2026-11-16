@@ -32,6 +32,8 @@ pub fn install(d: &mut H264EncDsp, cpu: Cpu) {
         d.quant8 = quant8;
         d.satd_avg = Some(satd_avg);
         d.sad_x4 = Some(sad_x4);
+        d.satd_avg_x4 = Some(satd_avg_x4);
+        d.satd_bi_x4 = Some(satd_bi_x4);
         d.sub_fdct4 = Some(sub_fdct4);
         d.sub_fdct8 = Some(sub_fdct8);
     }
@@ -188,6 +190,210 @@ unsafe fn satd_avg_impl(
             }
         }
         vaddvq_s32(acc) as u32
+    }
+}
+
+/// [`super::h264_enc::SatdAvgX4Fn`]: [`satd_avg_impl`]'s rows for four
+/// candidates, each source row loaded once per stripe of four and
+/// differenced against the four rounded averages in turn.
+fn satd_avg_x4(
+    src: &[u8],
+    ss: usize,
+    pairs: [(&[u8], &[u8]); 4],
+    rs: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4] {
+    if !(w == 8 || w == 16) || !h.is_multiple_of(4) || h == 0 {
+        return super::h264_enc::satd_avg_x4_scalar(src, ss, pairs, rs, w, h);
+    }
+    let need = (h - 1) * rs + w;
+    assert!(
+        src.len() >= (h - 1) * ss + w
+            && pairs
+                .iter()
+                .all(|(a, b)| a.len() >= need && b.len() >= need),
+        "block out of range"
+    );
+    let p = pairs.map(|(a, b)| (a.as_ptr(), b.as_ptr()));
+    // SAFETY: NEON is baseline on AArch64; every row read is inside the
+    // blocks checked above.
+    unsafe {
+        if w == 16 {
+            satd_avg_x4_16(src.as_ptr(), ss, p, rs, h)
+        } else {
+            satd_avg_x4_8(src.as_ptr(), ss, p, rs, h)
+        }
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn satd_avg_x4_16(
+    s: *const u8,
+    ss: usize,
+    p: [(*const u8, *const u8); 4],
+    rs: usize,
+    h: usize,
+) -> [u32; 4] {
+    use super::distortion_neon::{acc_pair, satd_pair};
+    unsafe {
+        let mut acc = [vdupq_n_s32(0); 4];
+        let mut y = 0;
+        while y < h {
+            let v = [0, 1, 2, 3].map(|r| vld1q_u8(s.add((y + r) * ss)));
+            for k in 0..4 {
+                let (a, b) = p[k];
+                let row = |r: usize| {
+                    let o = (y + r) * rs;
+                    let q = vrhaddq_u8(vld1q_u8(a.add(o)), vld1q_u8(b.add(o)));
+                    (
+                        vreinterpretq_s16_u16(vsubl_u8(vget_low_u8(v[r]), vget_low_u8(q))),
+                        vreinterpretq_s16_u16(vsubl_high_u8(v[r], q)),
+                    )
+                };
+                let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+                acc[k] = acc_pair(acc[k], satd_pair(r0.0, r1.0, r2.0, r3.0));
+                acc[k] = acc_pair(acc[k], satd_pair(r0.1, r1.1, r2.1, r3.1));
+            }
+            y += 4;
+        }
+        acc.map(|a| vaddvq_s32(a) as u32)
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn satd_avg_x4_8(
+    s: *const u8,
+    ss: usize,
+    p: [(*const u8, *const u8); 4],
+    rs: usize,
+    h: usize,
+) -> [u32; 4] {
+    use super::distortion_neon::{acc_pair, diff8, satd_pair};
+    unsafe {
+        let mut acc = [vdupq_n_s32(0); 4];
+        let mut y = 0;
+        while y < h {
+            let v = [0, 1, 2, 3].map(|r| vld1_u8(s.add((y + r) * ss)));
+            for k in 0..4 {
+                let (a, b) = p[k];
+                let row = |r: usize| {
+                    let o = (y + r) * rs;
+                    diff8(v[r], vrhadd_u8(vld1_u8(a.add(o)), vld1_u8(b.add(o))))
+                };
+                acc[k] = acc_pair(acc[k], satd_pair(row(0), row(1), row(2), row(3)));
+            }
+            y += 4;
+        }
+        acc.map(|a| vaddvq_s32(a) as u32)
+    }
+}
+
+/// [`super::h264_enc::SatdBiX4Fn`]: [`satd_avg_x4`] with each candidate's
+/// average averaged again with the held prediction's row.
+#[allow(clippy::too_many_arguments)]
+fn satd_bi_x4(
+    src: &[u8],
+    ss: usize,
+    pairs: [(&[u8], &[u8]); 4],
+    rs: usize,
+    held: &[u8],
+    hs: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4] {
+    if !(w == 8 || w == 16) || !h.is_multiple_of(4) || h == 0 {
+        return super::h264_enc::satd_bi_x4_scalar(src, ss, pairs, rs, held, hs, w, h);
+    }
+    let need = (h - 1) * rs + w;
+    assert!(
+        src.len() >= (h - 1) * ss + w
+            && held.len() >= (h - 1) * hs + w
+            && pairs
+                .iter()
+                .all(|(a, b)| a.len() >= need && b.len() >= need),
+        "block out of range"
+    );
+    let p = pairs.map(|(a, b)| (a.as_ptr(), b.as_ptr()));
+    // SAFETY: NEON is baseline on AArch64; every row read is inside the
+    // blocks checked above.
+    unsafe {
+        if w == 16 {
+            satd_bi_x4_16(src.as_ptr(), ss, p, rs, held.as_ptr(), hs, h)
+        } else {
+            satd_bi_x4_8(src.as_ptr(), ss, p, rs, held.as_ptr(), hs, h)
+        }
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn satd_bi_x4_16(
+    s: *const u8,
+    ss: usize,
+    p: [(*const u8, *const u8); 4],
+    rs: usize,
+    hp: *const u8,
+    hs: usize,
+    h: usize,
+) -> [u32; 4] {
+    use super::distortion_neon::{acc_pair, satd_pair};
+    unsafe {
+        let mut acc = [vdupq_n_s32(0); 4];
+        let mut y = 0;
+        while y < h {
+            let v = [0, 1, 2, 3].map(|r| vld1q_u8(s.add((y + r) * ss)));
+            let hv = [0, 1, 2, 3].map(|r| vld1q_u8(hp.add((y + r) * hs)));
+            for k in 0..4 {
+                let (a, b) = p[k];
+                let row = |r: usize| {
+                    let o = (y + r) * rs;
+                    let q = vrhaddq_u8(vrhaddq_u8(vld1q_u8(a.add(o)), vld1q_u8(b.add(o))), hv[r]);
+                    (
+                        vreinterpretq_s16_u16(vsubl_u8(vget_low_u8(v[r]), vget_low_u8(q))),
+                        vreinterpretq_s16_u16(vsubl_high_u8(v[r], q)),
+                    )
+                };
+                let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+                acc[k] = acc_pair(acc[k], satd_pair(r0.0, r1.0, r2.0, r3.0));
+                acc[k] = acc_pair(acc[k], satd_pair(r0.1, r1.1, r2.1, r3.1));
+            }
+            y += 4;
+        }
+        acc.map(|a| vaddvq_s32(a) as u32)
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn satd_bi_x4_8(
+    s: *const u8,
+    ss: usize,
+    p: [(*const u8, *const u8); 4],
+    rs: usize,
+    hp: *const u8,
+    hs: usize,
+    h: usize,
+) -> [u32; 4] {
+    use super::distortion_neon::{acc_pair, diff8, satd_pair};
+    unsafe {
+        let mut acc = [vdupq_n_s32(0); 4];
+        let mut y = 0;
+        while y < h {
+            let v = [0, 1, 2, 3].map(|r| vld1_u8(s.add((y + r) * ss)));
+            let hv = [0, 1, 2, 3].map(|r| vld1_u8(hp.add((y + r) * hs)));
+            for k in 0..4 {
+                let (a, b) = p[k];
+                let row = |r: usize| {
+                    let o = (y + r) * rs;
+                    diff8(
+                        v[r],
+                        vrhadd_u8(vrhadd_u8(vld1_u8(a.add(o)), vld1_u8(b.add(o))), hv[r]),
+                    )
+                };
+                acc[k] = acc_pair(acc[k], satd_pair(row(0), row(1), row(2), row(3)));
+            }
+            y += 4;
+        }
+        acc.map(|a| vaddvq_s32(a) as u32)
     }
 }
 
@@ -553,6 +759,82 @@ mod tests {
                 crate::dsp::h264_enc::sad_x4_scalar(&s, ss, refs, rs, w, h),
                 "{w}x{h}"
             );
+        }
+    }
+
+    /// The four-way average-SATD against its definition: every shape the
+    /// refinement scores (and those it hands back), pairs of two rows and
+    /// of one row twice, random samples and the extremes.
+    #[test]
+    fn satd_avg_x4_matches_scalar() {
+        let f = neon()
+            .satd_avg_x4
+            .expect("NEON installs the four-way average-SATD");
+        let mut seed = 11u64;
+        let rs = 72usize;
+        for &(w, h) in &[(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (4, 4)] {
+            for trial in 0..100 {
+                let mk = |seed: &mut u64, n: usize| -> Vec<u8> {
+                    (0..n)
+                        .map(|_| match trial % 4 {
+                            0 => 0,
+                            1 => 255,
+                            _ => lcg(seed) as u8,
+                        })
+                        .collect()
+                };
+                let s = mk(&mut seed, 40 * 20);
+                let r = mk(&mut seed, rs * 24);
+                let pairs = [
+                    (&r[0..], &r[1..]),
+                    (&r[rs + 2..], &r[rs + 2..]),
+                    (&r[3 * rs..], &r[2 * rs + 5..]),
+                    (&r[7..], &r[4 * rs + 3..]),
+                ];
+                assert_eq!(
+                    f(&s, 40, pairs, rs, w, h),
+                    crate::dsp::h264_enc::satd_avg_x4_scalar(&s, 40, pairs, rs, w, h),
+                    "{w}x{h} trial {trial}"
+                );
+            }
+        }
+    }
+
+    /// The four-way bi-predicted SATD against its definition, as
+    /// [`satd_avg_x4_matches_scalar`] with a held prediction beside.
+    #[test]
+    fn satd_bi_x4_matches_scalar() {
+        let f = neon()
+            .satd_bi_x4
+            .expect("NEON installs the four-way bi-predicted SATD");
+        let mut seed = 13u64;
+        let rs = 72usize;
+        for &(w, h) in &[(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (4, 4)] {
+            for trial in 0..100 {
+                let mk = |seed: &mut u64, n: usize| -> Vec<u8> {
+                    (0..n)
+                        .map(|_| match trial % 4 {
+                            0 => 0,
+                            1 => 255,
+                            _ => lcg(seed) as u8,
+                        })
+                        .collect()
+                };
+                let s = mk(&mut seed, 40 * 20);
+                let r = mk(&mut seed, rs * 24);
+                let held = mk(&mut seed, 16 * 16);
+                let pairs = [
+                    (&r[0..], &r[1..]),
+                    (&r[rs + 2..], &r[rs + 2..]),
+                    (&r[3 * rs..], &r[2 * rs + 5..]),
+                    (&r[7..], &r[4 * rs + 3..]),
+                ];
+                assert_eq!(
+                    f(&s, 40, pairs, rs, &held, 16, w, h),
+                    crate::dsp::h264_enc::satd_bi_x4_scalar(&s, 40, pairs, rs, &held, 16, w, h),
+                    "{w}x{h} trial {trial}"
+                );
+            }
         }
     }
 

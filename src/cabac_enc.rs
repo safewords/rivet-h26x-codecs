@@ -776,6 +776,14 @@ pub(crate) trait BinCore<O: ?Sized>: Copy {
     fn decision(&mut self, out: &mut O, ctx: &mut Ctx, bin: u32);
     /// A bypass bin.
     fn bypass(&mut self, out: &mut O, bin: u32);
+    /// A context-coded bin only when `cond` holds — branch-free where the
+    /// coder can make it so (the estimator's).
+    #[inline(always)]
+    fn decision_if(&mut self, out: &mut O, ctx: &mut Ctx, bin: u32, cond: bool) {
+        if cond {
+            self.decision(out, ctx, bin);
+        }
+    }
 }
 
 /// The bin-level interface the macroblock writers code through, so one
@@ -806,6 +814,11 @@ pub(crate) trait BinEnc {
     }
     /// A terminate bin.
     fn encode_terminate(&mut self, bin: u32);
+    /// The coder only prices bins ([`CabacEstimator`]): the residual
+    /// writer then walks a block without branching on its values, which
+    /// a coder writing bytes cannot do and need not (it codes each block
+    /// once, the estimator every candidate's).
+    const PRICES: bool = false;
 }
 
 /// [`CabacEncoder`]'s [`BinCore`]: no state of its own, every bin through
@@ -902,11 +915,19 @@ impl BinCore<CabacEstimator> for EstCore {
     fn bypass(&mut self, _: &mut CabacEstimator, _bin: u32) {
         self.0 += EST_ONE;
     }
+    #[inline(always)]
+    fn decision_if(&mut self, _: &mut CabacEstimator, ctx: &mut Ctx, bin: u32, cond: bool) {
+        let i = ((*ctx as usize) << 1 | bin as usize) & 255;
+        // The bin's cost masked in, the state's move selected: no branch.
+        self.0 += (EST_COST_FX[i] & 0u32.wrapping_sub(cond as u32)) as u64;
+        *ctx = if cond { EST_NEXT[i] } else { *ctx };
+    }
 }
 
 impl BinEnc for CabacEstimator {
     type Core = EstCore;
     type Out = CabacEstimator;
+    const PRICES: bool = true;
     #[inline(always)]
     fn split(&mut self) -> (EstCore, &mut Self) {
         (EstCore(self.acc), self)

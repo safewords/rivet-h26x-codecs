@@ -2547,25 +2547,45 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc, L: Level>(
     // stops before it and infers it, so writing anything there would be a
     // bin it never reads.
     let last = max_coeff - 1;
-    let mut i = 0usize;
-    let mut rest = mask;
-    while rest != 0 {
-        let p = rest.trailing_zeros() as usize;
-        rest &= rest - 1;
-        while i < p {
-            c.decision(out, &mut ctx[(sig_base + sig_off[i] as usize) & M], 0);
-            i += 1;
+    if E::PRICES {
+        // The same bins in the same order, a position at a time: its
+        // significance, then — only where significant, the bin priced or
+        // not by a mask rather than a branch — whether it is the last.
+        // (The walk below finds zero runs by their length, a branch per
+        // significant coefficient that is as good as random.)
+        let top = 63 - mask.leading_zeros() as usize;
+        let end = if top == last { last } else { top + 1 };
+        for i in 0..end {
+            let b = ((mask >> i) & 1) as u32;
+            c.decision(out, &mut ctx[(sig_base + sig_off[i] as usize) & M], b);
+            c.decision_if(
+                out,
+                &mut ctx[(last_base + last_off[i] as usize) & M],
+                (i == top) as u32,
+                b != 0,
+            );
         }
-        if p == last {
-            break;
+    } else {
+        let mut i = 0usize;
+        let mut rest = mask;
+        while rest != 0 {
+            let p = rest.trailing_zeros() as usize;
+            rest &= rest - 1;
+            while i < p {
+                c.decision(out, &mut ctx[(sig_base + sig_off[i] as usize) & M], 0);
+                i += 1;
+            }
+            if p == last {
+                break;
+            }
+            c.decision(out, &mut ctx[(sig_base + sig_off[p] as usize) & M], 1);
+            c.decision(
+                out,
+                &mut ctx[(last_base + last_off[p] as usize) & M],
+                (rest == 0) as u32,
+            );
+            i = p + 1;
         }
-        c.decision(out, &mut ctx[(sig_base + sig_off[p] as usize) & M], 1);
-        c.decision(
-            out,
-            &mut ctx[(last_base + last_off[p] as usize) & M],
-            (rest == 0) as u32,
-        );
-        i = p + 1;
     }
 
     // Levels, highest frequency first.
@@ -2584,7 +2604,18 @@ pub(crate) fn write_residual_block_cabac<E: BinEnc, L: Level>(
         } else {
             (1 + num_eq1).min(4)
         };
-        if abs_m1 == 0 {
+        if E::PRICES && abs_m1 <= 1 {
+            // A one or a two — nearly every level — without a branch on
+            // which: the first bin is whether it is more than one, the
+            // two's prefix its terminating zero, priced by a mask.
+            c.decision(out, &mut ctx[(abs_base + inc0) & M], abs_m1);
+            c.decision_if(
+                out,
+                &mut ctx[(abs_base + 5 + inc1_cap.min(num_gt1)) & M],
+                0,
+                abs_m1 != 0,
+            );
+        } else if abs_m1 == 0 {
             c.decision(out, &mut ctx[(abs_base + inc0) & M], 0);
         } else {
             c.decision(out, &mut ctx[(abs_base + inc0) & M], 1);

@@ -592,20 +592,24 @@ impl Trellis {
         for i in 0..=last {
             // SAFETY: every position up to `last` was written above.
             let e = unsafe { from[i].assume_init_ref() }[lane];
-            let lv = e & 0xff_ffff;
-            if lv != 0 {
-                let r = scan[start + i] as usize;
-                levels[r] = if coeffs[r] < 0 {
-                    -(lv as i16)
-                } else {
-                    lv as i16
-                };
-                nz += 1;
-            }
+            nz += put_level(levels, coeffs, scan[start + i] as usize, e & 0xff_ffff);
             lane = (e >> 24) as usize;
         }
         nz
     }
+}
+
+/// Write the level `lv` chosen at raster position `r` with its
+/// coefficient's sign, a zero included (`levels` arrives zeroed and the
+/// walk back writes each position once), and count it when it is not
+/// zero — without a branch on the level: which positions keep one is as
+/// good as random, and the walk mispredicted about one in two of them
+/// (3 to 4 % of every tier's cycles).
+#[inline(always)]
+fn put_level(levels: &mut [i16], coeffs: &[i32], r: usize, lv: u32) -> u32 {
+    let v = lv as i16;
+    levels[r] = if coeffs[r] < 0 { -v } else { v };
+    (lv != 0) as u32
 }
 
 impl Trellis {
@@ -877,16 +881,7 @@ impl Trellis {
             for i in 0..=last {
                 // SAFETY: every position up to `last` was written above.
                 let e = from[i].assume_init_ref()[lane];
-                let lv = e & 0xff_ffff;
-                if lv != 0 {
-                    let r = scan[start + i] as usize;
-                    levels[r] = if coeffs[r] < 0 {
-                        -(lv as i16)
-                    } else {
-                        lv as i16
-                    };
-                    nz += 1;
-                }
+                nz += put_level(levels, coeffs, scan[start + i] as usize, e & 0xff_ffff);
                 lane = (e >> 24) as usize;
             }
             nz
@@ -1013,11 +1008,7 @@ impl Trellis {
         for i in 0..=last {
             // SAFETY: every position up to `last` was written above.
             let e = unsafe { from[i].assume_init_ref() }[lane];
-            if e & 1 != 0 {
-                let r = scan[start + i] as usize;
-                levels[r] = if coeffs[r] < 0 { -1 } else { 1 };
-                nz += 1;
-            }
+            nz += put_level(levels, coeffs, scan[start + i] as usize, (e & 1) as u32);
             lane = (e >> 1) as usize;
         }
         nz

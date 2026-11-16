@@ -118,6 +118,75 @@ pub type SadX4Fn = fn(
     h: usize,
 ) -> [u32; 4];
 
+/// [`SatdAvgFn`] for four candidates against one `src` block, every
+/// prediction row the rounded average of its pair's rows (a pair of one
+/// row twice is that row: a sample a plane holds), all at one stride:
+/// a sub-sample refinement ring scored four at a time with the source
+/// read once. Each sum is [`satd_avg_scalar`]'s.
+pub type SatdAvgX4Fn = fn(
+    src: &[u8],
+    src_stride: usize,
+    pairs: [(&[u8], &[u8]); 4],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4];
+
+/// The definition [`SatdAvgX4Fn`] kernels are held to: four
+/// [`satd_avg_scalar`]s.
+pub fn satd_avg_x4_scalar(
+    src: &[u8],
+    src_stride: usize,
+    pairs: [(&[u8], &[u8]); 4],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4] {
+    pairs.map(|(a, b)| satd_avg_scalar(src, src_stride, a, ref_stride, b, ref_stride, w, h))
+}
+
+/// [`SatdAvgX4Fn`] for bi-predicted candidates: each prediction row the
+/// rounded average of its pair's rounded average and the row of a `held`
+/// prediction every candidate shares (the list a joint refinement holds
+/// still), which is the plain average of the two lists' predictions. Each
+/// sum is [`satd_bi_x4_scalar`]'s.
+#[allow(clippy::too_many_arguments)]
+pub type SatdBiX4Fn = fn(
+    src: &[u8],
+    src_stride: usize,
+    pairs: [(&[u8], &[u8]); 4],
+    ref_stride: usize,
+    held: &[u8],
+    held_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4];
+
+/// The definition [`SatdBiX4Fn`] kernels are held to: each pair averaged
+/// into a buffer, then [`satd_avg_scalar`] of it and `held`.
+#[allow(clippy::too_many_arguments)]
+pub fn satd_bi_x4_scalar(
+    src: &[u8],
+    src_stride: usize,
+    pairs: [(&[u8], &[u8]); 4],
+    ref_stride: usize,
+    held: &[u8],
+    held_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4] {
+    pairs.map(|(a, b)| {
+        let mut p = [0u8; 256];
+        for y in 0..h {
+            for x in 0..w {
+                p[y * 16 + x] =
+                    ((a[y * ref_stride + x] as u16 + b[y * ref_stride + x] as u16 + 1) >> 1) as u8;
+            }
+        }
+        satd_avg_scalar(src, src_stride, &p, 16, held, held_stride, w, h)
+    })
+}
+
 /// The definition [`SadX4Fn`] kernels are held to: four scalar SADs.
 pub fn sad_x4_scalar(
     src: &[u8],
@@ -159,6 +228,14 @@ pub struct H264EncDsp {
     /// and callers take the distortion table's SAD four times, which is
     /// what [`sad_x4_scalar`] defines.
     pub sad_x4: Option<SadX4Fn>,
+    /// Four sub-sample candidates' average-SATDs at once, where a rung
+    /// has it; `None` and callers score them one at a time, which is what
+    /// [`satd_avg_x4_scalar`] defines.
+    pub satd_avg_x4: Option<SatdAvgX4Fn>,
+    /// Four bi-predicted candidates' SATDs at once, where a rung has it;
+    /// `None` and callers score them one at a time, which is what
+    /// [`satd_bi_x4_scalar`] defines.
+    pub satd_bi_x4: Option<SatdBiX4Fn>,
     /// An 8-bit block's difference from its prediction and its forward
     /// 4x4 transform in one pass, where a rung has it; `None` and callers
     /// difference into a residual and take [`Self::fdct4`].
@@ -181,6 +258,8 @@ impl H264EncDsp {
         quant8: quant8_scalar,
         satd_avg: None,
         sad_x4: None,
+        satd_avg_x4: None,
+        satd_bi_x4: None,
         sub_fdct4: None,
         sub_fdct8: None,
     };
