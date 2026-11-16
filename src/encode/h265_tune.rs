@@ -21,9 +21,10 @@ pub fn apply_preset(cfg: &mut Config, p: Preset) {
     // H.264's tools, which the shared `--preset` sets: not H.265 syntax.
     cfg.transform_8x8 = false;
     cfg.subparts = false;
-    // H.265's lookahead propagation (`h265_cutree`) is not yet a tier's
-    // tool: as measured it loses (see `Tune::cutree`).
-    cfg.tree_lookahead = 0;
+    // H.265's lookahead propagation (`h265_cutree`) sets only the intra
+    // pictures' quantiser offset under a tier (`Tune::tree_frame_only`),
+    // from sixteen pictures of lookahead.
+    cfg.tree_lookahead = 16;
     match p {
         Preset::Veryfast => {
             cfg.max_refs = 1;
@@ -119,6 +120,15 @@ pub(crate) struct Tune {
     pub inter_tu_split: bool,
     /// The largest inter CU (log2) the split is tried in.
     pub inter_tu_split_max: u32,
+    /// Under `Config::tree_lookahead`, the propagation sets only an intra
+    /// picture's quantiser offset, from its mean over the picture,
+    /// replacing `i_qp_offset`; no unit carries a quantiser delta.
+    pub tree_frame_only: bool,
+    /// The most an intra picture's propagated offset may lower it.
+    pub i_adapt_min: i32,
+    /// The intra offset is `i_adapt_k * (mean - i_adapt_m0)`, rounded.
+    pub i_adapt_k: f32,
+    pub i_adapt_m0: f32,
 }
 
 impl Tune {
@@ -148,6 +158,10 @@ impl Tune {
         tmvp: false,
         inter_tu_split: false,
         inter_tu_split_max: 5,
+        tree_frame_only: false,
+        i_adapt_min: -6,
+        i_adapt_k: 4.0,
+        i_adapt_m0: -1.4,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -207,6 +221,21 @@ impl Tune {
             // BD-rate at 0.92x the CPU, medium -10.28% -> -10.55% at
             // 0.94x, slow +0.79% -> +0.58% at 0.95x.
             sao_nonref: false,
+            // An intra picture's quantiser offset from the propagation's
+            // mean over it, in place of a fixed -3 (round 4, 2026-11-15,
+            // x265 parity): the 720p clips, whose content later pictures
+            // inherit little of, want their intra pictures at the P
+            // pictures' quantiser (ducks +7.96% at -3, +5.78% at 0); the
+            // CIF clips want -3 or below (akiyo -13.81% at -3, -16.42% at
+            // -5). The propagation's means at strength 1 over sixteen
+            // pictures — foreman -2.1, mobile -2.0, akiyo -3.8, park_joy
+            // -0.8, ducks -1.4 — order them so: slow +0.58% -> -0.59%,
+            // medium -10.55% -> -11.45%, veryfast -11.88% -> -12.52%, at
+            // the same CPU.
+            tree_frame_only: true,
+            cutree: 1.0,
+            i_adapt_k: 4.5,
+            i_adapt_m0: -1.45,
             ..Tune::NEUTRAL
         };
         match p {

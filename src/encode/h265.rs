@@ -601,7 +601,9 @@ impl<S: Sample> Core<S> {
         let tree_on = cfg.tree_lookahead > 0 && !matches!(cfg.rate, RateControl::Lossless);
         let pps_opts = PpsOptions {
             cu_qp_delta_depth: (cfg.aq_strength > 0.0
-                || (cfg.tree_lookahead > 0 && !matches!(cfg.rate, RateControl::Lossless)))
+                || (cfg.tree_lookahead > 0
+                    && !super::h265_tune::Tune::of(&cfg).tree_frame_only
+                    && !matches!(cfg.rate, RateControl::Lossless)))
             .then_some(u32::from(tree_depth(&cfg, &g) > 0 && cfg.gop != 0)),
             weighted_pred: cfg.weighted_pred,
             weighted_bipred: cfg.weighted_pred && cfg.bframes > 0,
@@ -965,7 +967,16 @@ impl<S: Sample> Core<S> {
             // Under a tier the configured quantiser is a P picture's, and
             // the others sit at the tier's offsets from it (`h265_tune`).
             RateControl::ConstantQp(q) => {
-                let off = super::h265_tune::Tune::of(&self.cfg).qp_offset(&self.cfg, c);
+                let tune = super::h265_tune::Tune::of(&self.cfg);
+                let mut off = tune.qp_offset(&self.cfg, c);
+                if tune.tree_frame_only
+                    && c.kind.is_intra()
+                    && let Some(t) = self.tree_offsets.as_ref().filter(|t| !t.is_empty())
+                {
+                    let mean = t.iter().sum::<f32>() / t.len() as f32;
+                    off = ((tune.i_adapt_k * (mean - tune.i_adapt_m0)).round() as i32)
+                        .clamp(tune.i_adapt_min, 0);
+                }
                 (i32::from(q) + off).clamp(0, 51) as u8
             }
             RateControl::Bitrate { .. } => {
@@ -2207,7 +2218,7 @@ impl<S: Sample> Core<S> {
                 self.cfg.aq_strength,
             )
         });
-        if self.tree.is_none() {
+        if self.tree.is_none() || super::h265_tune::Tune::of(&self.cfg).tree_frame_only {
             return aq;
         }
         // Under quantiser propagation every picture carries offsets, zero
@@ -2234,8 +2245,9 @@ impl<S: Sample> Core<S> {
         let strength = super::h265_tune::Tune::of(&self.cfg).cutree;
         let ahead = self.next_display - self.offered;
         let preview = self.sched.preview(ahead);
+        let frame_only = super::h265_tune::Tune::of(&self.cfg).tree_frame_only;
         let t = self.tree.as_mut()?;
-        if !c.reference {
+        if !c.reference || (frame_only && !c.kind.is_intra()) {
             return None;
         }
         let mut window: Vec<Coded> = vec![*c];
