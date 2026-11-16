@@ -1236,6 +1236,67 @@ pub(crate) fn code_cu_2nx2n_intra<S: Sample>(
         y_stride,
         cands,
     );
+    // Under `set_rdo_modes` the SATD's few best modes are coded, and the
+    // one cheapest in SSD plus lambda times its bits is kept (and coded
+    // again below, as the loser's coding is not put back).
+    let k = RDO_MODES.with(|c| c.get());
+    let mode = if k > 1 {
+        let top = LAST_TOP.with(|v| v.get());
+        let lam = base_lambda(ctx.qp) * ssd_lambda_scale(ctx.bit_depth);
+        let mut best = (f32::INFINITY, mode);
+        for &(c, m) in top.iter().take(k) {
+            if c == f32::MAX {
+                break;
+            }
+            out.luma_modes = [m; 4];
+            out.luma_syntax[0] = as_syntax(m, cands);
+            PicInfo::fill4(modes, geo.w4, x0, y0, n, n, m);
+            if geo.cat != 0 {
+                let (csyn, cmode) = search_chroma_mode(
+                    ctx,
+                    geo,
+                    &mut recon.cb,
+                    &mut recon.cr,
+                    scratch,
+                    x0,
+                    y0,
+                    log2_cu,
+                    m,
+                    scb,
+                    scr,
+                    c_stride,
+                );
+                out.chroma_syntax = csyn;
+                out.chroma_mode = cmode;
+            }
+            let (ssd, _) = code_cu_2nx2n(
+                ctx,
+                geo,
+                recon,
+                scratch,
+                x0,
+                y0,
+                log2_cu,
+                m,
+                out.chroma_mode,
+                false,
+                [false; 4],
+                &src_y[soff..],
+                y_stride,
+                scb,
+                scr,
+                c_stride,
+                &mut out,
+            );
+            let cost = ssd as f32 + lam * cu_bits(&out, geo.cat, ctx.qp, ctx.bypass);
+            if cost < best.0 {
+                best = (cost, m);
+            }
+        }
+        best.1
+    } else {
+        mode
+    };
     out.luma_modes = [mode; 4];
     out.luma_syntax[0] = as_syntax(mode, cands);
     PicInfo::fill4(modes, geo.w4, x0, y0, n, n, mode);
@@ -2148,6 +2209,7 @@ fn search_luma_mode<S: Sample>(
     prepare(plane, sc, x, y, n, ctx.bit_depth);
     let rate_scale = satd_lambda_scale(ctx.bit_depth);
     let mut best = (f32::MAX, 1u8);
+    let mut top = [(f32::MAX, 0u8); RDO_MAX];
     // Under `fast_intra` the 33 angles are searched coarse to fine:
     // every fourth, then the two either side of the best at distance two,
     // then at one — 9 + 2 + 2 angles with planar, DC and the three most
@@ -2211,6 +2273,15 @@ fn search_luma_mode<S: Sample>(
             if cost < best.0 {
                 best = (cost, mode);
             }
+            if cost < top[RDO_MAX - 1].0 {
+                // Kept sorted, cheapest first.
+                let mut i = RDO_MAX - 1;
+                top[i] = (cost, mode);
+                while i > 0 && top[i].0 < top[i - 1].0 {
+                    top.swap(i, i - 1);
+                    i -= 1;
+                }
+            }
         }
         if !ctx.fast_intra || stage == 2 || best.1 < 2 {
             break;
@@ -2227,6 +2298,7 @@ fn search_luma_mode<S: Sample>(
         }
     }
     sc_cost_set(best.0);
+    LAST_TOP.with(|v| v.set(top));
     best.1
 }
 
@@ -2234,7 +2306,27 @@ thread_local! {
     /// The cost the last [`search_luma_mode`] on this thread chose its mode
     /// at (SATD plus lambda times the mode's bins).
     static LAST_MODE_COST: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+    /// The [`RDO_MAX`] cheapest modes of the last [`search_luma_mode`] on
+    /// this thread, cheapest first, as (cost, mode); unfilled entries cost
+    /// `f32::MAX`.
+    static LAST_TOP: std::cell::Cell<[(f32, u8); RDO_MAX]> =
+        const { std::cell::Cell::new([(f32::MAX, 0); RDO_MAX]) };
+    /// How many of those a 2Nx2N intra unit codes before it keeps the
+    /// cheapest in SSD plus lambda times its bits ([`set_rdo_modes`]).
+    static RDO_MODES: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
+
+/// Code a 2Nx2N intra unit's `k` (at most [`RDO_MAX`]) cheapest luma modes
+/// by SATD, each unsplit with its own chroma mode, and keep the cheapest in
+/// SSD plus lambda times its bits, on this thread until set again; 1 codes
+/// the SATD winner alone. The transform split trial then runs on the mode
+/// kept.
+pub(crate) fn set_rdo_modes(k: usize) {
+    RDO_MODES.with(|c| c.set(k.clamp(1, RDO_MAX)));
+}
+
+/// The most luma modes [`set_rdo_modes`] codes.
+const RDO_MAX: usize = 5;
 
 fn sc_cost_set(c: f32) {
     LAST_MODE_COST.with(|v| v.set(c));

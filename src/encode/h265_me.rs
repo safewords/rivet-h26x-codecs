@@ -815,6 +815,14 @@ pub struct InterPicture<S: Sample> {
     /// within this factor of the inter unit's search cost; `None` codes it
     /// wherever `rd_intra` lets it.
     pub intra_satd_gate: Option<f32>,
+    /// The whole CTB is not tried where the neighbouring CTBs coded so far
+    /// (left, above, above-left and above-right), at least this many of
+    /// them, all split it (`neighbours_split`): the walk goes straight to
+    /// its four children. 0 always tries it.
+    pub depth_skip: u32,
+    /// Per CTB in raster order, the least depth of the units it coded;
+    /// `u8::MAX` where none is coded yet.
+    ctb_min_depth: Vec<u8>,
     /// The SATD-domain search cost of the last inter unit decided.
     last_pick_cost: f32,
     /// Search only the nearest reference and the parent unit's below the
@@ -927,6 +935,8 @@ impl<S: Sample> InterPicture<S> {
             no_residual: false,
             rd_intra: None,
             rskip: None,
+            depth_skip: 0,
+            ctb_min_depth: Vec::new(),
             drop_trial: true,
             limit_refs: false,
             parent_ref: [None; 4],
@@ -2878,7 +2888,40 @@ impl<S: Sample> InterPicture<S> {
             src,
             &mut out,
         );
+        let w_ctb = self.geo.width.div_ceil(1 << log2);
+        if self.ctb_min_depth.is_empty() {
+            let h_ctb = self.geo.height.div_ceil(1 << log2);
+            self.ctb_min_depth = vec![u8::MAX; w_ctb * h_ctb];
+        }
+        self.ctb_min_depth[cu_y * w_ctb + cu_x] =
+            out.iter().map(|c| c.depth as u8).min().unwrap_or(0);
         out
+    }
+
+    /// Whether the CTBs left of, above, above-left and above-right of the
+    /// one holding luma `(x0, y0)` that are inside the picture and coded
+    /// all split at least once, [`Self::depth_skip`] of them at least
+    /// being there.
+    fn neighbours_split(&self, x0: usize, y0: usize) -> bool {
+        let log2 = self.log2_ctb;
+        if self.ctb_min_depth.is_empty() {
+            return false;
+        }
+        let w_ctb = self.geo.width.div_ceil(1 << log2);
+        let (cx, cy) = ((x0 >> log2) as isize, (y0 >> log2) as isize);
+        let mut seen = 0;
+        for (dx, dy) in [(-1isize, 0isize), (0, -1), (-1, -1), (1, -1)] {
+            let (x, y) = (cx + dx, cy + dy);
+            if x < 0 || y < 0 || x >= w_ctb as isize {
+                continue;
+            }
+            match self.ctb_min_depth[y as usize * w_ctb + x as usize] {
+                u8::MAX => continue,
+                0 => return false,
+                _ => seen += 1,
+            }
+        }
+        seen >= self.depth_skip
     }
 
     /// Make the inter prediction of `pick` over the `n`-square unit at
@@ -3015,6 +3058,30 @@ impl<S: Sample> InterPicture<S> {
             1
         };
         let lam = ssd_lambda(qp, ctx.bit_depth);
+        // The whole CTB is not tried where its coded neighbouring CTBs all
+        // split it (`depth_skip`); its children search with no parent's
+        // reference or vector to start from.
+        if depth == 0 && max_depth > 0 && self.depth_skip > 0 && self.neighbours_split(x0, y0) {
+            self.parent_ref[0] = None;
+            let n = 1usize << log2;
+            let half = n / 2;
+            let mut j = lam * f64::from(crate::encode::h265::split_flag_bits(init, qp, true));
+            for i in 0..4 {
+                j += self.tree_node(
+                    ctx,
+                    want,
+                    max_depth,
+                    refs,
+                    x0 + (i & 1) * half,
+                    y0 + (i >> 1) * half,
+                    log2 - 1,
+                    depth + 1,
+                    src,
+                    out,
+                );
+            }
+            return j;
+        }
         self.gate_now = depth < max_depth && log2 > MIN_CB_LOG2.max(self.split_gate_above);
         self.gated = false;
         let (d, ssd, unit_bits) = self.tree_leaf(&cctx, refs, x0, y0, log2, depth, src);

@@ -1211,6 +1211,7 @@ impl<S: Sample> Core<S> {
         // initial ones, as every rate in the decisions is priced.
         let tune = super::h265_tune::Tune::of(&self.cfg);
         super::h265_intra::set_lambda_scale(tune.lambda_of(&c));
+        super::h265_intra::set_rdo_modes(tune.i_rdo_modes);
         super::h265_rdoq::set_last_from(tune.rdoq_last);
         super::h265_sao::set_edge_classes(tune.sao_edge_classes);
         let rdoq_cx = Contexts::new(0, qp as i32);
@@ -1763,6 +1764,7 @@ impl<S: Sample> Core<S> {
         let bit_depth = self.cfg.bit_depth;
         let tune = super::h265_tune::Tune::of(&self.cfg);
         super::h265_intra::set_lambda_scale(tune.lambda_of(&c));
+        super::h265_intra::set_rdo_modes(1);
         super::h265_rdoq::set_last_from(tune.rdoq_last);
         super::h265_sao::set_edge_classes(tune.sao_edge_classes);
         let rdoq_cx = Contexts::new(if c.kind == Kind::B { 2 } else { 1 }, qp as i32);
@@ -1790,6 +1792,7 @@ impl<S: Sample> Core<S> {
         pic.search_rings = tune.search_rings;
         pic.rd_intra = tune.rd_intra;
         pic.rskip = tune.rskip;
+        pic.depth_skip = tune.depth_skip;
         pic.drop_trial = tune.drop_trial;
         pic.nxn_trial = tune.nxn_trial;
         pic.quarter_cross = tune.quarter_cross;
@@ -7115,6 +7118,7 @@ mod tests {
                 max_refs: refs,
                 ..cfg(64, 64, ChromaFormat::Yuv420)
             };
+            let b_refs = super::super::h265_tune::Tune::of(&config).b_refs as u32;
             let frames = tree_frames(64, 64, ChromaFormat::Yuv420, 8, 13);
             let mut e = H265Encoder::new(config).unwrap_or_else(|err| panic!("{tag}: {err}"));
             let mut units = Vec::new();
@@ -7183,10 +7187,12 @@ mod tests {
                     }
                 }
             }
-            // Only a B picture below an older anchor it does not use keeps one.
+            // Only a B picture below an older anchor it does not use keeps
+            // one: past the anchor and the B lists' own references
+            // (`Tune::b_refs`, two at the default tier).
             assert_eq!(
                 kept_any,
-                refs >= 3 && bframes > 0,
+                refs >= 2 + b_refs && bframes > 0,
                 "{tag}: pictures kept unused"
             );
             let mut dec = crate::hevc::HevcDecoder::new();

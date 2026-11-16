@@ -67,6 +67,13 @@ pub(crate) struct Tune {
     pub rd_intra: Option<f32>,
     /// The recursion skip (`h265_me::InterPicture::rskip`).
     pub rskip: Option<f32>,
+    /// `h265_me::InterPicture::depth_skip`.
+    pub depth_skip: u32,
+    /// How many of its cheapest luma modes by SATD a 2Nx2N unit of an
+    /// intra picture codes before it keeps the cheapest in SSD plus lambda
+    /// times its bits (`h265_intra::set_rdo_modes`); 1 codes the SATD
+    /// winner alone. Intra units of inter pictures always code one.
+    pub i_rdo_modes: usize,
     /// How deep an intra unit inside an inter picture may split its
     /// transform. Measured 2026-11-15 (x265 parity, `--preset medium`, CPU
     /// by interleaved one-thread runs): 0 against 1, -4.19% against -4.28%
@@ -173,6 +180,8 @@ impl Tune {
         search_rings: 0,
         rd_intra: Some(0.5),
         rskip: None,
+        depth_skip: 0,
+        i_rdo_modes: 1,
         intra_split_depth: 1,
         sign_hiding: false,
         rdoq: false,
@@ -327,14 +336,29 @@ impl Tune {
             // -8.23% at 2.1x; seeded, -7.73% at 1.65x; seeded behind the
             // merge gate, -6.99% at 1.16x; and rskip at 0.5 bought the
             // rest of the CPU back for -0.3%.
+            // Round 13A (2026-11-16, `frontier265.py`: BD-rate against
+            // x265 medium and CPU on x265's preset ladder, interleaved
+            // runs, two repetitions): slow sat at -19.97%, between x265
+            // slower and veryslow, where x265 pays about 1.4x its time for
+            // each point of BD-rate, so quality is what moves slow past
+            // x265's frontier. The intra picture's 2Nx2N units code their
+            // five cheapest luma modes by SATD and keep the cheapest in
+            // SSD plus lambda times bits (`i_rdo_modes`): -20.13% ->
+            // -20.71% at 1.05x the CPU (three modes -20.55%; in inter
+            // pictures' intra units too, two modes, -20.27% at 1.12x); the
+            // Lagrangian at 0.8 and three references per list in B slices
+            // took -19.97% -> -20.13% at 0.97x (0.8 alone -19.99% at
+            // 0.97x, three references alone -20.11%; 0.6 -19.69%, 0.75
+            // with the rest -20.50%, four references -20.55% for 3%).
             Preset::Slow => Tune {
                 part_seeded: true,
                 parts_after_merge: false,
                 parts_rd_margin: 0.1,
                 rskip: Some(0.5),
-                b_refs: 2,
+                b_refs: 3,
                 b_limit_refs: true,
-                lambda: [0.7; 4],
+                lambda: [0.8; 4],
+                i_rdo_modes: 5,
                 bi_refine: 1,
                 // Refinement only where the unrefined pair comes within
                 // 1.1x of the better one-list shape: -2.30% -> -2.31%
@@ -349,9 +373,45 @@ impl Tune {
             // The 8x8 transform split tried only where the whole TU kept
             // four luma levels or more (round 4, 2026-11-15, x265 parity):
             // -11.45% -> -11.33% BD-rate at 0.98x the CPU.
+            // Round 13A (2026-11-16, `frontier265.py`, interleaved runs,
+            // two repetitions): medium sat at -14.45% against x265 medium
+            // at 0.93x its CPU, between x265 slow and slower, where x265
+            // pays about 1.3x its time per point of BD-rate — so slow's
+            // quality tools, which cost medium a few percent each, are
+            // cheap there. Two references per list in B slices, limited
+            // as at slow, -14.97% at 1.02x the CPU; one round of
+            // bi-prediction refinement behind slow's gate -15.01% at
+            // 1.06x; every Lagrangian at 0.85 -14.78% at 1.02x (0.7
+            // -14.58% at 1.06x); the three -15.77% at 1.11-1.19x. On those, a
+            // skip ends the recursion below 0.25 Lagrangians a sample, not
+            // 0.5, and the 8x8 transform split is tried whatever the TU
+            // kept: -16.18% at 1.00x of the three. Then the whole CTB
+            // skipped where its coded neighbours all split it
+            // (`depth_skip`, two neighbours at least): -16.18% -> -15.93%
+            // at 0.93x the CPU, neutral on x265's frontier (0.238x of its
+            // time at equal BD-rate either way) and kept for the time,
+            // which it holds near x265 medium's (three or four neighbours
+            // at least: -15.86% / -15.89% at 0.94x). Medium against x265's
+            // frontier: 0.33x -> 0.24x of x265's time at equal BD-rate.
+            // Measured on the way and dropped: symmetric partitions as at
+            // slow (-15.54% at 1.25x), a widening ring (-14.58% at 1.05x),
+            // intra in inter pictures within 1.5x of the search (-14.76%
+            // at 1.08x), five intra modes coded in intra pictures (-16.24%
+            // at 1.09x), B offsets +2/+3/+5 or +1/+3/+4 and non-reference
+            // B pictures at a Lagrangian of 1.0 (no better), per-unit
+            // propagation at 0.5 (-14.80%), a merge taken before the
+            // search where it costs less than one SATD Lagrangian a sample
+            // (-11.31% at 0.94x), a no-residual unit ending the recursion
+            // like a skip (-15.32% at 0.98x).
             Preset::Medium => Tune {
-                tu_split_nz: 4,
-                rskip: Some(0.5),
+                b_refs: 2,
+                b_limit_refs: true,
+                bi_refine: 1,
+                bi_refine_gate: 1.1,
+                lambda: [0.85; 4],
+                tu_split_nz: 0,
+                rskip: Some(0.25),
+                depth_skip: 2,
                 intra_split_depth: 0,
                 intra_satd_gate: Some(1.0),
                 fast_intra: true,
@@ -389,7 +449,31 @@ impl Tune {
             // all, -9.48% (ducks +0.59%) at 0.94x; no inter transform split
             // -12.04% (mobile -5.4%) at 0.95x; inter chroma by the plain
             // quantiser 1.7% for 1.2%; fewer merge candidates, nothing.
+            // Round 13A (2026-11-16, `frontier265.py`, interleaved runs,
+            // two repetitions): veryfast sat at -7.84% against x265 medium
+            // at 0.66x its CPU, between x265 fast and slow, where x265
+            // buys about 13 points of BD-rate per e-fold of time — so a
+            // point is worth about 8% of veryfast's CPU either way. The
+            // whole CTB skipped where three or more of its coded
+            // neighbours split it (`depth_skip`): -7.84% -> -7.67% at
+            // 0.96x the CPU, 0.464x -> 0.450x of x265's time at equal
+            // BD-rate (ducks -0.59% -> +0.28%; two neighbours -7.57%,
+            // ducks +0.91%, 0.452x; four -7.70%, 0.451x). Measured and
+            // dropped: two references per list in B slices (-8.34% at
+            // 1.04x), a round of bi-prediction refinement (-8.47% at
+            // 1.11x), three intra modes coded in intra pictures (-8.03% at
+            // 1.12x), Lagrangians at 0.7 / 0.85 / 1.1 / 1.2 (-7.35 / -7.90
+            // / -7.20 / -6.78%, none better on the frontier), the early
+            // split at 1.5, two merge candidates, one SAO edge class,
+            // RDOQ's last position from a whole step, the 8x8 transform
+            // split only above eight levels, no trial without residual,
+            // non-reference pictures without 8x8 units (-5.48% at 0.97x),
+            // a merge taken before the search where it costs less than
+            // one or two SATD Lagrangians a sample (-4.23% at 0.95x,
+            // +4.05% at 0.92x), and a no-residual unit ending the
+            // recursion like a skip (-6.39% at 0.95x).
             Preset::Veryfast => Tune {
+                depth_skip: 3,
                 rdoq_last: 0.85,
                 sao_edge_classes: 2,
                 split_gate: Some(2.0),
