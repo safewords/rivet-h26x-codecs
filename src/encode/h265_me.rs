@@ -4162,12 +4162,12 @@ impl<S: Sample> InterPicture<S> {
             // within one of the bi-prediction 8.5.3.3.4.2 makes from the
             // 14-bit intermediates, which is close enough to rank
             // candidates by; the unit that wins is predicted exactly.
-            let avg = &mut self.spred_avg;
-            for yy in 0..h {
-                for xx in 0..w {
-                    avg[yy * w + xx] = S::from_i32(
-                        (p0[yy * s0 + xx].to_i32() + p1[yy * s1 + xx].to_i32() + 1) >> 1,
-                    );
+            // Row slices zipped, so the compiler sees three unit-stride
+            // runs with no bounds checks inside and vectorises the row.
+            for (yy, out) in self.spred_avg[..w * h].chunks_exact_mut(w).enumerate() {
+                let (r0, r1) = (&p0[yy * s0..yy * s0 + w], &p1[yy * s1..yy * s1 + w]);
+                for ((o, &a), &b) in out.iter_mut().zip(r0).zip(r1) {
+                    *o = S::from_i32((a.to_i32() + b.to_i32() + 1) >> 1);
                 }
             }
             return (ctx.dist.satd)(src, src_stride, &self.spred_avg, w, w, h);
