@@ -242,7 +242,17 @@ pub(crate) fn quantise(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16]) -> u32
     SCRATCH.with_borrow_mut(|pos| quantise_in(b, coeffs, levels, pos))
 }
 
+/// From now on, on this thread, start each block's last-position search
+/// at its last coefficient of at least `f` of a step rather than half of
+/// one (`h265_tune::Tune::rdoq_last`). A coefficient below it is left
+/// zero without being weighed: the positions between were nearly always
+/// zeroed anyway, and weighing them was most of the quantiser's time.
+pub(crate) fn set_last_from(f: f32) {
+    LAST_FROM.with(|c| c.set(f));
+}
+
 thread_local! {
+    static LAST_FROM: std::cell::Cell<f32> = const { std::cell::Cell::new(0.5) };
     static SCRATCH: std::cell::RefCell<Vec<Pos>> =
         std::cell::RefCell::new(vec![Pos::default(); 1024]);
 }
@@ -263,6 +273,12 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     };
     let tabs = sub_block_tables();
     let half = step >> 1;
+    // The last position is searched from the last coefficient at or
+    // above this fraction of a step (`set_last_from`), half by default.
+    let lastq = LAST_FROM.with(|f| match f.get() {
+        f if f > 0.5 => (f64::from(f) * step as f64) as i64,
+        _ => half,
+    });
     levels[..n * n].fill(0);
     // Nothing reaches half a step: every level rounds to zero, and the
     // search below could only confirm it.
@@ -277,7 +293,7 @@ fn quantise_in(b: &Block<'_>, coeffs: &[i16], levels: &mut [i16], pos: &mut [Pos
     let raster = raster_of(b.scan_idx, b.log2);
     let Some(last) = raster
         .iter()
-        .rposition(|&r| i64::from(coeffs[r as usize].unsigned_abs()) * scale >= half)
+        .rposition(|&r| i64::from(coeffs[r as usize].unsigned_abs()) * scale >= lastq)
     else {
         return 0;
     };

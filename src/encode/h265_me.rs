@@ -705,6 +705,25 @@ pub struct InterPicture<S: Sample> {
     /// Under it, a B unit below the top of the tree searches a list's
     /// further references only where the unit enclosing it chose one.
     pub b_limit_refs: bool,
+    /// Partitioned shapes searched from the whole unit's motion: each
+    /// unit of a shape searches only the reference per list the 2Nx2N
+    /// unit chose, from the vector it found there (and the predictors),
+    /// with no widening rings and no bi refinement.
+    pub part_seeded: bool,
+    /// The reference per list the last 2Nx2N unit's search kept.
+    last_refs: [u8; 2],
+    /// Set while [`Self::pick_parts`] searches under [`Self::part_seeded`].
+    in_parts: bool,
+    /// Whether a unit whose best 2Nx2N shape is a merge tries the
+    /// partitioned shapes too.
+    pub parts_after_merge: bool,
+    /// When the losing shape of 2Nx2N and partitioned comes within this
+    /// fraction of the winner's SATD cost, both are coded and the cheaper
+    /// in SSD plus bits kept ([`PARTS_RD_MARGIN`] by default).
+    pub parts_rd_margin: f32,
+    /// The reference-list context's buffers, reused unit to unit.
+    rc_pocs: [Vec<i32>; 2],
+    rc_lt: [Vec<bool>; 2],
     /// Whether the chroma of an inter unit is quantised by RDOQ where the
     /// context asks for it (`MeCtx::rdoq`); otherwise only its luma is,
     /// the chroma by the plain quantiser. Intra units are not affected.
@@ -951,6 +970,13 @@ impl<S: Sample> InterPicture<S> {
             slice_b: false,
             b_ref_pick: [None; 4],
             b_limit_refs: false,
+            part_seeded: false,
+            last_refs: [0; 2],
+            in_parts: false,
+            parts_after_merge: true,
+            parts_rd_margin: PARTS_RD_MARGIN,
+            rc_pocs: [Vec::new(), Vec::new()],
+            rc_lt: [Vec::new(), Vec::new()],
         }
     }
 
@@ -1002,20 +1028,34 @@ impl<S: Sample> InterPicture<S> {
     /// takes, for a P slice whose `RefPicList0` holds `pocs0`, nearest
     /// first, with `col` (the list's first picture) collocated when the
     /// stream enables temporal MVP (see the module header).
-    fn ref_ctx<'a>(&self, pocs0: &[i32], col: &'a Frame<S>) -> RefCtx<'a, S> {
+    fn ref_ctx<'a>(&mut self, l0: &[&'a Frame<S>]) -> RefCtx<'a, S> {
+        let [mut p0, mut p1] = std::mem::take(&mut self.rc_pocs);
+        let [mut t0, mut t1] = std::mem::take(&mut self.rc_lt);
+        p0.clear();
+        p1.clear();
+        t0.clear();
+        t1.clear();
+        p0.extend(l0.iter().map(|f| f.poc));
+        t0.resize(l0.len(), false);
         RefCtx {
-            pocs: [pocs0.to_vec(), Vec::new()],
-            long_term: [vec![false; pocs0.len()], Vec::new()],
-            col: self.tmvp.then_some(col),
+            pocs: [p0, p1],
+            long_term: [t0, t1],
+            col: self.tmvp.then_some(l0[0]),
             cur_poc: self.cur_poc,
             no_backward_pred: true,
             tmvp: self.tmvp,
             max_merge_cand: MAX_MERGE_CAND,
             log2_par_mrg_level: 2,
             is_b: false,
-            num_ref_idx: [pocs0.len(), 0],
+            num_ref_idx: [l0.len(), 0],
             col_from_l0: true,
         }
+    }
+
+    /// Hand a reference-list context's buffers back for the next unit.
+    fn recycle_refs(&mut self, refs: RefCtx<'_, S>) {
+        self.rc_pocs = refs.pocs;
+        self.rc_lt = refs.long_term;
     }
 
     /// The reference-list context for a B slice whose `RefPicList0` is
@@ -1029,12 +1069,20 @@ impl<S: Sample> InterPicture<S> {
     /// hardcodes true because a P slice's single reference is always in
     /// the past. For a B between two anchors it comes out false, and it
     /// reaches `merge_candidate` through `RefCtx`.
-    fn ref_ctx_b<'a>(&self, l0: &[&Frame<S>], l1: &[&'a Frame<S>]) -> RefCtx<'a, S> {
-        let pocs0: Vec<i32> = l0.iter().map(|f| f.poc).collect();
-        let pocs1: Vec<i32> = l1.iter().map(|f| f.poc).collect();
+    fn ref_ctx_b<'a>(&mut self, l0: &[&Frame<S>], l1: &[&'a Frame<S>]) -> RefCtx<'a, S> {
+        let [mut pocs0, mut pocs1] = std::mem::take(&mut self.rc_pocs);
+        let [mut t0, mut t1] = std::mem::take(&mut self.rc_lt);
+        pocs0.clear();
+        pocs1.clear();
+        t0.clear();
+        t1.clear();
+        pocs0.extend(l0.iter().map(|f| f.poc));
+        pocs1.extend(l1.iter().map(|f| f.poc));
+        t0.resize(l0.len(), false);
+        t1.resize(l1.len(), false);
         let no_backward_pred = pocs0.iter().chain(&pocs1).all(|&p| p <= self.cur_poc);
         RefCtx {
-            long_term: [vec![false; pocs0.len()], vec![false; pocs1.len()]],
+            long_term: [t0, t1],
             num_ref_idx: [pocs0.len(), pocs1.len()],
             pocs: [pocs0, pocs1],
             col: self.tmvp.then_some(l1[0]),
@@ -1152,17 +1200,23 @@ impl<S: Sample> InterPicture<S> {
             self.gated = true;
             return;
         }
-        let parts = self.pick_parts(
-            ctx,
-            TreeRefs::P(refs_l0),
-            x0,
-            y0,
-            log2_cu,
-            src_y,
-            y_stride,
-            &rate,
-            lam,
-        );
+        // Under `parts_after_merge` false a unit whose best 2Nx2N shape is
+        // a merge tries no partition.
+        let parts = if !self.parts_after_merge && pick.merge_idx.is_some() {
+            None
+        } else {
+            self.pick_parts(
+                ctx,
+                TreeRefs::P(refs_l0),
+                x0,
+                y0,
+                log2_cu,
+                src_y,
+                y_stride,
+                &rate,
+                lam,
+            )
+        };
         self.alts = Some((pick, parts));
         self.last_pick_cost = parts.map_or(pick.cost, |p| p.2.min(pick.cost));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
@@ -1220,22 +1274,21 @@ impl<S: Sample> InterPicture<S> {
         let wh = (pu.w as usize, pu.h as usize);
         let whole = pu.w == pu.n_cb && pu.h == pu.n_cb;
         let nref = refs_l0.len() as u32;
-        let pocs: Vec<i32> = refs_l0.iter().map(|f| f.poc).collect();
-        let refs = self.ref_ctx(&pocs, refs_l0[0]);
+        let refs = self.ref_ctx(refs_l0);
         // The decoder's own candidate lists (see the module header). The
         // AMVP predictors depend on the reference index — the derivation
         // scales a neighbour's vector by the POC-distance ratio between
         // its reference and this one — so they are derived per
         // reference by calling `amvp` once for each.
         let merge: [Cand; MAX_MERGE_CAND] = merge_candidates(&self.info, &self.recon, &refs, pu);
-        let mvp: Vec<[Mv; 2]> = (0..refs_l0.len())
-            .map(|r| {
-                [
-                    amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 0),
-                    amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 1),
-                ]
-            })
-            .collect();
+        let mut mvp = [[Mv::ZERO; 2]; 16];
+        for (r, m) in mvp.iter_mut().enumerate().take(refs_l0.len()) {
+            *m = [
+                amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 0),
+                amvp(&self.info, &self.recon, &refs, pu, 0, r as i8, 1),
+            ];
+        }
+        self.recycle_refs(refs);
 
         let src = &src_y[y0 * y_stride + x0..];
 
@@ -1260,22 +1313,27 @@ impl<S: Sample> InterPicture<S> {
         //
         // Full-sample descent from every distinct seed's best, then the
         // two sub-sample rings, per reference.
-        let mut per_ref: Vec<(Mv, u32)> = Vec::with_capacity(refs_l0.len());
+        let mut per_ref = [(Mv::ZERO, u32::MAX); 16];
         for (r, rf) in refs_l0.iter().enumerate() {
-            if !self.ref_searched(pu, r) {
-                per_ref.push((Mv::ZERO, u32::MAX));
+            if !self.ref_searched(pu, r) || (self.in_parts && r != self.last_refs[0] as usize) {
                 continue;
             }
             let mut seeds = [Mv::ZERO; 3 + MAX_MERGE_CAND + 1];
             let mut ns = 3;
             (seeds[1], seeds[2]) = (mvp[r][0], mvp[r][1]);
-            for c in merge.iter().filter(|c| c.ref_idx[0] == r as i8) {
-                seeds[ns] = c.mv[0];
-                ns += 1;
-            }
-            if let Some(p) = self.parent_seed(pu, 0, r) {
-                seeds[ns] = p;
-                ns += 1;
+            if self.in_parts {
+                if let Some(p) = self.own_seed(pu, 0, r) {
+                    seeds[0] = p;
+                }
+            } else {
+                for c in merge.iter().filter(|c| c.ref_idx[0] == r as i8) {
+                    seeds[ns] = c.mv[0];
+                    ns += 1;
+                }
+                if let Some(p) = self.parent_seed(pu, 0, r) {
+                    seeds[ns] = p;
+                    ns += 1;
+                }
             }
             let full = self.search_full(
                 ctx,
@@ -1307,7 +1365,7 @@ impl<S: Sample> InterPicture<S> {
                 mvp[r],
             );
             self.note_seed(pu, 0, r, found.0);
-            per_ref.push(found);
+            per_ref[r] = found;
         }
 
         // Cost the shapes. Merge candidates are scored at their exact
@@ -1316,13 +1374,16 @@ impl<S: Sample> InterPicture<S> {
         // signals strictly more bins for the same prediction).
         let mut best_merge: Option<(usize, u32)> = None; // (idx, satd)
         let mut best_merge_cost = f32::INFINITY;
-        let mut seen: Vec<(Mv, i8)> = Vec::with_capacity(MAX_MERGE_CAND);
+        let mut seen = [(Mv::ZERO, -1i8); MAX_MERGE_CAND];
+        let mut n_seen = 0;
         for (idx, cand) in merge.iter().enumerate().take(self.merge_tried) {
             let ri = cand.ref_idx[0];
-            if ri < 0 || ri as usize >= refs_l0.len() || seen.contains(&(cand.mv[0], ri)) {
+            if ri < 0 || ri as usize >= refs_l0.len() || seen[..n_seen].contains(&(cand.mv[0], ri))
+            {
                 continue;
             }
-            seen.push((cand.mv[0], ri));
+            seen[n_seen] = (cand.mv[0], ri);
+            n_seen += 1;
             let satd = self.satd_at(
                 ctx,
                 &refs_l0[ri as usize].y,
@@ -1367,7 +1428,7 @@ impl<S: Sample> InterPicture<S> {
         // so a single-reference stream prices exactly as it always did.
         let mut best_amvp: Option<(usize, u8, Mv, u32)> = None; // (ref, flag, mvd, satd)
         let mut amvp_cost = f32::INFINITY;
-        for (r, &(mv_r, satd_r)) in per_ref.iter().enumerate() {
+        for (r, &(mv_r, satd_r)) in per_ref.iter().enumerate().take(refs_l0.len()) {
             let mvd_for = |p: Mv| Mv::new(mv_r.x.wrapping_sub(p.x), mv_r.y.wrapping_sub(p.y));
             let (d0, d1) = (mvd_for(mvp[r][0]), mvd_for(mvp[r][1]));
             let price = |d: Mv, flag: u8| {
@@ -1404,6 +1465,9 @@ impl<S: Sample> InterPicture<S> {
             }
         }
         let (amvp_ref, amvp_flag, mvd, amvp_satd) = best_amvp.expect("at least one reference");
+        if whole {
+            self.last_refs = [amvp_ref as u8, 0];
+        }
 
         match best_merge {
             Some((idx, satd)) if best_merge_cost <= amvp_cost => PuPick {
@@ -1541,17 +1605,23 @@ impl<S: Sample> InterPicture<S> {
             self.gated = true;
             return;
         }
-        let parts = self.pick_parts(
-            ctx,
-            TreeRefs::B(l0, l1),
-            x0,
-            y0,
-            log2_cu,
-            src_y,
-            y_stride,
-            &rate,
-            lam,
-        );
+        // Under `parts_after_merge` false a unit whose best 2Nx2N shape is
+        // a merge tries no partition.
+        let parts = if !self.parts_after_merge && pick.merge_idx.is_some() {
+            None
+        } else {
+            self.pick_parts(
+                ctx,
+                TreeRefs::B(l0, l1),
+                x0,
+                y0,
+                log2_cu,
+                src_y,
+                y_stride,
+                &rate,
+                lam,
+            )
+        };
         self.alts = Some((pick, parts));
         self.last_pick_cost = parts.map_or(pick.cost, |p| p.2.min(pick.cost));
         if let Some((part, pus, _)) = parts.filter(|p| p.2 < pick.cost) {
@@ -1625,6 +1695,7 @@ impl<S: Sample> InterPicture<S> {
                 ];
             }
         }
+        self.recycle_refs(refs);
 
         let src = &src_y[y0 * y_stride + x0..];
         let mvd_for = |mv: Mv, p: Mv| Mv::new(mv.x.wrapping_sub(p.x), mv.y.wrapping_sub(p.y));
@@ -1655,20 +1726,30 @@ impl<S: Sample> InterPicture<S> {
         let mut uni = [(Mv::ZERO, u32::MAX, 0usize, Mv::ZERO, 0u8, f32::INFINITY); 2];
         for list in 0..2usize {
             for (r, rf) in lists[list].iter().enumerate() {
-                if r > 0 && !self.b_ref_searched(pu, list) {
+                if self.in_parts {
+                    if r != self.last_refs[list] as usize {
+                        continue;
+                    }
+                } else if r > 0 && !self.b_ref_searched(pu, list) {
                     continue;
                 }
                 let plane = &rf.y;
                 let mut seeds = [Mv::ZERO; 3 + MAX_MERGE_CAND + 1];
                 let mut ns = 3;
                 (seeds[1], seeds[2]) = (mvp[list][r][0], mvp[list][r][1]);
-                for c in merge.iter().filter(|c| c.ref_idx[list] == r as i8) {
-                    seeds[ns] = c.mv[list];
-                    ns += 1;
-                }
-                if let Some(p) = self.parent_seed(pu, list, r) {
-                    seeds[ns] = p;
-                    ns += 1;
+                if self.in_parts {
+                    if let Some(p) = self.own_seed(pu, list, r) {
+                        seeds[0] = p;
+                    }
+                } else {
+                    for c in merge.iter().filter(|c| c.ref_idx[list] == r as i8) {
+                        seeds[ns] = c.mv[list];
+                        ns += 1;
+                    }
+                    if let Some(p) = self.parent_seed(pu, list, r) {
+                        seeds[ns] = p;
+                        ns += 1;
+                    }
                 }
                 let seeds = &seeds[..ns];
                 // Whole samples are searched on the weighted reference
@@ -1726,6 +1807,9 @@ impl<S: Sample> InterPicture<S> {
             }
         }
         let d = self.depth_of(pu);
+        if whole {
+            self.last_refs = [uni[0].2 as u8, uni[1].2 as u8];
+        }
         if d < 4 && whole {
             self.b_ref_pick[d] = Some((
                 pu.x_cb as u32,
@@ -1859,13 +1943,15 @@ impl<S: Sample> InterPicture<S> {
         // either list or both, and is scored the way it would be predicted.
         let mut best_merge: Option<(usize, u32)> = None;
         let mut best_merge_cost = f32::INFINITY;
-        let mut seen: Vec<([Mv; 2], [i8; 2])> = Vec::with_capacity(MAX_MERGE_CAND);
+        let mut seen = [([Mv::ZERO; 2], [-1i8; 2]); MAX_MERGE_CAND];
+        let mut n_seen = 0;
         for (idx, cand) in merge.iter().enumerate().take(self.merge_tried) {
             let key = (cand.mv, cand.ref_idx);
-            if cand.ref_idx == [-1, -1] || seen.contains(&key) {
+            if cand.ref_idx == [-1, -1] || seen[..n_seen].contains(&key) {
                 continue;
             }
-            seen.push(key);
+            seen[n_seen] = key;
+            n_seen += 1;
             let plane = |list: usize| &lists[list][cand.ref_idx[list] as usize].y;
             let satd = match (cand.ref_idx[0] >= 0, cand.ref_idx[1] >= 0) {
                 (true, true) => self.satd_bi_at(
@@ -2103,6 +2189,12 @@ impl<S: Sample> InterPicture<S> {
         let w4 = self.info.w4;
         let motion = save4(&self.recon.motion, self.recon.w4, x0, y0, n);
         let pred_mode = save4(&self.info.pred_mode, w4, x0, y0, n);
+        let (rings, bi_refine) = (self.search_rings, self.bi_refine);
+        if self.part_seeded {
+            self.in_parts = true;
+            self.search_rings = 0;
+            self.bi_refine = 0;
+        }
         PicInfo::fill4(&mut self.info.pred_mode, w4, x0, y0, n, n, 0);
         let mut best: Option<PartsPick> = None;
         for &part in shapes {
@@ -2146,6 +2238,8 @@ impl<S: Sample> InterPicture<S> {
             }
         }
         restore4(&mut self.info.pred_mode, w4, x0, y0, n, &pred_mode);
+        self.in_parts = false;
+        (self.search_rings, self.bi_refine) = (rings, bi_refine);
         best
     }
 
@@ -3328,7 +3422,7 @@ impl<S: Sample> InterPicture<S> {
             } else {
                 (whole.cost, parts_cost)
             };
-            if other <= mine * (1.0 + PARTS_RD_MARGIN) {
+            if other <= mine * (1.0 + self.parts_rd_margin) {
                 let saved = self.take_save(x0, y0, n);
                 let mut alt = self.fresh(log2, ctx);
                 if chose_parts {
@@ -3553,6 +3647,17 @@ impl<S: Sample> InterPicture<S> {
         let n = (pu.n_cb as u32) * 2;
         let inside = (pu.x_cb as u32).wrapping_sub(px) < n && (pu.y_cb as u32).wrapping_sub(py) < n;
         inside.then_some(mv)
+    }
+
+    /// The vector the 2Nx2N unit of the CU `pu` belongs to found for
+    /// (`list`, `r`), for a partition's seeded search.
+    fn own_seed(&self, pu: &PuPos, list: usize, r: usize) -> Option<Mv> {
+        let d = self.depth_of(pu);
+        if d >= 4 || r >= 8 {
+            return None;
+        }
+        let (px, py, mv) = self.seed_at[d][list * 8 + r]?;
+        (px == pu.x_cb as u32 && py == pu.y_cb as u32).then_some(mv)
     }
 
     /// Record what this unit's search found, for the units below it.
@@ -4561,8 +4666,10 @@ pub fn prefer_intra<S: Sample>(
         }
     }
     let dc = S::from_i32(((sum + (n * n / 2) as u64) / (n * n) as u64) as i32);
-    let flat = vec![dc; n * n];
-    let intra_proxy = (ctx.dist.satd)(src, src_stride, &flat, n, n, n);
+    // One row of the flat block, read at a stride of zero: no
+    // allocation, and the same samples a full block would hold.
+    let flat = [dc; 64];
+    let intra_proxy = (ctx.dist.satd)(src, src_stride, &flat[..n], 0, n, n);
     intra_proxy < inter_satd
 }
 

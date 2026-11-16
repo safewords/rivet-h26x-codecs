@@ -1179,6 +1179,8 @@ impl<S: Sample> Core<S> {
         // initial ones, as every rate in the decisions is priced.
         let tune = super::h265_tune::Tune::of(&self.cfg);
         super::h265_intra::set_lambda_scale(tune.lambda_of(&c));
+        super::h265_rdoq::set_last_from(tune.rdoq_last);
+        super::h265_sao::set_edge_classes(tune.sao_edge_classes);
         let rdoq_cx = Contexts::new(0, qp as i32);
         let ictx = IntraCtx {
             dsp: &dsp,
@@ -1722,6 +1724,8 @@ impl<S: Sample> Core<S> {
         let bit_depth = self.cfg.bit_depth;
         let tune = super::h265_tune::Tune::of(&self.cfg);
         super::h265_intra::set_lambda_scale(tune.lambda_of(&c));
+        super::h265_rdoq::set_last_from(tune.rdoq_last);
+        super::h265_sao::set_edge_classes(tune.sao_edge_classes);
         let rdoq_cx = Contexts::new(if c.kind == Kind::B { 2 } else { 1 }, qp as i32);
         let mctx = IntraCtx {
             dsp: &dsp,
@@ -1761,6 +1765,9 @@ impl<S: Sample> Core<S> {
         pic.split_gate_above = tune.split_gate_above;
         pic.slice_b = c.kind == Kind::B;
         pic.b_limit_refs = tune.b_limit_refs;
+        pic.part_seeded = tune.part_seeded;
+        pic.parts_after_merge = tune.parts_after_merge;
+        pic.parts_rd_margin = tune.parts_rd_margin;
         // SAO in a picture nothing references improves only that picture,
         // and under the tiers not by enough to pay for its decision.
         let sao_on = self.cfg.sao && (c.reference || tune.sao_nonref);

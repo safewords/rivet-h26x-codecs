@@ -325,6 +325,17 @@ fn lambda(qp: i32) -> f32 {
     0.57 * 2f32.powf((qp - 12) as f32 / 3.0)
 }
 
+thread_local! {
+    static EDGE_CLASSES: std::cell::Cell<u8> = const { std::cell::Cell::new(4) };
+}
+
+/// From now on, on this thread, weigh only the first `n` edge classes
+/// (horizontal, vertical, then the diagonals) for each CTB
+/// (`h265_tune::Tune::sao_edge_classes`).
+pub(crate) fn set_edge_classes(n: u8) {
+    EDGE_CLASSES.with(|c| c.set(n.clamp(1, 4)));
+}
+
 /// Approximate bins for one component's parameters, in the shape
 /// `write_sao` will actually emit: the type, four truncated-unary
 /// magnitudes, the signs band mode carries, and the position or class.
@@ -605,7 +616,7 @@ impl<S: Sample> Comp<'_, S> {
         // Edge: four classes. The syntax forces the sign of each category,
         // so the clamp is one-sided and a category that wants the other
         // direction simply takes zero.
-        for class in 0..4u8 {
+        for class in 0..EDGE_CLASSES.with(|c| c.get()) {
             self.edges_of(class, usable, stats);
             let mut p = SaoParams {
                 type_idx: 2,

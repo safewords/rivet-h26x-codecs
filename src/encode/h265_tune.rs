@@ -34,12 +34,13 @@ pub fn apply_preset(cfg: &mut Config, p: Preset) {
             cfg.max_refs = 2;
             cfg.inter_parts = InterParts::None;
         }
-        // Symmetric partitions measured at slow (2026-11-15): +6.38% against
-        // +6.28% BD-rate without them, at 1.9x the CPU. Off until they
-        // earn it.
+        // Symmetric partitions at slow, searched from the whole unit's
+        // motion (`Tune::part_seeded`, round 5): see `Tune::of`. Measured
+        // first (2026-11-15) searched from scratch: +6.38% against +6.28%
+        // BD-rate without them, at 1.9x the CPU.
         Preset::Slow => {
             cfg.max_refs = 4;
-            cfg.inter_parts = InterParts::None;
+            cfg.inter_parts = InterParts::Symmetric;
         }
     }
 }
@@ -150,6 +151,18 @@ pub(crate) struct Tune {
     pub b_refs: usize,
     /// `h265_me::InterPicture::b_limit_refs`.
     pub b_limit_refs: bool,
+    /// Where RDOQ starts its last-position search, in steps
+    /// (`h265_rdoq::set_last_from`); 0.5 weighs every coefficient that
+    /// rounds to a level.
+    pub rdoq_last: f32,
+    /// How many SAO edge classes each CTB weighs (`h265_sao::set_edge_classes`).
+    pub sao_edge_classes: u8,
+    /// `h265_me::InterPicture::part_seeded`.
+    pub part_seeded: bool,
+    /// `h265_me::InterPicture::parts_after_merge`.
+    pub parts_after_merge: bool,
+    /// `h265_me::InterPicture::parts_rd_margin`.
+    pub parts_rd_margin: f32,
 }
 
 impl Tune {
@@ -192,6 +205,11 @@ impl Tune {
         i_adapt_m0: -1.4,
         b_refs: 1,
         b_limit_refs: false,
+        rdoq_last: 0.5,
+        sao_edge_classes: 4,
+        part_seeded: false,
+        parts_after_merge: true,
+        parts_rd_margin: 1.0,
     };
 
     /// The tuning for `cfg`'s tier, or [`Tune::NEUTRAL`] without one.
@@ -270,6 +288,13 @@ impl Tune {
             cutree: 1.0,
             i_adapt_k: 4.5,
             i_adapt_m0: -1.45,
+            // RDOQ's last position searched from the last coefficient of
+            // 0.7 of a step (round 5, 2026-11-15, x265 parity, on the
+            // round's other changes): slow -5.85% -> -6.00% BD-rate at
+            // 0.98x the CPU, medium -14.40% -> -14.45% at 0.94x, veryfast
+            // -13.91% -> -14.09% at 0.98x; at 0.85 slow -5.10%, medium
+            // -14.25%, veryfast -13.91% at 0.96x.
+            rdoq_last: 0.7,
             ..Tune::NEUTRAL
         };
         match p {
@@ -291,7 +316,22 @@ impl Tune {
             // -5.51% BD-rate (mobile -1.08% -> -5.02%) at 1.06x the CPU;
             // searched everywhere -5.75% at 1.17x; four per list, limited,
             // -5.71% at 1.09x. Medium gained -0.4% for 1.05-1.09x.
+            // Round 5 (2026-11-15, x265 parity): symmetric partitions
+            // (`Config::inter_parts`, set by `apply_preset`) searched from
+            // the 2Nx2N unit's motion (`part_seeded`), tried only where the
+            // 2Nx2N unit is not a merge, the loser coded too only within
+            // 0.1 of the winner; with a skip cheaper than 0.5 Lagrangians a
+            // sample ending the recursion (`rskip`): -6.00% -> -7.06%
+            // BD-rate (foreman -5.9% -> -8.1%, park_joy +0.4% -> -0.8%)
+            // at 0.93x x265's CPU. Partitions searched from scratch were
+            // -8.23% at 2.1x; seeded, -7.73% at 1.65x; seeded behind the
+            // merge gate, -6.99% at 1.16x; and rskip at 0.5 bought the
+            // rest of the CPU back for -0.3%.
             Preset::Slow => Tune {
+                part_seeded: true,
+                parts_after_merge: false,
+                parts_rd_margin: 0.1,
+                rskip: Some(0.5),
                 b_refs: 2,
                 b_limit_refs: true,
                 lambda: [0.7; 4],
@@ -341,8 +381,18 @@ impl Tune {
             // 3.5%; quarter-sample refinement on a cross -10.19% (mobile
             // -6.97% -> -4.11%) for 2%; the merge candidates no longer
             // seeding a unit with a parent's vector, no saving.
+            // Round 5 (2026-11-15, x265 parity, timed against x265 in
+            // concurrent one-thread runs): RDOQ's last position from 0.85
+            // of a step, two SAO edge classes of four and the early split
+            // at 2.0: -14.09% -> -13.38% BD-rate at about 0.97x x265's CPU
+            // from 1.05x. Measured on the way: no RDOQ in inter units at
+            // all, -9.48% (ducks +0.59%) at 0.94x; no inter transform split
+            // -12.04% (mobile -5.4%) at 0.95x; inter chroma by the plain
+            // quantiser 1.7% for 1.2%; fewer merge candidates, nothing.
             Preset::Veryfast => Tune {
-                split_gate: Some(2.5),
+                rdoq_last: 0.85,
+                sao_edge_classes: 2,
+                split_gate: Some(2.0),
                 tu_split_nz: 4,
                 merge_tried: 3,
                 i_split_depth: 0,
