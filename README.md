@@ -849,6 +849,97 @@ against round 11B's tree unless said otherwise; x264's slope 0.2 % per
   trellis — 845 of park_joy's analyses, -0.2 % instructions, no
   measurable cycles.
 
+#### Round 12A: the costs around the macroblock loop
+
+(2026-11-16. The other half of the twelfth round: speed alone, every
+stream byte-identical, so the BD-rates are round 12B's to the digit at
+all three presets. Built on round 11B's tree and measured there step by
+step, then rebased onto round 12B's; the totals and the frontier below
+are on 12B's tree.)
+
+Where the time was, first (park_joy and ducks_take_off, Time Profiler
+with line tables, before this round). Veryfast: the final CABAC writer
+13 %, the lookahead 5.4 % (its half-resolution picture 1.1 %, its integer
+searches and their SADs 3 %, propagation 0.5 %), deblocking 2.9 % (the
+decoder's own NEON filter, shared and left alone), the half-sample planes
+1.3 % (scalar), `memmove` 5 % (half of it the analysis's decision records,
+outside this part's files), the example's I/O under 1 %. Medium: the
+trellis 17 %, SATD kernels 13 %, the search's own code 12 %, the
+estimator 9 %, the lookahead 2 %, deblocking 1.5 %.
+
+Cycles and instructions at QP 27 over the five clips, minimum of three
+runs, every step interleaved in one batch, each against the step before
+(on round 11B's tree):
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| lookahead: the half-resolution picture a row at a time over slices (no clamp per sample, so it vectorises); after a hexagon step only its three new points scored — the other three were scored by the step before, cost at least its best and cannot win, and the new ones are taken in the hexagon's own order | -1.4 % cycles (-2.59 % ins) | -0.6 % (-1.03 %) | -0.5 % (-0.64 %) |
+| a reference's half-sample planes in NEON (`H264EncDsp::hpel_planes`): sixteen horizontal or vertical six-tap samples a step in 16-bit lanes, the centre ones over the vertical sums in 32-bit lanes, the rounding and the clip one `sqrshrun` each; only the border the six-tap cannot reach copied | -1.1 % (-1.12 %) | -0.3 % (-0.57 %) | -0.1 % (-0.30 %) |
+| the source padded to the coded size by appending, not into a zeroed vector | -0.0 % (-0.05 %) | +0.1 % (0.00 %) | +0.1 % (-0.04 %) |
+| a macroblock's decision used where the analysis left it (a record is about 2 KB: moved out of the analysis's answer and, for an intra macroblock, a default one built, each a copy) | -0.4 % (-0.19 %) | -0.3 % (-0.10 %) | -0.2 % (-0.05 %) |
+| lookahead: the hexagon's and the square's points four at a time (`sad_x4`) | -0.4 % (-0.95 %) | +0.1 % (-0.34 %) | -0.1 % (-0.24 %) |
+| residual walk: an empty 4x4 or chroma AC block coded (or priced) as its coded_block_flag straight from the decision's count, without its mask | -0.1 % (-0.24 %) | -0.7 % (-0.36 %) | -0.5 % (-0.29 %) |
+| **all six**, on 11B's tree (4.73G / 11.03G / 18.26G before) | **-3.4 %** (-5.05 %) | **-1.7 %** (-2.37 %) | **-1.4 %** (-1.55 %) |
+| **all six, on 12B's tree** (bebce72: 4.94G / 11.68G / 18.28G before) | **-3.5 %** (-4.85 %) | **-2.0 %** (-2.26 %) | **-1.4 %** (-1.51 %) |
+
+On x264's ladder (`frontier.py`, x264 timed again in the same shuffled
+batch, four at a time, minimum of three runs; BD-rate Y against x264
+medium):
+
+| rivet | BD-rate Y | CPU | x264's CPU at this BD-rate | rivet's time at equal BD-rate |
+|---|---:|---:|---:|---:|
+| veryfast, round 12B (bebce72) | +11.58 % | 0.524x | 0.525x | 1.00x |
+| veryfast, now | +11.58 % | 0.504x | 0.525x | **0.96x** |
+| medium, round 12B | -1.00 % | 1.218x | 1.233x | 0.99x |
+| medium, now | -1.00 % | 1.194x | 1.233x | **0.97x** |
+| slow, round 12B | -3.38 % | 1.897x | 2.026x | 0.94x |
+| slow, now | -3.38 % | 1.873x | 2.026x | **0.92x** |
+
+(Round 12B's own run of its tree read 1.00x / 0.98x / 0.94x.) All three
+presets are now past x264's frontier: at its time x264 is 0.84 / 0.15 /
+0.38 points worse than rivet.
+
+Parity against x264 at the same preset is round 12B's to the digit on
+every clip: -7.11 / -1.00 / +0.22 % BD-rate Y (-7.40 / -1.35 / -0.38 %
+avg). H.265 is untouched: 18 streams (three CIF clips, three presets, QP
+22 and 37) are byte-identical before and after. The decoder is
+untouched: 56 streams (the 53 fixtures, regenerated, and `tests/data`) decode to
+the same MD5s with round 11B's decoder and this one, and the fixtures to
+their golden MD5s. The identity check is 638 cells identical: the NEON
+planes and the lookahead's four-way SADs are behind the `h264_enc`
+table's gate, so it compares them with the scalar builder and the
+one-at-a-time SADs.
+
+Tried and dropped (byte-identical; each against the tree before it):
+
+- The final writer's level of one or two without a branch on which, as
+  the estimator's: the two's terminating bin coded or not by selects on
+  the range, `low`, the shift and the context's state (the word out only
+  after the select). +0.5 % cycles at veryfast, -0.2 % at medium,
+  +0.5 % / +0.2 % instructions: the selects cost every one what the
+  mispredictions cost some.
+- The four-way SAD kernels with two accumulators a candidate (even and
+  odd rows), to halve the chain of dependent accumulates: -0.1 % / +0.2 %
+  cycles, +0.3 % / +0.5 % instructions. Out-of-order execution already
+  overlaps the chain with the next call's work.
+- The lookahead's four intra predictions scored four at a time
+  (`satd_x4`) where a block has both edges: -0.0 % / +0.2 %.
+- The estimator's sign bins charged once per block (`n_sig` bits at the
+  end of the level loop rather than one add per level): no change.
+
+Not done, and why. Deblocking (3 % of veryfast) is the decoder's filter,
+already NEON, and run over the encoder's reconstruction on purpose (see
+`h264_deblock.rs`); half of the remaining `memmove` and the
+`alloc_zeroed` calls are the analysis's (`h264_analyse.rs`, the other
+part's file). The trellis is where round 11B left it: its general path
+is a chain of dependent float adds a position (three per candidate,
+then the first-minimum tree), which no byte-identical reordering
+shortens, and its states are vector lanes, so dropping dead ones saves
+issue slots, not latency. The final writer's bins are bound by the
+range's chain and, where consecutive bins share a context (an 8x8
+block's significance map, a level's prefix), by the state's chain
+through memory.
+
 The eighth round, for the record (its frontier: 1.15x / 1.45x / 1.46x).
 
 What the eighth round did (BD-rate Y against x264 at the same preset,
