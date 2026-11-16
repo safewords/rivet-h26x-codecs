@@ -2182,10 +2182,10 @@ mod tests {
         ] {
             for range in [16000i32, 22500] {
                 let a: Vec<i16> = (0..w * h)
-                    .map(|_| (lcg(&mut seed) % (2 * range as u32)) as i16 - range as i16)
+                    .map(|_| ((lcg(&mut seed) % (2 * range as u32)) as i32 - range) as i16)
                     .collect();
                 let b: Vec<i16> = (0..w * h)
-                    .map(|_| (lcg(&mut seed) % (2 * range as u32)) as i16 - range as i16)
+                    .map(|_| ((lcg(&mut seed) % (2 * range as u32)) as i32 - range) as i16)
                     .collect();
                 let stride = w + 5;
                 let mut d1 = vec![0u8; stride * h];
