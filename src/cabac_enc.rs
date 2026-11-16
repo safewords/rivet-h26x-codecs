@@ -159,6 +159,19 @@ static STATE_COST: [[f32; 2]; 64] = [
 /// A bin's cost and the context's next state, indexed by
 /// `(ctx << 1) | bin` — [`STATE_COST`] and the transition tables fused,
 /// so an estimating encoder prices a bin with two loads.
+/// `rangeTabLps` by the context's whole state byte (`pStateIdx << 1 |
+/// valMPS`), its four columns (`(codIRange >> 6) & 3`) as the bytes of one
+/// word, lowest first: [`WCore::decision`]'s table.
+static LPS_WORD: [u32; 128] = {
+    let mut t = [0u32; 128];
+    let mut c = 0;
+    while c < 128 {
+        t[c] = u32::from_le_bytes(LPS_RANGE[c >> 1]);
+        c += 1;
+    }
+    t
+};
+
 static EST_NEXT: [u8; 256] = {
     let mut t = [0u8; 256];
     let mut c = 0;
@@ -683,9 +696,12 @@ impl<'a> BinCore<CabacWriter<'a>> for WCore {
     #[inline(always)]
     fn decision(&mut self, out: &mut CabacWriter<'a>, ctx: &mut Ctx, bin: u32) {
         let state = *ctx;
-        let p = (state >> 1) as usize;
         let mps = (state & 1) as u32;
-        let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
+        // The context's four LPS sub-ranges are one word, loaded from the
+        // state alone; the range only picks a byte of it by a shift — off
+        // the range's dependency chain, where a table load indexed by the
+        // range would sit on it.
+        let lps = (LPS_WORD[state as usize & 127] >> ((self.range >> 3) & 0x18)) & 0xff;
         // Whether a bin is the LPS is the data's business, so the update
         // and the renormalisation are selects and an unconditional shift
         // (by zero when the range is still in its upper half: a nine-bit
