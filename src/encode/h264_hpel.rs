@@ -508,6 +508,8 @@ pub(crate) struct Search<'a, 'b, S: Sample> {
     pub(crate) sad_x4: Option<crate::dsp::h264_enc::SadX4Fn>,
     /// The encode table's four-way average-SATD, where the CPU has one.
     pub(crate) satd_x4: Option<crate::dsp::h264_enc::SatdAvgX4Fn>,
+    /// The encode table's four-way plane-sample SATD, where the CPU has one.
+    pub(crate) satd_plain_x4: Option<crate::dsp::h264_enc::SatdX4Fn>,
 }
 
 /// Whole-sample points a search step scores together, at most sixteen.
@@ -675,9 +677,40 @@ impl<S: Sample> Search<'_, '_, S> {
     /// time through the four-way kernel where there is one — each the
     /// value [`Search::satd`] gives.
     #[inline]
-    fn satd_n(&self, hot: &Hot<'_, S>, mvs: &[Mv; 8], n: usize, buf: &mut [S; 256]) -> [u32; 8] {
+    fn satd_n(
+        &self,
+        hot: &Hot<'_, S>,
+        mvs: &[Mv; 8],
+        n: usize,
+        plain: bool,
+        buf: &mut [S; 256],
+    ) -> [u32; 8] {
         let mut out = [0u32; 8];
-        if let Some(f) = self.satd_x4.filter(|_| S::BYTES == 1 && n > 1) {
+        // Every point a plane sample (`plain`: a half-sample ring, whose
+        // points all have even components): no average to take.
+        if let Some(f) = self
+            .satd_plain_x4
+            .filter(|_| S::BYTES == 1 && n > 1 && plain)
+        {
+            // SAFETY: a one-byte `Sample` is `u8`.
+            let as8 =
+                |v: &[S]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
+            let at = |k: usize| as8(hot.pair(mvs[k.min(n - 1)]).0);
+            let s8 = as8(self.src);
+            let mut k = 0;
+            while k < n {
+                let d = f(
+                    s8,
+                    self.src_stride,
+                    [at(k), at(k + 1), at(k + 2), at(k + 3)],
+                    hot.stride as usize,
+                    self.w,
+                    self.h,
+                );
+                out[k..(k + 4).min(8)].copy_from_slice(&d[..(8 - k).min(4)]);
+                k += 4;
+            }
+        } else if let Some(f) = self.satd_x4.filter(|_| S::BYTES == 1 && n > 1) {
             let rs = hot.stride as usize;
             // SAFETY: a one-byte `Sample` is `u8`.
             let as8 =
@@ -936,7 +969,7 @@ impl<S: Sample> Search<'_, '_, S> {
                     ms[n] = m;
                     n += 1;
                 }
-                let ss = self.satd_n(&hot, &ms, n, &mut buf);
+                let ss = self.satd_n(&hot, &ms, n, step == 2, &mut buf);
                 for (&m, &s) in ms[..n].iter().zip(&ss[..n]) {
                     let rc = hot.rate(m.x as i32, m.y as i32);
                     if s + rc < bcost {

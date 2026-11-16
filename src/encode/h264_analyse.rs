@@ -1451,6 +1451,7 @@ pub(crate) fn p_mb<S: Sample>(
         satd_avg: ctx.enc.satd_avg,
         sad_x4: ctx.enc.sad_x4,
         satd_x4: ctx.enc.satd_avg_x4,
+        satd_plain_x4: ctx.enc.satd_x4,
     };
     let run_r =
         |r: usize, x: usize, y: usize, w: usize, h: usize, pred: Mv, cands: &[Mv], mc: &MeCfg| {
@@ -2247,6 +2248,7 @@ pub(crate) fn b_mb<S: Sample>(
         satd_avg: ctx.enc.satd_avg,
         sad_x4: ctx.enc.sad_x4,
         satd_x4: ctx.enc.satd_avg_x4,
+        satd_plain_x4: ctx.enc.satd_x4,
     };
     let search = |l: usize,
                   rf: i8,

@@ -132,6 +132,32 @@ pub type SatdAvgX4Fn = fn(
     h: usize,
 ) -> [u32; 4];
 
+/// SATD of one 8-bit `src` block against four candidate blocks sharing a
+/// stride, `w` by `h` (multiples of four): [`SatdAvgX4Fn`] for candidates
+/// that are each a plane's own samples — a half-sample refinement ring,
+/// every point of which is — with no average to take. Each sum is the
+/// distortion table's `satd_scalar`.
+pub type SatdX4Fn = fn(
+    src: &[u8],
+    src_stride: usize,
+    refs: [&[u8]; 4],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4];
+
+/// The definition [`SatdX4Fn`] kernels are held to: four scalar SATDs.
+pub fn satd_x4_scalar(
+    src: &[u8],
+    src_stride: usize,
+    refs: [&[u8]; 4],
+    ref_stride: usize,
+    w: usize,
+    h: usize,
+) -> [u32; 4] {
+    refs.map(|r| super::distortion::satd_scalar(src, src_stride, r, ref_stride, w, h))
+}
+
 /// The definition [`SatdAvgX4Fn`] kernels are held to: four
 /// [`satd_avg_scalar`]s.
 pub fn satd_avg_x4_scalar(
@@ -232,6 +258,11 @@ pub struct H264EncDsp {
     /// has it; `None` and callers score them one at a time, which is what
     /// [`satd_avg_x4_scalar`] defines.
     pub satd_avg_x4: Option<SatdAvgX4Fn>,
+    /// Four plane-sample candidates' SATDs at once, where a rung has it;
+    /// `None` and callers take [`Self::satd_avg_x4`] with each candidate's
+    /// view twice, or score them one at a time — what [`satd_x4_scalar`]
+    /// defines either way.
+    pub satd_x4: Option<SatdX4Fn>,
     /// Four bi-predicted candidates' SATDs at once, where a rung has it;
     /// `None` and callers score them one at a time, which is what
     /// [`satd_bi_x4_scalar`] defines.
@@ -259,6 +290,7 @@ impl H264EncDsp {
         satd_avg: None,
         sad_x4: None,
         satd_avg_x4: None,
+        satd_x4: None,
         satd_bi_x4: None,
         sub_fdct4: None,
         sub_fdct8: None,
