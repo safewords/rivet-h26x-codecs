@@ -60,6 +60,12 @@ pub(crate) struct AnalysisCfg {
     /// quantiser steps per sample: a prediction that quantises to nothing
     /// can still be one a searched vector beats by far.
     pub(crate) skip_ssd: f32,
+    /// ... and, past that test, skip without quantising when the luma
+    /// squared error is under this many squared quantiser steps per sample
+    /// and the chroma's under half of that (0: never). The residual a
+    /// prediction this close leaves is a few levels of one, which the
+    /// decision on the estimates would rarely keep.
+    pub(crate) skip_loose: f32,
     /// Intra_4x4 is analysed in P and B pictures (I pictures always
     /// analyse it).
     pub(crate) i4x4: bool,
@@ -199,6 +205,7 @@ impl AnalysisCfg {
         },
         early_skip: true,
         skip_ssd: 0.02,
+        skip_loose: 0.0,
         i4x4: true,
         intra_ratio: 1.5,
         rd_ratio: 1.03,
@@ -207,16 +214,16 @@ impl AnalysisCfg {
         trellis_rd: true,
         trellis_nonref: true,
         rd: true,
-        refs: 3,
+        refs: 4,
         b_refs: 2,
         mixed_refs: 1.25,
         bi_refine: 2,
         b_intra_ratio: 1.0,
         skip_rd: 0.0,
         bi_diamond: false,
-        bi_part_ratio: 0.0,
+        bi_part_ratio: 1.1,
         b_part_gate: 0.98,
-        part_lead: 1.0,
+        part_lead: 1.1,
         rd_lead: 1.1,
         ref_lead: 1.2,
         bi_ratio: 1.05,
@@ -252,7 +259,7 @@ impl AnalysisCfg {
             hpel_iters: 1,
             qpel_iters: 1,
             umh: false,
-            qpel_diamond: true,
+            qpel_diamond: false,
             dia: true,
         },
         me_sub: MeCfg {
@@ -265,8 +272,9 @@ impl AnalysisCfg {
         },
         early_skip: true,
         skip_ssd: 0.1,
+        skip_loose: 0.02,
         i4x4: false,
-        intra_ratio: 1.2,
+        intra_ratio: 1.5,
         rd_ratio: 1.0,
         rd_max: 1,
         trellis: true,
@@ -323,6 +331,7 @@ impl AnalysisCfg {
         },
         early_skip: true,
         skip_ssd: 0.01,
+        skip_loose: 0.0,
         i4x4: true,
         intra_ratio: 2.0,
         rd_ratio: 1.1,
@@ -625,6 +634,26 @@ fn early_skip_sad(qp: i32) -> u32 {
 fn early_skip_ssd(qp: i32, factor: f32) -> f32 {
     let qstep = 0.625 * (qp as f32 / 6.0).exp2();
     256.0 * qstep * qstep * factor
+}
+
+/// Whether a skip prediction whose luma squared error is `lssd` is close
+/// enough to take without quantising its residual (`AnalysisCfg::skip_loose`):
+/// the luma's error under `factor` squared quantiser steps per sample and
+/// the chroma's under half of that.
+fn loose_skip<S: Sample>(
+    ctx: &IntraCtx<S>,
+    rec: &[Recon<S>],
+    src: &SrcMb<S>,
+    mb_x: usize,
+    mb_y: usize,
+    lssd: f32,
+    factor: f32,
+) -> bool {
+    if factor <= 0.0 {
+        return false;
+    }
+    let ceil = early_skip_ssd(ctx.qp, factor);
+    lssd < ceil && ((ssd_mb(ctx, rec, src, mb_x, mb_y) as f32 - lssd) < 0.5 * ceil)
 }
 
 /// The 8x8-Hadamard SATD of a 16x16 block against its prediction, on
@@ -1801,32 +1830,34 @@ pub(crate) fn p_mb<S: Sample>(
             // Skip when the prediction's residual quantises to nothing and
             // its error (the reconstruction then being the prediction) is
             // under the ceiling: the error first, it is one SSD.
-            let low =
-                (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32) < early_skip_ssd(ctx.qp, cfg.skip_ssd);
-            let empty = low
-                && match inter_residual_is_empty(ctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs)
-                {
-                    Some(e) => e,
-                    None => {
-                        let r = code_inter_mb_residual(
-                            ctx,
-                            rec,
-                            mb_x,
-                            mb_y,
-                            src.y,
-                            src.ys,
-                            src.c,
-                            src.cs,
-                            false,
-                            Some(false),
-                        );
-                        let e = r.cbp_luma == 0 && r.cbp_chroma == 0;
-                        if !e {
-                            predict(rec, 0, 0, 16, 16, skip_mv);
+            let lssd = ssd_luma(ctx, rec, src, mb_x, mb_y) as f32;
+            let low = lssd < early_skip_ssd(ctx.qp, cfg.skip_ssd);
+            let empty = (low && loose_skip(ctx, rec, src, mb_x, mb_y, lssd, cfg.skip_loose))
+                || low
+                    && match inter_residual_is_empty(
+                        ctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs,
+                    ) {
+                        Some(e) => e,
+                        None => {
+                            let r = code_inter_mb_residual(
+                                ctx,
+                                rec,
+                                mb_x,
+                                mb_y,
+                                src.y,
+                                src.ys,
+                                src.c,
+                                src.cs,
+                                false,
+                                Some(false),
+                            );
+                            let e = r.cbp_luma == 0 && r.cbp_chroma == 0;
+                            if !e {
+                                predict(rec, 0, 0, 16, 16, skip_mv);
+                            }
+                            e
                         }
-                        e
-                    }
-                };
+                    };
             if empty {
                 st.commit_part(0, 0, 16, 16, [Some(skip_mv), None]);
                 return MbChoice::Inter(skip_dec);
@@ -2621,32 +2652,34 @@ pub(crate) fn b_mb<S: Sample>(
         if sad < early_skip_sad(ctx.qp) {
             // As for P_Skip: the error first, then whether anything
             // survives quantisation.
-            let low =
-                (ssd_luma(ctx, rec, src, mb_x, mb_y) as f32) < early_skip_ssd(ctx.qp, cfg.skip_ssd);
-            let empty = low
-                && match inter_residual_is_empty(ctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs)
-                {
-                    Some(e) => e,
-                    None => {
-                        let r = code_inter_mb_residual(
-                            ctx,
-                            rec,
-                            mb_x,
-                            mb_y,
-                            src.y,
-                            src.ys,
-                            src.c,
-                            src.cs,
-                            false,
-                            Some(false),
-                        );
-                        let e = r.cbp_luma == 0 && r.cbp_chroma == 0;
-                        if !e {
-                            predict_cand(rec, st, &direct);
+            let lssd = ssd_luma(ctx, rec, src, mb_x, mb_y) as f32;
+            let low = lssd < early_skip_ssd(ctx.qp, cfg.skip_ssd);
+            let empty = (low && loose_skip(ctx, rec, src, mb_x, mb_y, lssd, cfg.skip_loose))
+                || low
+                    && match inter_residual_is_empty(
+                        ctx, rec, mb_x, mb_y, src.y, src.ys, src.c, src.cs,
+                    ) {
+                        Some(e) => e,
+                        None => {
+                            let r = code_inter_mb_residual(
+                                ctx,
+                                rec,
+                                mb_x,
+                                mb_y,
+                                src.y,
+                                src.ys,
+                                src.c,
+                                src.cs,
+                                false,
+                                Some(false),
+                            );
+                            let e = r.cbp_luma == 0 && r.cbp_chroma == 0;
+                            if !e {
+                                predict_cand(rec, st, &direct);
+                            }
+                            e
                         }
-                        e
-                    }
-                };
+                    };
             if empty {
                 return MbChoice::Inter(skip_dec);
             }

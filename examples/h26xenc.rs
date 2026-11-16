@@ -192,7 +192,7 @@ fn main() {
             // later flags still override any of them.
             "--preset" => {
                 let (preset, tree) = match val(&mut i, &args, "--preset").as_str() {
-                    "veryfast" => (Preset::Veryfast, 10),
+                    "veryfast" => (Preset::Veryfast, 15),
                     "medium" => (Preset::Medium, 40),
                     "slow" => (Preset::Slow, 50),
                     _ => die("--preset"),
