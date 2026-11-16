@@ -88,10 +88,16 @@ fn tap6(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
 /// Build the half-sample planes of `r`, whose border is already
 /// replicated. Positions whose six-tap window would leave the padded plane
 /// copy the integer sample instead; the search never reads them (its
-/// window keeps every read inside, see [`search_bounds`]).
-pub(crate) fn build_hpel<S: Sample>(r: &Recon<S>, max: i32) -> Hpel<S> {
+/// window keeps every read inside, see [`search_bounds`]). `kernel` is the
+/// encode table's 8-bit form of [`hpel_planes`]
+/// ([`crate::dsp::h264_enc::H264EncDsp::hpel_planes`]), taken for 8-bit
+/// samples where it is set.
+pub(crate) fn build_hpel<S: Sample>(
+    r: &Recon<S>,
+    max: i32,
+    kernel: Option<crate::dsp::h264_enc::HpelPlanesFn>,
+) -> Hpel<S> {
     let stride = r.stride;
-    let rows = r.data.len() / stride;
     let len = r.data.len();
     let mut out = Hpel::<S>::alloc(len);
     let [b0, b1, b2] = out.base;
@@ -100,10 +106,38 @@ pub(crate) fn build_hpel<S: Sample>(r: &Recon<S>, max: i32) -> Hpel<S> {
     let h = &mut lo[b0..b0 + len];
     let v = &mut mid[..len];
     let c = &mut hi[..len];
-    h.copy_from_slice(&r.data);
-    v.copy_from_slice(&r.data);
-    c.copy_from_slice(&r.data);
-    let d = &r.data;
+    if let Some(k) = kernel
+        && std::any::TypeId::of::<S>() == std::any::TypeId::of::<u8>()
+    {
+        debug_assert_eq!(max, 255);
+        // SAFETY: `S` is `u8`, so these are the same slices.
+        let as8 = |p: &mut [S]| unsafe {
+            std::slice::from_raw_parts_mut(p.as_mut_ptr() as *mut u8, p.len())
+        };
+        let d = unsafe { std::slice::from_raw_parts(r.data.as_ptr() as *const u8, len) };
+        k(d, stride, as8(h), as8(v), as8(c));
+    } else {
+        hpel_planes(&r.data, stride, max, h, v, c);
+    }
+    out
+}
+
+/// The three half-sample planes of the padded plane `d` (`stride` wide)
+/// into `h`, `v` and `c`, each `d`'s length: the definition the encode
+/// table's `hpel_planes` kernels are held to. Positions whose six-tap
+/// window would leave the plane hold the integer sample.
+pub(crate) fn hpel_planes<S: Sample>(
+    d: &[S],
+    stride: usize,
+    max: i32,
+    h: &mut [S],
+    v: &mut [S],
+    c: &mut [S],
+) {
+    let rows = d.len() / stride;
+    h.copy_from_slice(d);
+    v.copy_from_slice(d);
+    c.copy_from_slice(d);
     // Horizontal half samples, every row.
     for y in 0..rows {
         let row = &d[y * stride..(y + 1) * stride];
@@ -152,7 +186,6 @@ pub(crate) fn build_hpel<S: Sample>(r: &Recon<S>, max: i32) -> Hpel<S> {
             co[x] = S::from_i32(((t + 512) >> 10).clamp(0, max));
         }
     }
-    out
 }
 
 /// A reference as the search reads it: the integer plane and its three
@@ -1009,7 +1042,11 @@ mod tests {
             }
         }
         r.extend_edges(false);
-        let hp = build_hpel(&r, 255);
+        let hp = build_hpel(
+            &r,
+            255,
+            crate::dsp::h264_enc::H264EncDsp::new(Cpu::detect()).hpel_planes,
+        );
         let me = MeRef::new(&r, &hp);
         let dsp = H264Dsp::<u8>::new(Cpu::SCALAR);
         for my in -12i16..12 {

@@ -213,6 +213,19 @@ pub fn satd_bi_x4_scalar(
     })
 }
 
+/// The three half-sample planes of a padded 8-bit luma plane `src`
+/// (`stride` wide; `h`, `v` and `c` its length): the horizontal, vertical
+/// and centre six-tap samples of 8.4.2.2.1, a position whose window would
+/// leave the plane holding the integer sample. What
+/// [`hpel_planes_scalar`] defines.
+pub type HpelPlanesFn = fn(src: &[u8], stride: usize, h: &mut [u8], v: &mut [u8], c: &mut [u8]);
+
+/// The definition [`HpelPlanesFn`] kernels are held to: the search's own
+/// plane builder at eight bits.
+pub fn hpel_planes_scalar(src: &[u8], stride: usize, h: &mut [u8], v: &mut [u8], c: &mut [u8]) {
+    crate::encode::h264_hpel::hpel_planes(src, stride, 255, h, v, c)
+}
+
 /// The definition [`SadX4Fn`] kernels are held to: four scalar SADs.
 pub fn sad_x4_scalar(
     src: &[u8],
@@ -273,6 +286,10 @@ pub struct H264EncDsp {
     pub sub_fdct4: Option<SubFdct4Fn>,
     /// The same for the 8x8 transform.
     pub sub_fdct8: Option<SubFdct8Fn>,
+    /// A reference's three half-sample planes in one pass, where a rung
+    /// has it; `None` and the search builds them with
+    /// [`hpel_planes_scalar`]'s arithmetic.
+    pub hpel_planes: Option<HpelPlanesFn>,
 }
 
 impl H264EncDsp {
@@ -294,6 +311,7 @@ impl H264EncDsp {
         satd_bi_x4: None,
         sub_fdct4: None,
         sub_fdct8: None,
+        hpel_planes: None,
     };
 
     /// The best table for `cpu`: the scalar reference, then each rung of

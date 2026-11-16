@@ -37,6 +37,212 @@ pub fn install(d: &mut H264EncDsp, cpu: Cpu) {
         d.satd_bi_x4 = Some(satd_bi_x4);
         d.sub_fdct4 = Some(sub_fdct4);
         d.sub_fdct8 = Some(sub_fdct8);
+        d.hpel_planes = Some(hpel_planes);
+    }
+}
+
+/// [`super::h264_enc::HpelPlanesFn`]: sixteen horizontal or vertical half
+/// samples a step in sixteen-bit lanes (an 8-bit six-tap sum is within
+/// -2550..=10710), the vertical sums kept for the centre samples, which
+/// take the six-tap over them in thirty-two-bit lanes; the rounding shift
+/// and the clip to 0..=255 one saturating narrow each (`sqrshrun`). A row
+/// whose length is not a multiple of the step ends with a step that
+/// overlaps the one before (the same values written again). The border
+/// columns and rows the six-tap cannot reach copy the integer samples.
+fn hpel_planes(src: &[u8], stride: usize, h: &mut [u8], v: &mut [u8], c: &mut [u8]) {
+    let len = src.len();
+    let rows = len / stride;
+    if stride < 24 || rows < 6 || len % stride != 0 {
+        return super::h264_enc::hpel_planes_scalar(src, stride, h, v, c);
+    }
+    assert!(h.len() == len && v.len() == len && c.len() == len);
+    let mut inter = vec![0i16; stride];
+    // SAFETY: every access below is inside a row of `stride` samples of
+    // planes `len` long: horizontal steps read `x - 2 .. x + 19` for `x`
+    // in `2 ..= stride - 19`, vertical ones rows `y - 2 ..= y + 3` for `y`
+    // in `2 .. rows - 3`.
+    unsafe {
+        for y in 0..rows {
+            let row = src.as_ptr().add(y * stride);
+            let o = h.as_mut_ptr().add(y * stride);
+            hpel_h_row(row, o, stride);
+            // The border: two columns before, three after.
+            for x in [0, 1, stride - 3, stride - 2, stride - 1] {
+                *o.add(x) = *row.add(x);
+            }
+        }
+        for y in 0..rows {
+            let (vo, co) = (
+                v.as_mut_ptr().add(y * stride),
+                c.as_mut_ptr().add(y * stride),
+            );
+            let row = src.as_ptr().add(y * stride);
+            if y < 2 || y + 3 >= rows {
+                std::ptr::copy_nonoverlapping(row, vo, stride);
+                std::ptr::copy_nonoverlapping(row, co, stride);
+                continue;
+            }
+            hpel_v_row(
+                src.as_ptr().add((y - 2) * stride),
+                stride,
+                vo,
+                inter.as_mut_ptr(),
+            );
+            hpel_c_row(inter.as_ptr(), co, stride);
+            for x in [0, 1, stride - 3, stride - 2, stride - 1] {
+                *co.add(x) = *row.add(x);
+            }
+        }
+    }
+}
+
+/// `a + f - 5 (b + e) + 20 (c + d)` of eight-bit lanes, in sixteen bits.
+#[inline(always)]
+unsafe fn tap6_u8(
+    a: uint8x8_t,
+    b: uint8x8_t,
+    c: uint8x8_t,
+    d: uint8x8_t,
+    e: uint8x8_t,
+    f: uint8x8_t,
+) -> int16x8_t {
+    unsafe {
+        let t = vaddl_u8(a, f);
+        let t = vmlaq_n_u16(t, vaddl_u8(c, d), 20);
+        let t = vmlsq_n_u16(t, vaddl_u8(b, e), 5);
+        vreinterpretq_s16_u16(t)
+    }
+}
+
+/// One row's horizontal half samples at `2 .. stride - 3`.
+#[target_feature(enable = "neon")]
+unsafe fn hpel_h_row(row: *const u8, out: *mut u8, stride: usize) {
+    unsafe {
+        let end = stride - 3;
+        let mut x = 2;
+        loop {
+            let x0 = x.min(end - 16);
+            let l = |k: usize| vld1q_u8(row.add(x0 - 2 + k));
+            let (a, b, c, d, e, f) = (l(0), l(1), l(2), l(3), l(4), l(5));
+            let lo = tap6_u8(
+                vget_low_u8(a),
+                vget_low_u8(b),
+                vget_low_u8(c),
+                vget_low_u8(d),
+                vget_low_u8(e),
+                vget_low_u8(f),
+            );
+            let hi = tap6_u8(
+                vget_high_u8(a),
+                vget_high_u8(b),
+                vget_high_u8(c),
+                vget_high_u8(d),
+                vget_high_u8(e),
+                vget_high_u8(f),
+            );
+            vst1q_u8(
+                out.add(x0),
+                vcombine_u8(vqrshrun_n_s16::<5>(lo), vqrshrun_n_s16::<5>(hi)),
+            );
+            if x0 + 16 >= end {
+                break;
+            }
+            x += 16;
+        }
+    }
+}
+
+/// One row's vertical half samples (every column) from the six rows from
+/// `top`, and their sums into `inter`.
+#[target_feature(enable = "neon")]
+unsafe fn hpel_v_row(top: *const u8, stride: usize, out: *mut u8, inter: *mut i16) {
+    unsafe {
+        let mut x = 0;
+        loop {
+            let x0 = x.min(stride - 16);
+            let l = |k: usize| vld1q_u8(top.add(k * stride + x0));
+            let (a, b, c, d, e, f) = (l(0), l(1), l(2), l(3), l(4), l(5));
+            let lo = tap6_u8(
+                vget_low_u8(a),
+                vget_low_u8(b),
+                vget_low_u8(c),
+                vget_low_u8(d),
+                vget_low_u8(e),
+                vget_low_u8(f),
+            );
+            let hi = tap6_u8(
+                vget_high_u8(a),
+                vget_high_u8(b),
+                vget_high_u8(c),
+                vget_high_u8(d),
+                vget_high_u8(e),
+                vget_high_u8(f),
+            );
+            vst1q_s16(inter.add(x0), lo);
+            vst1q_s16(inter.add(x0 + 8), hi);
+            vst1q_u8(
+                out.add(x0),
+                vcombine_u8(vqrshrun_n_s16::<5>(lo), vqrshrun_n_s16::<5>(hi)),
+            );
+            if x0 + 16 >= stride {
+                break;
+            }
+            x += 16;
+        }
+    }
+}
+
+/// `a + f - 5 (b + e) + 20 (c + d)` of sixteen-bit lanes, in thirty-two.
+#[inline(always)]
+unsafe fn tap6_s16(
+    a: int16x4_t,
+    b: int16x4_t,
+    c: int16x4_t,
+    d: int16x4_t,
+    e: int16x4_t,
+    f: int16x4_t,
+) -> int32x4_t {
+    unsafe {
+        let t = vaddl_s16(a, f);
+        let t = vmlaq_n_s32(t, vaddl_s16(c, d), 20);
+        vmlsq_n_s32(t, vaddl_s16(b, e), 5)
+    }
+}
+
+/// One row's centre half samples at `2 .. stride - 3` from the vertical
+/// sums.
+#[target_feature(enable = "neon")]
+unsafe fn hpel_c_row(inter: *const i16, out: *mut u8, stride: usize) {
+    unsafe {
+        let end = stride - 3;
+        let mut x = 2;
+        loop {
+            let x0 = x.min(end - 8);
+            let l = |k: usize| vld1q_s16(inter.add(x0 - 2 + k));
+            let (a, b, c, d, e, f) = (l(0), l(1), l(2), l(3), l(4), l(5));
+            let lo = tap6_s16(
+                vget_low_s16(a),
+                vget_low_s16(b),
+                vget_low_s16(c),
+                vget_low_s16(d),
+                vget_low_s16(e),
+                vget_low_s16(f),
+            );
+            let hi = tap6_s16(
+                vget_high_s16(a),
+                vget_high_s16(b),
+                vget_high_s16(c),
+                vget_high_s16(d),
+                vget_high_s16(e),
+                vget_high_s16(f),
+            );
+            let n = vcombine_u16(vqrshrun_n_s32::<10>(lo), vqrshrun_n_s32::<10>(hi));
+            vst1_u8(out.add(x0), vqmovn_u16(n));
+            if x0 + 8 >= end {
+                break;
+            }
+            x += 8;
+        }
     }
 }
 
@@ -746,6 +952,41 @@ fn quant8(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn hpel_planes_match_scalar() {
+        let mut seed = 7u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        for &(stride, rows) in &[(24usize, 6usize), (37, 9), (64, 20), (101, 13), (1328, 8)] {
+            for extreme in 0..3 {
+                let src: Vec<u8> = (0..stride * rows)
+                    .map(|_| match extreme {
+                        0 => rnd(),
+                        // Alternating 0 / 255: the six-tap's extremes.
+                        1 => (rnd() & 1) * 255,
+                        _ => {
+                            if rnd() & 1 == 0 {
+                                0
+                            } else {
+                                255
+                            }
+                        }
+                    })
+                    .collect();
+                let n = src.len();
+                let (mut h0, mut v0, mut c0) = (vec![1u8; n], vec![2u8; n], vec![3u8; n]);
+                let (mut h1, mut v1, mut c1) = (vec![4u8; n], vec![5u8; n], vec![6u8; n]);
+                super::super::h264_enc::hpel_planes_scalar(&src, stride, &mut h0, &mut v0, &mut c0);
+                hpel_planes(&src, stride, &mut h1, &mut v1, &mut c1);
+                assert_eq!(h0, h1, "h {stride}x{rows}");
+                assert_eq!(v0, v1, "v {stride}x{rows}");
+                assert_eq!(c0, c1, "c {stride}x{rows}");
+            }
+        }
+    }
     use super::*;
     use crate::dsp::h264_enc::{Quant, qbits4, qbits8, quant_offset};
     use crate::h264::sps::ScalingLists;

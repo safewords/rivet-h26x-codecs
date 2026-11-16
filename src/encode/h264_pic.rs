@@ -159,7 +159,7 @@ impl<S: Sample> IntraTools<S> {
             c.insert(0, e);
             return h;
         }
-        let h = std::sync::Arc::new(build_hpel(r, max));
+        let h = std::sync::Arc::new(build_hpel(r, max, self.enc.hpel_planes));
         c.insert(0, (r.clone(), h.clone()));
         c.truncate(KEEP);
         h
