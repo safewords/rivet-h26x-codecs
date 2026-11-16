@@ -1178,6 +1178,7 @@ impl<S: Sample> Core<S> {
         // The contexts the quantiser prices its bins at: this slice's
         // initial ones, as every rate in the decisions is priced.
         let tune = super::h265_tune::Tune::of(&self.cfg);
+        super::h265_intra::set_lambda_scale(tune.lambda_of(&c));
         let rdoq_cx = Contexts::new(0, qp as i32);
         let ictx = IntraCtx {
             dsp: &dsp,
@@ -1704,6 +1705,7 @@ impl<S: Sample> Core<S> {
         let dist = DistortionDsp::<S>::new(cpu);
         let bit_depth = self.cfg.bit_depth;
         let tune = super::h265_tune::Tune::of(&self.cfg);
+        super::h265_intra::set_lambda_scale(tune.lambda_of(&c));
         let rdoq_cx = Contexts::new(if c.kind == Kind::B { 2 } else { 1 }, qp as i32);
         let mctx = IntraCtx {
             dsp: &dsp,
@@ -1735,6 +1737,7 @@ impl<S: Sample> Core<S> {
         pic.limit_refs = tune.limit_refs;
         pic.tu_split = tune.inter_tu_split;
         pic.tu_split_max = tune.inter_tu_split_max;
+        pic.bi_refine = tune.bi_refine;
         pic.slice_b = c.kind == Kind::B;
         // SAO in a picture nothing references improves only that picture,
         // and under the tiers not by enough to pay for its decision.

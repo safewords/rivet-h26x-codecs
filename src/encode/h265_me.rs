@@ -734,6 +734,13 @@ pub struct InterPicture<S: Sample> {
     seed_at: [[Option<(u32, u32, Mv)>; 16]; 4],
     /// Scratch for a bi-prediction scored from the fractional planes.
     spred_avg: Vec<S>,
+    /// How many rounds of iterative bi-prediction refinement a B unit's
+    /// AMVP pair gets ([`Self::refine_bi`]); 0 scores the pair of
+    /// independently searched vectors only.
+    pub bi_refine: u32,
+    /// Scratch for [`Self::refine_bi`]: the other list's prediction, then
+    /// the target the refined list is searched against.
+    bi_target: Vec<S>,
     /// Whether a unit is offered intra by coding it (`Some`), or by the
     /// flat-block proxy [`prefer_intra`] (`None`).
     ///
@@ -883,6 +890,8 @@ impl<S: Sample> InterPicture<S> {
             search_rings: 0,
             seed_at: [[None; 16]; 4],
             spred_avg: vec![S::default(); 64 * 64],
+            bi_refine: 0,
+            bi_target: vec![S::default(); 64 * 64],
             geo: Geo::new(sps.log2_ctb_size, w, h, sps.chroma_array_type()),
             intra_scratch: IntraScratch::default(),
             scratch: McScratch::new(),
@@ -1671,7 +1680,7 @@ impl<S: Sample> InterPicture<S> {
         // unit, which the reader gives no PRED_BI spelling (its
         // `inter_pred_idc` codes one bin, L0 or L1, where `w + h == 12`).
         let bi_ok = pu.w + pu.h != 12;
-        let bi_satd = if bi_ok {
+        let mut bi_satd = if bi_ok {
             self.satd_bi_at(
                 ctx,
                 &ref0.y,
@@ -1688,9 +1697,82 @@ impl<S: Sample> InterPicture<S> {
         } else {
             u32::MAX
         };
+        let mut bi_mv = [uni[0].0, uni[1].0];
+        let (mut bi_mvd, mut bi_flag) = (best_mvd, best_flag);
         if bi_ok {
-            let bits = amvp_bits(2, best_mvd, best_flag);
-            let cost = bi_satd as f32 + lam * bits;
+            let mut cost = bi_satd as f32 + lam * amvp_bits(2, bi_mvd, bi_flag);
+            let default_wp = [0, 1, 2]
+                .iter()
+                .all(|&i| matches!(self.wp_b[i][0], Weighting::Default));
+            if self.bi_refine > 0 && default_wp {
+                // The list whose own search did worse is re-searched first,
+                // against the better one's prediction.
+                let first = usize::from(uni[0].1 < uni[1].1);
+                let planes = [&ref0.y, &ref1.y];
+                let halves = [self.half_for(ref0.poc), self.half_for(ref1.poc)];
+                for it in 0..2 * self.bi_refine as usize {
+                    let list = (first + it) % 2;
+                    let mv = self.refine_bi(
+                        ctx,
+                        planes,
+                        halves[list].as_deref(),
+                        list,
+                        x0,
+                        y0,
+                        wh,
+                        src,
+                        y_stride,
+                        bi_mv,
+                        lam,
+                        mvp[list],
+                    );
+                    if mv == bi_mv[list] {
+                        if it > 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    let mut trial = bi_mv;
+                    trial[list] = mv;
+                    let a = mvd_for(mv, mvp[list][0]);
+                    let b = mvd_for(mv, mvp[list][1]);
+                    let mut mvd = bi_mvd;
+                    let mut fl = bi_flag;
+                    mvd[list] = a;
+                    fl[list] = 0;
+                    let bits_a = amvp_bits(2, mvd, fl);
+                    mvd[list] = b;
+                    fl[list] = 1;
+                    let bits_b = amvp_bits(2, mvd, fl);
+                    if bits_a <= bits_b {
+                        mvd[list] = a;
+                        fl[list] = 0;
+                    }
+                    let satd = self.satd_bi_at(
+                        ctx,
+                        &ref0.y,
+                        &ref1.y,
+                        x0,
+                        y0,
+                        wh,
+                        src,
+                        y_stride,
+                        trial[0],
+                        trial[1],
+                        Weighting::Default,
+                    );
+                    let c = satd as f32 + lam * bits_a.min(bits_b);
+                    if c < cost {
+                        cost = c;
+                        bi_mv = trial;
+                        bi_mvd = mvd;
+                        bi_flag = fl;
+                        bi_satd = satd;
+                    } else if it > 0 {
+                        break;
+                    }
+                }
+            }
             if cost < best_cost {
                 best_cost = cost;
                 best = Some((2, bi_satd));
@@ -1788,15 +1870,24 @@ impl<S: Sample> InterPicture<S> {
                     1 => [-1, 0],
                     _ => [0, 0],
                 };
+                let (mvd, mvp_flag, mv) = if best_idc == 2 {
+                    (bi_mvd, bi_flag, bi_mv)
+                } else {
+                    (
+                        best_mvd,
+                        best_flag,
+                        [
+                            if r[0] >= 0 { uni[0].0 } else { Mv::ZERO },
+                            if r[1] >= 0 { uni[1].0 } else { Mv::ZERO },
+                        ],
+                    )
+                };
                 PuPick {
                     merge_idx: None,
                     idc: best_idc,
-                    mvd: best_mvd,
-                    mvp_flag: best_flag,
-                    mv: [
-                        if r[0] >= 0 { uni[0].0 } else { Mv::ZERO },
-                        if r[1] >= 0 { uni[1].0 } else { Mv::ZERO },
-                    ],
+                    mvd,
+                    mvp_flag,
+                    mv,
                     ref_idx: r,
                     satd: amvp_satd,
                     cost: best_cost,
@@ -3544,6 +3635,99 @@ impl<S: Sample> InterPicture<S> {
             }
         }
         (best, best_satd)
+    }
+
+    /// One round of iterative bi-prediction refinement for list `list` of
+    /// a B unit predicting from both lists at `mvs`: the other list's
+    /// prediction held fixed, list `list` is searched again — whole
+    /// samples from its current vector, then the sub-sample rings —
+    /// against the target `2 * src - other`, whose difference from a
+    /// candidate's prediction is twice the bi-predicted residual (so the
+    /// vector rate is weighed at twice `lam`). Default weighting only.
+    /// Returns the vector found; the caller scores the pair exactly.
+    #[allow(clippy::too_many_arguments)]
+    fn refine_bi(
+        &mut self,
+        ctx: &MeCtx<'_, S>,
+        planes: [&Plane16<S>; 2],
+        half: Option<&h265_search::HalfPlanes<S>>,
+        list: usize,
+        x: usize,
+        y: usize,
+        (w, h): (usize, usize),
+        src: &[S],
+        src_stride: usize,
+        mvs: [Mv; 2],
+        lam: f32,
+        mvp: [Mv; 2],
+    ) -> Mv {
+        let other = 1 - list;
+        let mut t = std::mem::take(&mut self.bi_target);
+        let max = (1i32 << ctx.bit_depth) - 1;
+        {
+            let (p, ps) = match Self::read_at(&self.half, planes[other], x, y, (w, h), mvs[other])
+            {
+                Some(v) => v,
+                None => {
+                    let InterPicture {
+                        swin,
+                        stmp,
+                        spred14,
+                        spred,
+                        ..
+                    } = self;
+                    predict14(
+                        ctx,
+                        planes[other],
+                        x,
+                        y,
+                        (w, h),
+                        mvs[other],
+                        swin,
+                        stmp,
+                        spred14,
+                    );
+                    let bd = ctx.bit_depth;
+                    (ctx.dsp.uni)(spred, w, spred14, w, h, 14 - bd as i32, max);
+                    (&self.spred[..], w)
+                }
+            };
+            for yy in 0..h {
+                for xx in 0..w {
+                    let v = 2 * src[yy * src_stride + xx].to_i32() - p[yy * ps + xx].to_i32();
+                    t[yy * w + xx] = S::from_i32(v.clamp(0, max));
+                }
+            }
+        }
+        let full = self.search_full(
+            ctx,
+            planes[list],
+            x,
+            y,
+            (w, h),
+            &t,
+            w,
+            &[mvs[list]],
+            2.0 * lam,
+            mvp,
+        );
+        let (mv, _) = self.refine_subpel(
+            ctx,
+            planes[list],
+            half,
+            Weighting::Default,
+            list,
+            x,
+            y,
+            (w, h),
+            &t,
+            w,
+            full,
+            2.0 * lam,
+            mvp,
+        );
+        self.bi_target = t;
+        mv
     }
 
     #[allow(clippy::too_many_arguments)]

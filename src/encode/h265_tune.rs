@@ -120,6 +120,12 @@ pub(crate) struct Tune {
     pub inter_tu_split: bool,
     /// The largest inter CU (log2) the split is tried in.
     pub inter_tu_split_max: u32,
+    /// `h265_me::InterPicture::bi_refine`.
+    pub bi_refine: u32,
+    /// The Lagrangian multiplier of an intra picture, a P picture, the
+    /// reference B and the other B pictures
+    /// (`h265_intra::set_lambda_scale`).
+    pub lambda: [f32; 4],
     /// Under `Config::tree_lookahead`, the propagation sets only an intra
     /// picture's quantiser offset, from its mean over the picture,
     /// replacing `i_qp_offset`; no unit carries a quantiser delta.
@@ -158,6 +164,8 @@ impl Tune {
         tmvp: false,
         inter_tu_split: false,
         inter_tu_split_max: 5,
+        bi_refine: 0,
+        lambda: [1.0; 4],
         tree_frame_only: false,
         i_adapt_min: -6,
         i_adapt_k: 4.0,
@@ -243,7 +251,17 @@ impl Tune {
             // tried only where their SATD estimate comes within 1.5x of
             // the inter search: measured 2026-11-15, +3.93% -> +4.03%
             // BD-rate at 0.78x the CPU.
+            // Round 4 (2026-11-15, x265 parity): one round of iterative
+            // bi-prediction refinement, +0.58% -> +0.01% BD-rate on its
+            // own at 0.90x x265's CPU against 0.82x; every Lagrangian at
+            // 0.7 of the conventional one (alone on round 3: 0.8 -0.36%,
+            // 0.65 -0.50%, 0.5 +0.30%, the CIF clips losing below 0.8 and
+            // the 720p clips wanting it lower still). With the intra
+            // offset above, both: -0.59% -> -2.30% at 0.93x (-2.09% at
+            // a Lagrangian of 0.8).
             Preset::Slow => Tune {
+                lambda: [0.7; 4],
+                bi_refine: 1,
                 rdoq_nonref: true,
                 search_rings: 1,
                 intra_split_depth: 0,
@@ -276,6 +294,17 @@ impl Tune {
                 ..base
             },
         }
+    }
+
+    /// The Lagrangian multiplier of picture `c` (`Tune::lambda`).
+    pub fn lambda_of(&self, c: &super::gop::Coded) -> f32 {
+        use super::gop::Kind;
+        self.lambda[match c.kind {
+            Kind::Idr | Kind::I => 0,
+            Kind::P => 1,
+            Kind::B if c.reference => 2,
+            Kind::B => 3,
+        }]
     }
 
     /// The quantiser offset of a picture of `kind` at B layer `layer`.

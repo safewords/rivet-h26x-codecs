@@ -1120,7 +1120,26 @@ pub(crate) fn no_contexts() -> &'static crate::hevc::ctx::Contexts {
 }
 
 pub(crate) fn ssd_lambda(qp: i32, bit_depth: u32) -> f64 {
-    f64::from(0.85f32 * ((qp - 12) as f32 / 3.0).exp2() * ssd_lambda_scale(bit_depth))
+    f64::from(base_lambda(qp) * ssd_lambda_scale(bit_depth))
+}
+
+thread_local! {
+    /// The multiplier this thread's picture applies to every decision's
+    /// Lagrangian ([`set_lambda_scale`]).
+    static LAMBDA_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Scale every Lagrangian the decisions on this thread use by `s`, until
+/// set again: the picture's kind's multiplier (`h265_tune::Tune::lambda`).
+pub(crate) fn set_lambda_scale(s: f32) {
+    LAMBDA_SCALE.with(|c| c.set(s));
+}
+
+/// The SSD Lagrangian at `qp` before the bit-depth scale: the
+/// conventional `0.85 * 2^((QP - 12) / 3)` times this picture's
+/// multiplier.
+pub(crate) fn base_lambda(qp: i32) -> f32 {
+    0.85f32 * ((qp - 12) as f32 / 3.0).exp2() * LAMBDA_SCALE.with(|c| c.get())
 }
 
 /// Decide and code one `PART_2Nx2N` intra CU at luma `(x0, y0)`, leaving
@@ -1272,7 +1291,7 @@ pub(crate) fn code_cu_2nx2n_intra<S: Sample>(
             split_depth <= 2,
             "split_depth {split_depth} above the SPS transform depth of 2"
         );
-        let lam = 0.85f32 * ((ctx.qp - 12) as f32 / 3.0).exp2() * ssd_lambda_scale(ctx.bit_depth);
+        let lam = base_lambda(ctx.qp) * ssd_lambda_scale(ctx.bit_depth);
         let cost_u = ssd_u as f32 + lam * cu_bits(&out, geo.cat, ctx.qp, ctx.bypass);
         // The split trial, children in decode order. With the
         // deeper search on, each child is coded unsplit, re-coded
@@ -1893,7 +1912,7 @@ fn mode_signalling_cost(qp: i32, signal: ModeSignal) -> f32 {
 /// costs, +29.8% with it in the intra mode search as well. Scaling the root
 /// by 0.7, 1.4 and 2.0 gave +30.6, +29.9 and +31.1%: flat around 1.
 pub(crate) fn satd_lambda(qp: i32) -> f32 {
-    (0.85f32 * ((qp - 12) as f32 / 3.0).exp2()).sqrt()
+    base_lambda(qp).sqrt()
 }
 
 /// How much a bit is worth against a SATD at `bit_depth` bits, relative
@@ -1950,7 +1969,7 @@ pub(crate) fn ssd_lambda_scale(bit_depth: u32) -> f32 {
 /// a constant, which a real bit count replaces in this one function.
 fn lambda_bits(qp: i32, bins: u32, nz: u32) -> f32 {
     const LEVEL_BINS: f32 = 3.0;
-    let lambda = 0.85f32 * ((qp - 12) as f32 / 3.0).exp2();
+    let lambda = base_lambda(qp);
     lambda * (bins as f32 + LEVEL_BINS * nz as f32)
 }
 
@@ -2386,7 +2405,7 @@ fn rdoq_trim<S: Sample>(
 
     let bd_shift = 20 - ctx.bit_depth as i32;
     let max = (1i32 << ctx.bit_depth) - 1;
-    let lambda = 0.85f32 * ((ctx.qp - 12) as f32 / 3.0).exp2() * ssd_lambda_scale(ctx.bit_depth);
+    let lambda = base_lambda(ctx.qp) * ssd_lambda_scale(ctx.bit_depth);
     let params = ResidualParams {
         log2_size: log2,
         c_idx,
