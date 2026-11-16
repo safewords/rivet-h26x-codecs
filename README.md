@@ -124,7 +124,7 @@ the B pyramid and the lookahead; slow keeps five references):
   coded neighbours' and the lookahead's half-resolution vectors; a hexagon
   (veryfast: small diamond) descent on SAD plus
   lambda times the vector's rate, then half- and quarter-sample refinement
-  on SATD plus rate. P pictures search up to 3 (slow 5) references, B pictures nothing
+  on SATD plus rate. P pictures search up to 3 (veryfast 2, slow 5) references, B pictures nothing
   references two in list 0 (medium and slow), and a
   P partition below 16x16 picks its own among those whose 16x16 cost came
   within 1.25x (slow 1.5x) of the best (mixed references). A B pair is
@@ -143,13 +143,14 @@ the B pyramid and the lookahead; slow keeps five references):
   pictures: a P or B macroblock is decided on the estimates and only the
   winner is coded, its transform size from the residual's 4x4 and 8x8
   Hadamard SATDs, with skip priced against it where skip's estimate is no
-  worse, and Intra_4x4 analysed in I pictures only.
+  worse, intra analysed within 1.2x of the best inter estimate, and
+  Intra_4x4 analysed in I pictures only.
 - **Quantisation**: the chosen macroblock is re-quantised by a trellis over
   each block's level choices, priced from the live contexts
   (`h264_trellis.rs`). Medium and slow quantise every candidate the
   comparison codes by the trellis, so their decisions see the levels they
-  will write; veryfast trellises only the winner, and not in B pictures
-  nothing references.
+  will write; veryfast trellises only the winner. A block the plain
+  inter quantiser (dead zone at 1/6) leaves all zero is not trellised.
   B partitions below 16x16 are searched only when mixing the 16x16
   candidates per quadrant, unsearched, comes within 1.02x of the best
   whole-macroblock estimate (`AnalysisCfg::b_part_gate`, medium and slow).
@@ -168,26 +169,145 @@ one loaded Apple M-series machine, summed over the four rate points:
 
 | `--preset` | clip | BD-rate Y | BD-rate avg | time vs x264 |
 |---|---|---:|---:|---:|
-| veryfast | foreman CIF | +6.12 % | +5.93 % | 1.42x |
-| | mobile CIF | -5.19 % | -6.71 % | 1.66x |
-| | akiyo CIF | -5.07 % | -4.77 % | 1.98x |
-| | ducks_take_off 720p | -9.01 % | -11.40 % | 1.42x |
-| | park_joy 720p | -0.84 % | -1.32 % | 1.41x |
-| | **mean** | **-2.80 %** | **-3.65 %** | **1.44x** |
-| medium | foreman CIF | +1.55 % | +1.67 % | 1.41x |
-| | mobile CIF | +2.19 % | +1.79 % | 1.41x |
-| | akiyo CIF | -4.29 % | -4.15 % | 1.53x |
-| | ducks_take_off 720p | -0.76 % | -4.25 % | 1.41x |
-| | park_joy 720p | +3.27 % | +3.38 % | 1.46x |
-| | **mean** | **+0.39 %** | **-0.31 %** | **1.44x** |
-| slow | foreman CIF | +2.22 % | +2.31 % | 1.30x |
-| | mobile CIF | +2.03 % | +1.46 % | 1.05x |
-| | akiyo CIF | -1.85 % | -1.56 % | 1.49x |
-| | ducks_take_off 720p | +1.97 % | -2.54 % | 1.05x |
-| | park_joy 720p | +2.56 % | +2.51 % | 1.05x |
-| | **mean** | **+1.38 %** | **+0.44 %** | **1.06x** |
+| veryfast | foreman CIF | +2.44 % | +2.59 % | 1.41x |
+| | mobile CIF | -9.19 % | -9.85 % | 1.66x |
+| | akiyo CIF | -6.56 % | -5.95 % | 1.97x |
+| | ducks_take_off 720p | -12.16 % | -13.34 % | 1.48x |
+| | park_joy 720p | -3.75 % | -3.60 % | 1.46x |
+| | **mean** | **-5.84 %** | **-6.03 %** | **1.48x** |
+| medium | foreman CIF | +1.21 % | +1.67 % | 1.33x |
+| | mobile CIF | +1.83 % | +1.74 % | 1.34x |
+| | akiyo CIF | -4.63 % | -4.40 % | 1.46x |
+| | ducks_take_off 720p | -0.58 % | -3.11 % | 1.34x |
+| | park_joy 720p | +3.32 % | +3.52 % | 1.39x |
+| | **mean** | **+0.23 %** | **-0.12 %** | **1.36x** |
+| slow | foreman CIF | +2.02 % | +2.34 % | 1.21x |
+| | mobile CIF | +1.79 % | +1.51 % | 0.99x |
+| | akiyo CIF | -2.28 % | -1.90 % | 1.42x |
+| | ducks_take_off 720p | +2.15 % | -1.37 % | 1.00x |
+| | park_joy 720p | +2.58 % | +2.61 % | 1.00x |
+| | **mean** | **+1.25 %** | **+0.64 %** | **1.01x** |
 
-(Seventh round, 2026-11-15, rivet at --jobs 4 against the cached x264
+(Eighth round, 2026-11-15, rivet at --jobs 4 against the cached x264
+times, which were taken in an earlier, slower session: x264 timed again
+beside rivet in this one (the frontier run below) puts the same three
+at 1.61x / 1.43x / 1.14x, and the seventh round's tree at 1.52x / 1.50x
+/ 1.18x. Cycles at QP 27 over the five clips, minimum of three runs,
+`/usr/bin/time -l`: 5.21G / 14.78G / 24.54G before (ae11924), 5.38G /
+13.88G / 23.33G after, +3.4 / -6.1 / -4.9 %; instructions 22.7G / 64.7G
+/ 112.6G to 23.7G / 62.2G / 108.3G, +4.1 / -3.8 / -3.8 %. x264 at CRF
+23 on the same clips in the same session: 3.25G / 9.57G / 20.68G
+cycles, 12.1G / 34.4G / 74.6G instructions — rivet is 1.66x / 1.45x /
+1.13x its cycles and 1.96x / 1.81x / 1.45x its instructions. Veryfast
+spent time on purpose; see the frontier.)
+
+**The efficiency frontier.** Comparing each preset with x264's
+same-named one hides where rivet stands, so the eighth round placed all
+three on x264's whole ladder: every x264 preset from ultrafast to
+veryslow on the same clips and settings, BD-rate Y against x264 medium
+(mean of the five clips' BD-rates) against CPU summed over clips and rate
+points, relative to x264 medium's. Every encode, x264's and rivet's, ran
+under `/usr/bin/time -l` in one shuffled batch, four at a time, minimum
+of three runs each (`frontier.py`, a companion to the parity script):
+
+| encoder | BD-rate Y vs x264 medium | CPU vs x264 medium |
+|---|---:|---:|
+| x264 ultrafast | +228.64 % | 0.125x |
+| x264 superfast | +47.00 % | 0.202x |
+| x264 veryfast | +20.30 % | 0.355x |
+| x264 faster | +7.29 % | 0.652x |
+| x264 fast | +1.96 % | 0.890x |
+| x264 medium | 0 | 1x |
+| x264 slow | -3.58 % | 2.116x |
+| x264 slower | -6.05 % | 3.876x |
+| x264 veryslow | -6.65 % | 5.437x |
+
+Every x264 preset is on its own frontier (none is beaten on both axes by
+another). Rivet's, against that curve (x264 interpolated piecewise
+linearly in BD-rate against log CPU between its neighbouring presets):
+
+| rivet | BD-rate Y | CPU | x264's BD-rate at this CPU | x264's CPU at this BD-rate | rivet's time at equal BD-rate |
+|---|---:|---:|---:|---:|---:|
+| veryfast, ae11924 | +16.93 % | 0.538x | +11.37 % | 0.415x | 1.30x |
+| veryfast, now | +13.07 % | 0.572x | +10.09 % | 0.497x | **1.15x** |
+| medium, ae11924 | +0.39 % | 1.504x | -1.95 % | 0.977x | 1.54x |
+| medium, now | +0.23 % | 1.429x | -1.70 % | 0.987x | **1.45x** |
+| slow, ae11924 | -2.26 % | 2.492x | -4.25 % | 1.607x | 1.55x |
+| slow, now | -2.39 % | 2.404x | -4.10 % | 1.649x | **1.46x** |
+
+All three are still above x264's frontier: x264 reaches each one's
+BD-rate in 1/1.15, 1/1.45 and 1/1.46 of its time (equivalently, at each
+one's time x264 is 3.0 / 1.9 / 1.7 points of BD-rate better). By time,
+veryfast sits between x264 veryfast and faster (nearer faster), medium
+between x264 medium and slow, slow just past x264 slow — the names hold,
+so the presets were not re-cut. The frontier also says what a trade is
+worth where each preset sits: x264's own slope is about 0.2 % BD-rate
+per 1 % of time between veryfast and faster, 0.05 % between medium and
+slow, 0.04 % past slow. A cut that costs more than that per 1 % moves a
+preset away from the frontier however much time it saves — which is why
+veryfast, whose cuts all cost about 0.3 % per 1 %, gained tools this
+round instead of losing them.
+
+What the eighth round did (BD-rate Y against x264 at the same preset,
+instructions at QP 27, each step against the one before):
+
+| change | veryfast | medium | slow |
+|---|---:|---:|---:|
+| CABAC writer: a context's four LPS sub-ranges one word, loaded from the state alone, the range picking a byte by shift — the table load is off the range's dependency chain (byte-identical) | -1.9 % cycles | | |
+| trellis: blocks the plain inter quantiser (dead zone 1/6) leaves all zero are not trellised (2 % of them had kept a level) | -2.80 → -2.66 %, -1.4 % | +0.39 → +0.23 %, -3.0 % | +1.38 → +1.25 %, -3.1 % |
+| trellis: the callers' level arrays arrive zeroed, the trellis's own `bzero` per 8x8 gone (byte-identical) | -0.7 % | -1.3 % | -1.4 % |
+| veryfast: two P references | → -3.94 % (alone), +3.1 % | | |
+| veryfast: the trellis in B pictures nothing references | → -3.85 % (alone), +2.3 % | | |
+| veryfast: both | → -5.12 %, +5.5 % | | |
+| veryfast: intra analysed within 1.2x of the best inter estimate (was 1.0x) | → -5.84 %, +1.0 % | | |
+
+Of the trellis's calls (park_joy, QP 27), 49 % (veryfast) / 44 %
+(medium) find every exact level under a half and return at once, a
+further 16 % / 19 % are the dead-zone blocks now skipped, and of the
+rest — blocks with a level the dead zone keeps — the trellis changes at
+least one level in 86 % (veryfast) and 80 % (medium): there is no large
+class of blocks the dead zone already decides, so a trellis run only on
+"ambiguous" blocks has nothing to gain. The trellis's inner loop is
+already table-driven (each context's bin costs priced once per block
+from the live states, no CABAC inside it).
+
+Tried and dropped in the eighth round (BD-rate Y, instructions, against
+the kept tree at the time). Veryfast: three P references, a further
+-0.48 % for +3.4 % (0.14 % per 1 %, under x264's 0.2 % there); a second
+list-0 reference in non-reference B pictures, -0.26 % for +3.8 %; the
+quarter-sample square instead of the diamond, -0.78 % for +4 % (at the
+slope); two half-sample rounds, -0.20 % for +2.2 %; two B pair rounds,
+-0.23 % for +3.3 %; the B pair square instead of the diamond, -0.12 %
+for +4.4 %; intra within 1.5x, a further -0.29 % for +2.2 %; B intra
+within 1.2x, -0.04 % for +1.1 %; Intra_4x4 in inter pictures, +0.26 %
+for +4.8 %; partitions below 16x16 (`--subparts`), -3.5 % for +52 %.
+Medium (each about x264's 0.05 % per 1 % there, so frontier-neutral,
+and each spends BD-rate the +0.5 % ceiling leaves little of): the B pair
+diamond +0.18 % for -3.4 %; mixed references within 1.1x +0.19 % for
+-3.0 %; the B partition gate at 0.95 +0.13 % for -2.9 %; B intra within
+0.8x +0.02 % for -0.4 %; two P references +0.67 % for -3.8 %. The dead
+zone gate at 0.7 (+0.25 %) and 0.9 (+0.31 %) of a step instead of 5/6,
+at 1.0 (+0.83 %), and luma-only (+0.65 %): 5/6 is both principled and
+the best measured. (The BD-rate on these 30-frame clips moves by about
+0.2 % between near-identical configurations; trades smaller than that
+are not resolved.)
+
+Where the time goes now (veryfast, park_joy, QP 27, sampled): the trellis
+and the final CABAC residual writer about a seventh each (the writer about
+15 cycles a bin before this round; it is latency-bound on the range's
+renormalisation chain, and the stream is what it is), SATD and fused
+average-SATD of the sub-sample search an eighth, the lookahead 5 %.
+Medium: the trellis a fifth (every coded candidate's blocks), the
+estimator's residual pricing 9 %, sub-sample SATD 16 %, the integer
+search and its control flow 12 %, the final writer 5 %. Not tried this
+round: the lookahead on a quarter-size picture (it is already
+half-resolution and 5 % of veryfast; mode decisions there would move
+decisions, not the frontier); batched four-way SATD for the sub-sample
+rings (the kernels are 16 % of medium; the most a shared source load can
+save is a fraction of that).
+
+The seventh round, for the record: -2.80 / +0.39 / +1.38 % at 1.44x /
+1.44x / 1.06x. (Measured 2026-11-15, rivet at --jobs 4 against the cached x264
 times. The sixth round's tree, 3ec8b66, timed in the same session: 1.93x
 / 1.50x / 1.12x at -4.68 / +0.31 / +1.40 %. Cycles at QP 27 over the five
 clips, minimum of three runs, `/usr/bin/time -l`: 7.23G / 15.31G / 25.97G
@@ -537,12 +657,16 @@ reference B picture's colocated motion or duplicate list 0; per-partition
 reference choice (rivet binds the macroblock to one per list) and the
 implicit weighting between unequal distances are what is left of that.
 Also missing: slow's RD refinement of vectors and intra modes (x264's
-subme 8). The time gap is now 1.44x / 1.44x / 1.06x after the seventh
-round (2.0x / 1.5x / 1.1x after the sixth, 2.3x / 1.7x / 1.3x after the
-fifth): rivet runs 1.9x / 1.9x / 1.5x x264's instructions at a higher
-IPC. Veryfast has 2.8 % of BD-rate left, but the cuts left there cost
-about 0.3 % per 1 % of time, and its floor is set by the trellis and the
-writer, which x264 veryfast has respectively none of and the same of. The fifth round's profile is flat — no
+subme 8). Measured against x264's whole ladder after the eighth round,
+rivet needs 1.15x / 1.45x / 1.46x the time x264 needs for the same
+BD-rate (1.30x / 1.54x / 1.55x before it); against the same-named x264
+preset, timed in the same session, 1.61x / 1.43x / 1.14x (veryfast spent
+time on tools worth more than x264's slope where it sits, and is now 5.8
+% ahead of x264 veryfast). Rivet runs 2.0x / 1.8x / 1.45x x264's
+instructions at a higher IPC. Veryfast's cuts still cost about 0.3 % per
+1 % of time, more than x264's 0.2 % between veryfast and faster, so
+none of them brings it nearer the frontier; what would is speed that
+changes no stream. The fifth round's profile is flat — no
 piece over a quarter — so what is left is many kernels each a few per
 cent (the trellis's eight-lane state machine compiled scalar, SATD of
 every sub-sample candidate, the estimator re-pricing a whole macroblock
@@ -1204,8 +1328,9 @@ compares (280 identical, 0 moved) — so this is speed and nothing else.
 encode-side tables scalar for a measurement; `H26X_MAX_SIMD` caps the
 ladder as it does for the decoders. Neither encoder is threaded yet:
 `--threads` is accepted and unused. Against x264 at matched tiers see
-"H.264 compression against x264" above: 1.06x to 1.44x x264's
-single-thread time, the gap in rivet's trellis, candidate pricing,
+"H.264 compression against x264" above: 1.1x to 1.6x x264's
+single-thread time at the same-named preset, 1.15x to 1.46x the time x264
+needs for the same BD-rate, the gap in rivet's trellis, candidate pricing,
 residual coding and search control flow rather than in how much it
 searches.
 
