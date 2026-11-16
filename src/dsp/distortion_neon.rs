@@ -53,16 +53,20 @@ pub(super) unsafe fn load4x2(p: *const u8, q: *const u8) -> uint8x8_t {
 #[target_feature(enable = "neon")]
 unsafe fn sad_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, h: usize) -> u32 {
     unsafe {
+        // Four u16 accumulators, so consecutive `uadalp`s do not wait on
+        // each other; folded into the u32 total before any lane can wrap.
+        let z = vdupq_n_u16(0);
+        let (mut r0, mut r1, mut r2, mut r3) = (z, z, z, z);
         let mut acc = vdupq_n_u32(0);
-        let mut row = vdupq_n_u16(0);
+        let abd16 = |pa: *const u8, pb: *const u8| vabdq_u8(vld1q_u8(pa), vld1q_u8(pb));
         let mut y = 0;
         if w == 8 || w == 4 {
             // Narrow blocks: two (eight wide) or four (four wide) rows to
-            // a vector. A step adds at most 510 to a u16 lane, so the
-            // lanes are folded into u32 every 64 steps.
-            let mut steps = 0;
-            while y + 16 / w <= h {
-                let (va, vb) = if w == 8 {
+            // a vector, alternate vectors to alternate accumulators. A
+            // step adds at most 510 to a lane; 64 steps per fold.
+            let rows = 16 / w;
+            let load = |y: usize| {
+                if w == 8 {
                     (
                         vcombine_u8(vld1_u8(a.add(y * sa)), vld1_u8(a.add((y + 1) * sa))),
                         vcombine_u8(vld1_u8(b.add(y * sb)), vld1_u8(b.add((y + 1) * sb))),
@@ -78,49 +82,103 @@ unsafe fn sad_impl(a: *const u8, sa: usize, b: *const u8, sb: usize, w: usize, h
                             load4x2(b.add((y + 2) * sb), b.add((y + 3) * sb)),
                         ),
                     )
-                };
-                row = vpadalq_u8(row, vabdq_u8(va, vb));
-                y += 16 / w;
+                }
+            };
+            let mut steps = 0;
+            while y + 2 * rows <= h {
+                let (a0, b0) = load(y);
+                let (a1, b1) = load(y + rows);
+                r0 = vpadalq_u8(r0, vabdq_u8(a0, b0));
+                r1 = vpadalq_u8(r1, vabdq_u8(a1, b1));
+                y += 2 * rows;
                 steps += 1;
                 if steps == 64 {
-                    acc = vpadalq_u16(acc, row);
-                    row = vdupq_n_u16(0);
+                    acc = vpadalq_u16(vpadalq_u16(acc, r0), r1);
+                    (r0, r1) = (z, z);
                     steps = 0;
                 }
             }
-            acc = vpadalq_u16(acc, row);
-            row = vdupq_n_u16(0);
+            if y + rows <= h {
+                let (a0, b0) = load(y);
+                r2 = vpadalq_u8(r2, vabdq_u8(a0, b0));
+                y += rows;
+            }
+        } else if w == 16 || w == 32 {
+            // Sixty-four samples a step, four rows of sixteen or two of
+            // thirty-two, one vector to each accumulator: 510 a lane a
+            // step, 64 steps per fold.
+            let rows = 64 / w;
+            let mut steps = 0;
+            while y + rows <= h {
+                let (pa, pb) = (a.add(y * sa), b.add(y * sb));
+                let (o1, p1) = if w == 16 { (sa, sb) } else { (16, 16) };
+                let (o2, p2) = if w == 16 { (2 * sa, 2 * sb) } else { (sa, sb) };
+                let (o3, p3) = if w == 16 {
+                    (3 * sa, 3 * sb)
+                } else {
+                    (sa + 16, sb + 16)
+                };
+                r0 = vpadalq_u8(r0, abd16(pa, pb));
+                r1 = vpadalq_u8(r1, abd16(pa.add(o1), pb.add(p1)));
+                r2 = vpadalq_u8(r2, abd16(pa.add(o2), pb.add(p2)));
+                r3 = vpadalq_u8(r3, abd16(pa.add(o3), pb.add(p3)));
+                y += rows;
+                steps += 1;
+                if steps == 64 {
+                    acc = vpadalq_u16(vpadalq_u16(acc, r0), r1);
+                    acc = vpadalq_u16(vpadalq_u16(acc, r2), r3);
+                    (r0, r1, r2, r3) = (z, z, z, z);
+                    steps = 0;
+                }
+            }
         }
-        // A row adds at most 510 to a u16 lane per sixteen columns and
-        // 510 for an eight- and a four-column tail together: the lanes
-        // are folded into u32 every `fold` rows, before any can wrap.
-        let fold = (65535 / (510 * (w / 16 + 1))).max(1);
-        let mut rows = 0;
-        while y < h {
-            let ra = a.add(y * sa);
-            let rb = b.add(y * sb);
-            let mut x = 0;
-            while x + 16 <= w {
-                let d = vabdq_u8(vld1q_u8(ra.add(x)), vld1q_u8(rb.add(x)));
-                row = vpadalq_u8(row, d);
-                x += 16;
-            }
-            if x + 8 <= w {
-                row = vaddq_u16(row, vabdl_u8(vld1_u8(ra.add(x)), vld1_u8(rb.add(x))));
-                x += 8;
-            }
-            if x + 4 <= w {
-                row = vaddq_u16(row, vabdl_u8(load4(ra.add(x)), load4(rb.add(x))));
-            }
-            y += 1;
-            rows += 1;
-            if rows == fold {
-                acc = vpadalq_u16(acc, row);
-                row = vdupq_n_u16(0);
-                rows = 0;
+        // Rows left, any width. A row adds at most 510 a lane to an
+        // accumulator per sixteen columns, and 510 for an eight- and a
+        // four-column tail together, so `fold` rows (64 >> (w / 16)) stay
+        // under 2^16 in every lane — and so does whatever a narrow path
+        // above left in r2 and r3 (at most 510).
+        if y < h {
+            let fold = (64usize >> (w / 16).min(6)).max(1);
+            let mut rows = 0;
+            while y < h {
+                let ra = a.add(y * sa);
+                let rb = b.add(y * sb);
+                let mut x = 0;
+                while x + 64 <= w {
+                    r0 = vpadalq_u8(r0, abd16(ra.add(x), rb.add(x)));
+                    r1 = vpadalq_u8(r1, abd16(ra.add(x + 16), rb.add(x + 16)));
+                    r2 = vpadalq_u8(r2, abd16(ra.add(x + 32), rb.add(x + 32)));
+                    r3 = vpadalq_u8(r3, abd16(ra.add(x + 48), rb.add(x + 48)));
+                    x += 64;
+                }
+                if x + 32 <= w {
+                    r0 = vpadalq_u8(r0, abd16(ra.add(x), rb.add(x)));
+                    r1 = vpadalq_u8(r1, abd16(ra.add(x + 16), rb.add(x + 16)));
+                    x += 32;
+                }
+                if x + 16 <= w {
+                    r2 = vpadalq_u8(r2, abd16(ra.add(x), rb.add(x)));
+                    x += 16;
+                }
+                if x + 8 <= w {
+                    r3 = vaddq_u16(r3, vabdl_u8(vld1_u8(ra.add(x)), vld1_u8(rb.add(x))));
+                    x += 8;
+                }
+                if x + 4 <= w {
+                    r3 = vaddq_u16(r3, vabdl_u8(load4(ra.add(x)), load4(rb.add(x))));
+                }
+                y += 1;
+                rows += 1;
+                if rows == fold {
+                    acc = vpadalq_u16(vpadalq_u16(acc, r0), r1);
+                    acc = vpadalq_u16(vpadalq_u16(acc, r2), r3);
+                    (r0, r1, r2, r3) = (z, z, z, z);
+                    rows = 0;
+                }
             }
         }
-        acc = vpadalq_u16(acc, row);
+        acc = vpadalq_u16(vpadalq_u16(acc, r0), r1);
+        acc = vpadalq_u16(vpadalq_u16(acc, r2), r3);
         vaddvq_u32(acc)
     }
 }
