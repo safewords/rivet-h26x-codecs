@@ -42,6 +42,8 @@ pub(crate) struct Trellis {
     pub(crate) bd_off: i32,
     /// Run the general path's lanes as vectors where the CPU has them
     /// ([`Trellis::simd_default`]); the levels are the scalar path's.
+    /// Only AArch64 has the vector path, so elsewhere it is set, never read.
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub(crate) simd: bool,
 }
 
