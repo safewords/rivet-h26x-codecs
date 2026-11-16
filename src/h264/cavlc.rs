@@ -1140,6 +1140,17 @@ pub(crate) static SCAN_CHROMA_DC: [u8; 4] = [0, 1, 2, 3];
 /// `parse_residual_luma_like` switches to under exactly that condition, so
 /// the counts it stores are those.
 pub(crate) fn sub_block_counts_8x8_scan(levels: &[i16], field: bool) -> [u8; 4] {
+    if let Ok(levels) = <&[i16; 64]>::try_from(levels) {
+        // The same counts as the sub-scans' gathers, as vector ANDs and
+        // sums over the raster.
+        let masks = if field { &SUB_MASKS_FIELD } else { &SUB_MASKS };
+        let nz: [u8; 64] = std::array::from_fn(|i| (levels[i] != 0) as u8);
+        return std::array::from_fn(|k| {
+            nz.iter()
+                .zip(&masks[k])
+                .fold(0u8, |a, (&z, &m)| a.wrapping_add(z & m))
+        });
+    }
     sub_block_counts_8x8_in(levels, if field { &SCAN8_SUB_FIELD } else { &SCAN8_SUB })
 }
 
@@ -1149,6 +1160,21 @@ pub(crate) fn sub_block_counts_8x8_scan(levels: &[i16], field: bool) -> [u8; 4] 
 pub(crate) fn sub_block_counts_8x8(levels: &[i16]) -> [u8; 4] {
     sub_block_counts_8x8_scan(levels, false)
 }
+
+/// Per sub-scan, a one at each raster position that sub-scan visits (the
+/// sub-scans partition the sixty-four), for counting all four with
+/// vector ANDs and sums rather than four gathers of sixteen.
+const fn sub_masks(scan: &[u8; 64]) -> [[u8; 64]; 4] {
+    let mut m = [[0u8; 64]; 4];
+    let mut i = 0;
+    while i < 64 {
+        m[i % 4][scan[i] as usize] = 1;
+        i += 1;
+    }
+    m
+}
+static SUB_MASKS: [[u8; 64]; 4] = sub_masks(&ZIGZAG8X8);
+static SUB_MASKS_FIELD: [[u8; 64]; 4] = sub_masks(&FIELD_SCAN8X8);
 
 fn sub_block_counts_8x8_in(levels: &[i16], scan: &[[u8; 16]; 4]) -> [u8; 4] {
     debug_assert_eq!(levels.len(), 64, "an 8x8 block has sixty-four coefficients");
@@ -1583,6 +1609,32 @@ fn write_run_before(w: &mut BitWriter, run: usize, zeros_left: usize) {
 #[cfg(test)]
 mod cavlc_round_trip {
     use super::*;
+
+    /// The masked counts are the sub-scans' gathered counts, both scans.
+    #[test]
+    fn sub_block_counts_match_the_sub_scans() {
+        let mut seed = 3u64;
+        for trial in 0..2000 {
+            let mut levels = [0i16; 64];
+            for v in levels.iter_mut() {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let r = (seed >> 33) as u32;
+                if r % (1 + trial % 7) == 0 {
+                    *v = (r >> 8) as i16;
+                }
+            }
+            for field in [false, true] {
+                let scan = if field { &SCAN8_SUB_FIELD } else { &SCAN8_SUB };
+                assert_eq!(
+                    sub_block_counts_8x8_scan(&levels, field),
+                    sub_block_counts_8x8_in(&levels, scan),
+                    "trial {trial} field {field}"
+                );
+            }
+        }
+    }
 
     /// One I_16x16 macroblock with nothing coded, written by hand —
     /// `intra_chroma_pred_mode`, `mb_qp_delta`, then the DC coeff_token for
