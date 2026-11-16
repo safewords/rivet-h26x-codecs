@@ -122,6 +122,8 @@ pub(crate) struct Tune {
     pub inter_tu_split_max: u32,
     /// `h265_me::InterPicture::bi_refine`.
     pub bi_refine: u32,
+    /// `h265_me::InterPicture::bi_refine_gate`.
+    pub bi_refine_gate: f32,
     /// `h265_me::InterPicture::tu_split_nz`.
     pub tu_split_nz: usize,
     /// `h265_me::InterPicture::merge_tried`.
@@ -173,6 +175,7 @@ impl Tune {
         inter_tu_split: false,
         inter_tu_split_max: 5,
         bi_refine: 0,
+        bi_refine_gate: f32::INFINITY,
         tu_split_nz: 0,
         merge_tried: 5,
         split_gate: None,
@@ -274,6 +277,10 @@ impl Tune {
             Preset::Slow => Tune {
                 lambda: [0.7; 4],
                 bi_refine: 1,
+                // Refinement only where the unrefined pair comes within
+                // 1.1x of the better one-list shape: -2.30% -> -2.31%
+                // BD-rate at 0.95x the CPU (0.9: -2.03% at 0.90x).
+                bi_refine_gate: 1.1,
                 rdoq_nonref: true,
                 search_rings: 1,
                 intra_split_depth: 0,

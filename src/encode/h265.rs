@@ -1738,6 +1738,7 @@ impl<S: Sample> Core<S> {
         pic.tu_split = tune.inter_tu_split;
         pic.tu_split_max = tune.inter_tu_split_max;
         pic.bi_refine = tune.bi_refine;
+        pic.bi_refine_gate = tune.bi_refine_gate;
         pic.tu_split_nz = tune.tu_split_nz;
         pic.merge_tried = tune.merge_tried;
         pic.split_gate = tune.split_gate;

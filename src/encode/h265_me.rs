@@ -738,6 +738,9 @@ pub struct InterPicture<S: Sample> {
     /// AMVP pair gets ([`Self::refine_bi`]); 0 scores the pair of
     /// independently searched vectors only.
     pub bi_refine: u32,
+    /// Refinement is tried only where the unrefined pair costs less than
+    /// this multiple of the better one-list shape.
+    pub bi_refine_gate: f32,
     /// The transform split is tried only where the whole TU kept at least
     /// this many luma levels.
     pub tu_split_nz: usize,
@@ -907,6 +910,7 @@ impl<S: Sample> InterPicture<S> {
             seed_at: [[None; 16]; 4],
             spred_avg: vec![S::default(); 64 * 64],
             bi_refine: 0,
+            bi_refine_gate: f32::INFINITY,
             tu_split_nz: 0,
             merge_tried: MAX_MERGE_CAND,
             split_gate: None,
@@ -1744,7 +1748,7 @@ impl<S: Sample> InterPicture<S> {
             let default_wp = [0, 1, 2]
                 .iter()
                 .all(|&i| matches!(self.wp_b[i][0], Weighting::Default));
-            if self.bi_refine > 0 && default_wp {
+            if self.bi_refine > 0 && default_wp && cost < self.bi_refine_gate * best_cost {
                 // The list whose own search did worse is re-searched first,
                 // against the better one's prediction.
                 let first = usize::from(uni[0].1 < uni[1].1);
